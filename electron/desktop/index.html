@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+    <title>风月联机工具</title>
+    <link rel="icon" type="image/png" href="assets/cat-pumpkin-logo.png">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="login.css">
+    <link rel="stylesheet" href="layout-fixes.css">
+    <link rel="stylesheet" href="logs.css">
+    <link rel="stylesheet" href="game-frame.css">
+    <link rel="stylesheet" href="theme.css">
+  </head>
+  <body>
+    <section id="home-page" class="landing-page">
+      <div class="landing-card hidden" id="home-actions-panel">
+        <header class="landing-header"><img class="landing-logo" src="assets/cat-pumpkin-logo.png" alt=""><h1 data-product-name>风月联机工具</h1></header>
+        <div class="landing-actions" aria-label="功能入口">
+          <button class="feature-card primary" id="enter-multiplayer"><b>联机</b><small>创建或加入多人房间</small></button>
+          <button class="feature-card" id="edit-profiles"><b>编辑个人设定</b><small>管理联机角色资料</small></button>
+          <div class="feature-card feature-placeholder" aria-hidden="true"><b>更多功能</b><small>后续更新</small></div>
+        </div>
+      </div>
+      <div id="login-panel" class="login-panel">
+        <form class="login-card" id="login-form">
+          <header class="login-brand"><img src="assets/cat-pumpkin-logo.png" alt="猫耳南瓜标志"><span><small data-product-name>风月联机工具</small><h1>登录风月账号</h1></span></header>
+          <section class="domain-picker">
+            <div class="domain-picker-head"><b>登录域名</b><button id="refresh-domains" type="button">重新检测</button></div>
+            <div id="domain-list" class="domain-list"><span>正在读取并检测域名…</span></div>
+            <small id="domain-selection-note">尚未选择节点</small>
+          </section>
+          <label>账号<input id="login-account" autocomplete="username" placeholder="邮箱或用户名" required></label>
+          <label>密码<input id="login-password" type="password" autocomplete="current-password" placeholder="账号密码" required></label>
+          <label class="checkbox-row"><input id="remember-password" type="checkbox"><span>记住密码</span></label>
+          <div class="split"><button class="primary" id="submit-login" type="submit">登录</button><button id="clear-credentials" type="button">清除已保存账号</button></div>
+          <div class="oauth-divider"><span>或使用第三方账号</span></div>
+          <div class="split"><button id="google-login" type="button">Google 登录</button><button id="telegram-login" type="button">Telegram 登录</button></div>
+        </form>
+      </div>
+    </section>
+    <section id="profiles-page" class="profiles-page hidden">
+      <div class="profiles-card">
+        <header><span><b>编辑个人设定</b><small>设定保存在本机，可创建多个角色并在联机前切换。</small></span><button id="profiles-back">返回主页</button></header>
+        <label>角色设定<select id="profiles-list"></select></label>
+        <label>设定名称<input id="profile-editor-label" placeholder="例如：侦探角色"></label>
+        <label>游戏内姓名<input id="profile-editor-name" placeholder="联机中显示的姓名"></label>
+        <div class="profile-setting-grid">
+          <label>基础设定<textarea id="profile-editor-basic-info" placeholder="身份、经历、性格、能力、习惯、关系等；开局时同步给房主"></textarea></label>
+          <label>外观设定<textarea id="profile-editor-appearance" placeholder="发型、五官、体型、服装、配饰、显著特征等；开局时同步给房主"></textarea></label>
+        </div>
+        <div class="profile-editor-actions"><button id="profile-new">新建角色</button><button id="profile-delete">删除角色</button><button class="primary" id="profile-save">保存并设为当前</button></div>
+        <div class="notice">当前选中的设定会自动用于创建或加入房间；房间开启后不能切换。</div>
+      </div>
+    </section>
+    <div class="app-shell hidden" id="multiplayer-page">
+      <aside class="sidebar">
+        <header class="brand"><img class="logo" src="assets/cat-pumpkin-logo.png" alt=""><span><b>风月联机</b><small id="profile-label">账号实例</small></span></header>
+        <nav><button class="active" data-tab="room">房间</button><button data-tab="plugins">插件</button><button data-tab="chat">聊天</button><button data-tab="work">作品</button><button class="hidden" data-admin-only data-tab="logs">日志</button><button class="hidden" data-admin-only data-tab="settings">实例</button></nav>
+        <section class="panel active" data-panel="room">
+          <div class="account-card"><span class="status-dot" id="status-dot"></span><span><b id="account-status">正在检查账号</b></span></div>
+          <div class="platform-metrics"><span class="wide"><small>平台用户名</small><b id="platform-username">—</b></span><span><small>当前积分</small><b id="platform-points">—</b></span><span><small>账号等级</small><b id="platform-level">—</b></span></div>
+          <div id="level-warning" class="level-warning hidden"></div>
+          <button id="choose-work">选择作品</button>
+          <div class="work-card"><small>当前作品</small><b id="work-title">尚未选择</b><code id="work-suffix">—</code></div>
+          <div id="message-tools" class="conversation-card hidden">
+            <small>最近一轮记录</small>
+            <div class="triple"><button id="refresh-latest">刷新</button><button id="edit-latest">编辑</button><button class="danger" id="delete-latest">删除</button></div>
+            <div id="message-edit-form" class="message-edit-form hidden">
+              <label>编辑后的模型回复<textarea id="message-edit-value" placeholder="输入新的回复内容"></textarea></label>
+              <div class="split"><button id="cancel-message-edit">取消</button><button id="confirm-message-edit" class="primary">保存并同步</button></div>
+            </div>
+            <span id="message-tool-note">仅房主可操作；访客会重试写入相同结果，刷新不会在访客端再次消耗积分。</span>
+          </div>
+          <div class="conversation-card"><small>房间成员</small><div id="member-list" class="member-list"><div class="empty-small">成员将在认证后显示在这里</div></div></div>
+          <hr>
+          <label>平台用户名<input id="platform-name" placeholder="登录后自动获取" readonly></label>
+          <label>当前角色设定<select id="active-character-profile"></select></label>
+          <label>游戏内姓名<input id="display-name" placeholder="请先在个人设定中填写" readonly></label>
+          <label>基础设定<textarea id="profile-basic-info" placeholder="请先在个人设定中填写" readonly></textarea></label>
+          <label>外观设定<textarea id="profile-appearance" placeholder="请先在个人设定中填写" readonly></textarea></label>
+          <div class="split"><button class="primary" id="create-room">创建房间</button><button id="join-room">加入房间</button></div>
+          <div id="room-setup" class="room-setup hidden">
+            <b>创建联机房间</b>
+            <small>设置房间密码并生成邀请链接。</small>
+            <label>房间密码<input id="room-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="至少 8 个字符"></label>
+            <div class="split"><button class="primary" id="confirm-create-room">创建并生成链接</button><button id="cancel-create-room">取消</button></div>
+          </div>
+          <div id="join-setup" class="room-setup hidden">
+            <b>加入联机房间</b>
+            <label>填写房主的邀请链接<input id="join-invite-url" type="text" placeholder="/zh/explore/installed/..."></label>
+            <label>房间密码<input id="join-room-password" type="password" autocomplete="current-password" maxlength="128" placeholder="房主设置的房间密码"></label>
+            <div class="split"><button class="primary" id="confirm-join-room">加入房间</button><button id="cancel-join-room">取消</button></div>
+          </div>
+          <div id="room-status-card" class="room-status-card hidden">
+            <small id="room-status-label">等待玩家加入</small><b id="room-id">—</b><span id="room-summary">—</span>
+            <div id="invite-link-panel" class="invite-link-panel hidden">
+              <label>您的邀请链接<input id="room-invite-url" readonly></label>
+              <button class="primary" id="copy-invite-link">复制邀请链接</button>
+            </div>
+            <button id="leave-room">退出当前房间</button>
+          </div>
+        </section>
+        <section class="panel" data-panel="work">
+          <div id="conversation-card" class="conversation-card hidden">
+            <small>会话列表</small>
+            <b id="conversation-name">尚未读取</b>
+            <label aria-label="选择会话"><select id="conversation-list" aria-label="选择会话"><option value="">尚未读取会话列表</option></select></label>
+            <div class="split"><button id="refresh-conversations">刷新会话</button><button class="primary" id="new-conversation">新建会话</button></div>
+            <div class="split"><button id="rename-conversation">重命名会话</button><button id="delete-conversation" class="danger">删除会话</button></div>
+            <form id="conversation-rename-form" class="hidden">
+              <label>会话名称<input id="conversation-rename-value" required autocomplete="off"></label>
+              <div class="split"><button id="cancel-conversation-rename" type="button">取消</button><button id="save-conversation-rename" type="submit" class="primary">保存名称</button></div>
+            </form>
+            <span id="conversation-note"></span>
+          </div>
+          <div id="model-card" class="conversation-card model-card hidden">
+            <div class="model-card-title"><small>模型列表</small><b id="model-name">尚未读取</b></div>
+            <div id="model-family-tabs" class="model-family-tabs" role="tablist" aria-label="模型系列"></div>
+            <div id="model-options" class="model-options" role="listbox" aria-label="选择模型"></div>
+            <span id="model-note">正在读取模型…</span>
+          </div>
+          <section id="work-settings-card" class="conversation-card">
+            <div class="model-card-title"><b>作品设置</b><button id="refresh-work-settings">刷新</button></div>
+            <label>记忆设定 · 发送的历史消息数量<input id="work-memory-count" type="number" min="0" step="1" value="6"></label>
+            <button id="save-work-memory" class="primary">保存记忆设定</button>
+            <details id="work-global-details">
+              <summary>全局配置 · <span id="work-global-count">尚未读取</span></summary>
+              <div class="plugin-card-body">
+                <label>主提示词<textarea id="work-global-prompt"></textarea></label>
+                <label>前置词<textarea id="work-global-prefix"></textarea></label>
+                <label>后置词<textarea id="work-global-postfix"></textarea></label>
+                <details><summary>其他配置字段</summary><label>JSON 配置<textarea id="work-global-extra" spellcheck="false"></textarea></label></details>
+                <button id="save-work-global" class="primary">保存全局配置</button>
+              </div>
+            </details>
+            <small id="work-settings-note">选择作品后读取平台配置；房主可修改，访客只读。</small>
+          </section>
+        </section>
+        <section class="panel plugin-panel" data-panel="plugins">
+          <small class="plugin-compatibility-note">插件不一定适合所有作品，请根据具体情况进行尝试或使用</small>
+          <header class="plugin-panel-head"><span><b>联机插件</b><small>由房主统一执行并同步结果</small></span><em id="plugin-stack-status">处理栈空闲</em></header>
+          <section class="plugin-group">
+            <div class="plugin-group-title"><span><b>对话信息处理</b><small>按顺序阻塞输入或输出流程</small></span></div>
+            <details class="plugin-card plugin-disclosure" id="effect-judge-card">
+              <summary class="plugin-summary"><span class="plugin-summary-main"><label class="plugin-summary-toggle" title="启用或停用效果判定"><input id="effect-judge-enabled" type="checkbox" aria-label="启用效果判定"></label><span><small>输入处理栈</small><b>效果判定</b></span></span><span class="plugin-summary-tail"><em id="effect-judge-summary-state">未启用</em><i aria-hidden="true"></i></span></summary>
+              <div class="plugin-card-body">
+                <p>结合最近的模型输出，为每位玩家的本轮输入生成不同程度的结果并独立投骰；只把命中的结果发送给正式作品。</p>
+                <div class="plugin-number-grid">
+                  <label>读取前 n 条输出<input id="effect-judge-context" type="number" min="1" max="20" value="3"></label>
+                  <label>程度数量 x（4～y-2）<input id="effect-judge-degrees" type="number" min="4" max="8" value="4"></label>
+                  <label>骰子面值 y（6～20）<input id="effect-judge-faces" type="number" min="6" max="20" value="10"></label>
+                </div>
+                <label>风格预设<select id="effect-judge-style-preset"><option value="regular">常规</option><option value="obscene">淫秽</option><option value="radical">激进</option></select></label>
+                <label>自定义风格提示词<textarea id="effect-judge-style" maxlength="1200" placeholder="可留空；会与所选预设共同影响全部程度结果。"></textarea></label>
+                <button class="primary" id="save-effect-judge">保存插件设置</button>
+                <small class="plugin-cost-warning">每轮会额外调用一次平台作品，需要消耗一定积分；结果卡片显示在本轮用户输入与模型输出之间。</small>
+                <div class="empty-small">输入处理栈的结果会按执行顺序插入对话，不在插件设置页重复显示。</div>
+              </div>
+            </details>
+            <details class="plugin-card plugin-disclosure" id="perspective-split-card">
+              <summary class="plugin-summary"><span class="plugin-summary-main"><label class="plugin-summary-toggle" title="启用或停用独立视角"><input id="perspective-split-enabled" type="checkbox" aria-label="启用独立视角"></label><span><small>输出处理栈</small><b>独立视角</b></span></span><span class="plugin-summary-tail"><em id="perspective-split-summary-state">未启用</em><i aria-hidden="true"></i></span></summary>
+              <div class="plugin-card-body">
+                <p>每位玩家只收到自己的正文、个人状态和公共信息，保留作品原有格式。</p>
+                <label>每名玩家独立正文目标字数<input id="perspective-split-words" type="number" min="100" max="10000" step="100" value="800"></label>
+                <button id="save-perspective-split" class="primary">保存字数设置</button>
+                <small class="plugin-cost-warning">整理失败或超时会重新加载后台整理作品页，新建会话并更换模型后重发；优先使用可用的 Gemini Flash、DeepSeek V4 Flash，每轮最多尝试 3 次，每次可能消耗积分。请先配置视角整理作品的提示词。</small>
+                <small>停用时只移除本插件的“两段正文”前置词。3 次均失败时返回失败提示，不使用原文。</small>
+                <small>空白会话首次启用时，会先建立平台会话并立即终止初始化输出；平台可能产生少量计费。</small>
+                <small id="perspective-split-last-run"></small>
+              </div>
+            </details>
+          </section>
+          <section class="plugin-group">
+            <div class="plugin-group-title"><span><b>其他信息处理</b><small>读取作品或会话中的其他信息并执行独立任务</small></span></div>
+            <details id="prefix-adapter-card" class="conversation-card plugin-disclosure">
+              <summary class="plugin-summary"><span><small>其他信息处理</small><b>联机前置词适配</b></span><span class="plugin-summary-tail"><em id="prefix-adapter-summary-state">等待选择作品</em><i aria-hidden="true"></i></span></summary>
+              <div class="plugin-card-body">
+                <b id="prefix-adapter-status">请先选择作品</b>
+                <button class="primary" id="adapt-work-prefix" disabled>请先选择作品</button>
+                <span id="prefix-adapter-note">选择作品后可读取已有会话并生成专属联机前置词。此操作需要消耗积分。</span>
+              </div>
+            </details>
+          </section>
+        </section>
+        <section class="panel room-chat-panel" data-panel="chat">
+          <div class="room-chat-head"><span><b>房间聊天</b><small id="room-chat-count">0 条</small></span></div>
+          <div id="room-chat-messages" class="room-chat-messages"><div class="empty-small">创建或加入房间后即可聊天</div></div>
+          <small id="room-chat-status" class="room-chat-status">尚未加入房间</small>
+          <form id="room-chat-form" class="room-chat-compose">
+            <textarea id="room-chat-input" maxlength="1000" placeholder="输入房间聊天；Enter 发送，Shift+Enter 换行"></textarea>
+            <button id="send-room-chat" class="primary" type="submit">发送</button>
+          </form>
+        </section>
+
+        <section class="panel log-panel hidden" data-admin-only data-panel="logs">
+          <div class="log-head"><span><b>本次运行日志</b><small id="log-count">0 条</small></span><button id="copy-logs">复制全部</button></div>
+          <div class="notice">记录房主与访客收发的协议原文、解码内容、分片进度和平台同步阶段。关闭本软件实例时会自动删除。</div>
+          <pre id="session-log">暂时没有联机日志</pre>
+        </section>
+        <section class="panel hidden" data-admin-only data-panel="settings">
+          <div class="notice">每个实例使用独立 Cookie、缓存和本地存储，可以同时登录不同风月账号。</div>
+          <label>新实例名称<input id="new-profile" placeholder="例如 host / player2"></label>
+          <button class="primary" id="new-instance">打开独立账号实例</button>
+        </section>
+      </aside>
+      <main>
+        <header class="topbar">
+          <button id="back-home" class="topbar-home" title="返回主页">返回主页</button>
+          <div class="surface-switcher topbar-surface-switcher"><button class="surface-button" id="show-intro"><b>作品介绍</b></button><button class="surface-button" id="show-game"><b>对话界面</b></button></div>
+          <div class="topbar-stage-copy"><b id="stage-title">准备中</b><small id="stage-subtitle"></small></div>
+        </header>
+        <section id="surface-slot">
+          <canvas id="game-frame" class="game-frame hidden" aria-label="作品对话实时画面"></canvas>
+          <div class="stage-placeholder"><img class="orb" src="assets/cat-pumpkin-logo.png" alt=""><h1 id="placeholder-title">正在启动账号后端</h1><p id="placeholder-copy">登录、私信和作品页面由隔离浏览器会话在后台处理。</p></div>
+        </section>
+        <footer><textarea id="round-input" placeholder="请输入文本；需房间成员全体点击确认。"></textarea><div class="round-submit-area"><button class="primary" id="submit-round">确认本轮输入</button><small id="round-flow-status" class="round-flow-status hidden" role="status" aria-live="polite"></small></div></footer>
+      </main>
+    </div>
+    <div id="work-selector-tip" class="work-selector-tip hidden" role="status" aria-live="polite"><b>请选择想要游玩的作品</b></div>
+    <div id="member-tip-stack" aria-live="polite"></div>
+    <button id="settings-toggle" class="settings-toggle" type="button" aria-label="打开设置" aria-expanded="false" aria-controls="settings-popover">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.5-2.5 1a8 8 0 0 0-1.7-1L15 3.3h-4L10.6 6a8 8 0 0 0-1.7 1l-2.5-1-2 3.5 2 1.5a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.5 2.5-1a8 8 0 0 0 1.7 1l.4 2.7h4l.4-2.7a8 8 0 0 0 1.7-1l2.5 1 2-3.5-2.2-1.5ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
+      <span class="visually-hidden">设置</span>
+    </button>
+    <section id="settings-popover" class="settings-popover hidden" aria-label="应用设置">
+      <header><span><b>应用设置</b><small>外观、账号与作者信息</small></span><button id="settings-close" type="button">关闭</button></header>
+      <div class="settings-group">
+        <small>外观模式</small>
+        <div class="theme-choice-group" role="group" aria-label="选择外观模式">
+          <button type="button" data-theme-choice="light" aria-pressed="false">白昼模式</button>
+          <button type="button" data-theme-choice="dark" aria-pressed="false">夜间模式</button>
+        </div>
+      </div>
+      <div class="settings-group settings-account-group">
+        <small>当前账号</small>
+        <b id="settings-account">未登录</b>
+        <span id="settings-current-node">尚未选择节点</span>
+        <button id="settings-logout" class="danger" type="button">登出当前账号</button>
+      </div>
+      <div class="settings-group author-info-group">
+        <div class="author-info-head">
+          <span class="author-info-avatar"><img src="assets/cat-pumpkin-logo.png" alt=""></span>
+          <span><small>关于作者</small><b id="author-name">八爪毛米</b></span>
+        </div>
+        <div id="author-link-grid" class="author-link-grid">
+          <button type="button" data-author-link="homepage" disabled><span>作者主页</span><small>链接待补充</small></button>
+          <button type="button" data-author-link="releasePost" disabled><span>风月发布帖</span><small>链接待补充</small></button>
+          <button type="button" data-author-link="feedbackPost" disabled><span>问题反馈帖</span><small>链接待补充</small></button>
+          <button type="button" data-author-link="github" disabled><span>GitHub 项目页</span><small>正在读取</small></button>
+        </div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-head"><span><small>切换节点</small><b>可用节点</b></span><button id="settings-refresh-domains" type="button">重新检测</button></div>
+        <p>切换节点会退出当前账号，并使用所选节点重新登录。</p>
+        <div id="settings-domain-list" class="domain-list settings-domain-list"><span>正在读取并检测节点…</span></div>
+      </div>
+    </section>
+    <section id="official-notice-overlay" class="official-notice-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="official-notice-title" aria-describedby="official-notice-message">
+      <div id="official-notice-card" class="official-notice-card" data-mode="announcement">
+        <div class="official-notice-aura" aria-hidden="true"></div>
+        <header class="official-notice-brand">
+          <span class="official-notice-logo"><img src="assets/cat-pumpkin-logo.png" alt=""></span>
+          <span><small id="official-notice-eyebrow">唯一官方版本</small><b>风月联机工具</b></span>
+          <em id="official-notice-version">官方发布</em>
+        </header>
+        <div class="official-notice-copy">
+          <h2 id="official-notice-title">本工具始终完全免费</h2>
+          <p id="official-notice-message">请勿购买，也不要向第三方提供账号信息。安装后首次启动会在后台自动核对官方版本与程序完整性。</p>
+        </div>
+        <div class="official-notice-source">
+          <span aria-hidden="true">✓</span>
+          <span><small>唯一官方版本发布页</small><b>github.com/pumpcatkin/fengyue-link/releases/latest</b></span>
+        </div>
+        <div id="official-notice-points" class="official-notice-points" aria-label="安全提示">
+          <span>永久免费</span><span>仅认官方发布页</span><span>首次启动后台验证</span>
+        </div>
+        <footer class="official-notice-actions">
+          <button id="official-notice-open" type="button">查看官方发布页</button>
+          <button id="official-notice-action" class="primary" type="button">进入工具</button>
+        </footer>
+      </div>
+    </section>
+    <div id="app-version" aria-label="当前版本">v0.12.9</div>
+    <div id="toast"></div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

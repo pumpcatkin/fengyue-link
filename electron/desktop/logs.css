@@ -1,0 +1,12 @@
+nav{grid-template-columns:repeat(auto-fit,minmax(52px,1fr))}
+.log-panel{grid-template-rows:auto auto minmax(0,1fr);height:100%;overflow:hidden}
+.log-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.log-head b,.log-head small{display:block}
+.log-head small{margin-top:3px;color:var(--muted);font-size:10px}
+#session-log{min-height:220px;height:100%;margin:0;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#090e14;padding:10px;color:#b9c8da;font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
+.room-chat-panel{grid-template-rows:auto minmax(0,1fr) auto auto;height:100%;overflow:hidden!important}
+.room-chat-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.room-chat-head b,.room-chat-head small{display:block}.room-chat-head small{margin-top:3px;color:var(--muted);font-size:9px}.room-chat-head>small{text-align:right}
+.room-chat-messages{display:flex;min-height:180px;flex-direction:column;gap:8px;overflow-y:auto;border:1px solid var(--line);border-radius:12px;background:#0a1018;padding:10px;overscroll-behavior:contain;scrollbar-width:thin}
+.room-chat-message{display:grid;max-width:92%;gap:3px;align-self:flex-start;border:1px solid #2c394c;border-radius:11px 11px 11px 3px;background:#121b27;padding:8px 9px}.room-chat-message.own{align-self:flex-end;border-color:#75deb455;border-radius:11px 11px 3px 11px;background:#75deb411}.room-chat-message.pending{border-style:dashed}.room-chat-message.pending p{opacity:.82}.room-chat-message.failed{border-color:#fb718566}.room-chat-message header{display:flex;align-items:center;justify-content:space-between;gap:10px}.room-chat-message b{overflow:hidden;color:var(--blue);font-size:10px;text-overflow:ellipsis;white-space:nowrap}.room-chat-message.own b{color:var(--mint)}.room-chat-message time{flex:none;color:#68768a;font-size:8px}.room-chat-message.failed time{color:#fda4af}.room-chat-message p{margin:0;color:#e1e9f2;font-size:11px;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap}
+.room-chat-status{min-height:15px;color:var(--muted);font-size:9px;line-height:1.45}.room-chat-status.error{color:#fda4af}
+.room-chat-compose{display:grid;grid-template-columns:minmax(0,1fr) 66px;gap:7px}.room-chat-compose textarea{min-height:58px;max-height:110px;resize:vertical}.room-chat-compose button{align-self:stretch}

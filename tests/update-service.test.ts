@@ -1,0 +1,103 @@
+import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const require = createRequire(import.meta.url);
+const { OfficialUpdateService } = require("../electron/update-service.cjs");
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  while (temporaryDirectories.length) rmSync(temporaryDirectories.pop()!, { recursive: true, force: true });
+});
+
+function updater() {
+  const value: any = new EventEmitter();
+  value.checkForUpdates = vi.fn(async () => null);
+  value.quitAndInstall = vi.fn();
+  return value;
+}
+
+function updateFixture(canInstallNow = () => true) {
+  const directory = mkdtempSync(path.join(tmpdir(), "fengyue-update-"));
+  temporaryDirectories.push(directory);
+  const file = path.join(directory, "fengyue-link-0.12.7-setup.exe");
+  const bytes = Buffer.from("signed installer fixture", "utf8");
+  writeFileSync(file, bytes);
+  const update = {
+    version: "0.12.7",
+    tag: "v0.12.7",
+    releasePage: "https://github.com/pumpcatkin/fengyue-link/releases/tag/v0.12.7",
+    installer: {
+      name: path.basename(file),
+      size: bytes.length,
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex")
+    }
+  };
+  const fakeUpdater = updater();
+  const releaseSecurity = { fetchSignedUpdate: vi.fn(async () => update) };
+  const service = new OfficialUpdateService({
+    updater: fakeUpdater,
+    releaseSecurity,
+    isPackaged: true,
+    currentVersion: "0.12.6",
+    canInstallNow,
+    installDelayMs: 0
+  });
+  return { service, fakeUpdater, releaseSecurity, file, update };
+}
+
+describe("official installer auto-update", () => {
+  it("checks GitHub updates only for a packaged application", async () => {
+    const fakeUpdater = updater();
+    const service = new OfficialUpdateService({
+      updater: fakeUpdater,
+      releaseSecurity: {},
+      isPackaged: false,
+      currentVersion: "0.12.6"
+    });
+    await service.start();
+    expect(fakeUpdater.checkForUpdates).not.toHaveBeenCalled();
+    expect(service.state().status).toBe("development");
+  });
+
+  it("enables automatic download while withholding exit-time installation until verification", async () => {
+    const { service, fakeUpdater } = updateFixture();
+    await service.start();
+    expect(fakeUpdater.autoDownload).toBe(true);
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(fakeUpdater.allowPrerelease).toBe(false);
+    expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+  });
+
+  it("verifies the signed installer hash before silently installing and restarting", async () => {
+    const { service, fakeUpdater, releaseSecurity, file } = updateFixture();
+    await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(releaseSecurity.fetchSignedUpdate).toHaveBeenCalledWith("0.12.7");
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(true);
+    expect(fakeUpdater.quitAndInstall).toHaveBeenCalledWith(true, true);
+  });
+
+  it("rejects a modified installer and never schedules it for installation", async () => {
+    const { service, fakeUpdater, file } = updateFixture();
+    writeFileSync(file, "tampered installer", "utf8");
+    await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(service.state().status).toBe("error");
+    expect(service.state().message).toContain("完整性验证");
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("defers an authenticated update while a room or account session is active", async () => {
+    const { service, fakeUpdater, file } = updateFixture(() => false);
+    await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
+    expect(service.state()).toMatchObject({ status: "ready", installDeferred: true });
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(true);
+    expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+});

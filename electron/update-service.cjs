@@ -1,0 +1,194 @@
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  OFFICIAL_RELEASE_PAGE,
+  ReleaseSecurityError,
+  compareVersions,
+  parseVersion,
+  sha256FileAsync
+} = require("./release-security.cjs");
+
+class OfficialUpdateService {
+  constructor(options) {
+    this.updater = options.updater;
+    this.releaseSecurity = options.releaseSecurity;
+    this.isPackaged = Boolean(options.isPackaged);
+    this.currentVersion = String(options.currentVersion || "");
+    this.canInstallNow = typeof options.canInstallNow === "function" ? options.canInstallNow : () => true;
+    this.onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : () => {};
+    this.installDelayMs = Math.max(0, Number(options.installDelayMs ?? 800));
+    this.started = false;
+    this.installing = false;
+    this.installTimer = null;
+    this.downloadedFile = null;
+    this.updateState = this.makeState(this.isPackaged ? "idle" : "development", this.isPackaged
+      ? "启动后会自动检查官方更新"
+      : "开发模式不运行安装包更新");
+    this.listeners = {
+      checking: () => this.setState("checking", "正在检查官方更新…"),
+      available: info => this.onUpdateAvailable(info),
+      unavailable: info => this.onUpdateUnavailable(info),
+      progress: progress => this.onDownloadProgress(progress),
+      downloaded: info => { void this.verifyAndInstall(info); },
+      error: error => this.onError(error)
+    };
+  }
+
+  makeState(status, message, extra = {}) {
+    return {
+      status,
+      message: String(message || ""),
+      currentVersion: this.currentVersion,
+      latestVersion: null,
+      percent: null,
+      officialReleasePage: OFFICIAL_RELEASE_PAGE,
+      ...extra
+    };
+  }
+
+  state() {
+    return { ...this.updateState };
+  }
+
+  setState(status, message, extra = {}) {
+    this.updateState = this.makeState(status, message, extra);
+    this.onStateChange(this.state());
+    return this.state();
+  }
+
+  bind() {
+    this.updater.on("checking-for-update", this.listeners.checking);
+    this.updater.on("update-available", this.listeners.available);
+    this.updater.on("update-not-available", this.listeners.unavailable);
+    this.updater.on("download-progress", this.listeners.progress);
+    this.updater.on("update-downloaded", this.listeners.downloaded);
+    this.updater.on("error", this.listeners.error);
+  }
+
+  async start() {
+    if (!this.isPackaged || this.started) return this.state();
+    this.started = true;
+    this.updater.autoDownload = true;
+    this.updater.autoInstallOnAppQuit = false;
+    this.updater.allowPrerelease = false;
+    this.bind();
+    this.setState("checking", "正在检查官方更新…");
+    try {
+      await this.updater.checkForUpdates();
+    } catch (error) {
+      this.onError(error);
+    }
+    return this.state();
+  }
+
+  onUpdateAvailable(info) {
+    const version = parseVersion(info?.version)?.raw || null;
+    this.setState("downloading", version ? `正在自动下载 v${version}…` : "正在自动下载官方更新…", {
+      latestVersion: version,
+      percent: 0
+    });
+  }
+
+  onUpdateUnavailable(info) {
+    if (this.installing || this.downloadedFile) return;
+    const version = parseVersion(info?.version)?.raw || this.currentVersion;
+    this.setState("current", "当前已是最新官方版本", { latestVersion: version });
+  }
+
+  onDownloadProgress(progress) {
+    const percent = Math.min(100, Math.max(0, Number(progress?.percent || 0)));
+    const version = this.updateState.latestVersion;
+    this.setState("downloading", `正在自动下载${version ? ` v${version}` : "官方更新"}（${percent.toFixed(0)}%）…`, {
+      latestVersion: version,
+      percent,
+      transferred: Number(progress?.transferred || 0),
+      total: Number(progress?.total || 0)
+    });
+  }
+
+  onError(error) {
+    if (this.installing) return;
+    const detail = String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 300);
+    this.setState("error", `自动更新失败：${detail}。请从唯一官方发布页手动下载安装。`, {
+      latestVersion: this.updateState.latestVersion,
+      error: detail
+    });
+  }
+
+  async verifyAndInstall(info) {
+    if (this.installing) return;
+    try {
+      const version = parseVersion(info?.version)?.raw;
+      if (!version || compareVersions(version, this.currentVersion) <= 0) {
+        throw new ReleaseSecurityError("update-version-mismatch", "下载的更新版本号无效");
+      }
+      const signedUpdate = await this.releaseSecurity.fetchSignedUpdate(version);
+      const installerPath = path.resolve(String(info?.downloadedFile || ""));
+      if (!installerPath || !fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) {
+        throw new ReleaseSecurityError("missing-update-installer", "自动更新缓存中缺少安装包");
+      }
+      if (path.basename(installerPath).toLocaleLowerCase("en-US") !== signedUpdate.installer.name.toLocaleLowerCase("en-US")) {
+        throw new ReleaseSecurityError("update-installer-name-mismatch", "下载的安装包名称与官方签名清单不一致");
+      }
+      this.setState("verifying", `正在验证 v${version} 安装包的官方签名与完整性…`, {
+        latestVersion: version,
+        percent: 100
+      });
+      const stat = fs.statSync(installerPath);
+      const digest = await sha256FileAsync(installerPath);
+      if (stat.size !== signedUpdate.installer.size || digest !== signedUpdate.installer.sha256) {
+        throw new ReleaseSecurityError("update-installer-mismatch", "下载的安装包未通过官方签名清单完整性验证");
+      }
+      this.downloadedFile = installerPath;
+      this.updater.autoInstallOnAppQuit = true;
+      if (!this.canInstallNow()) {
+        this.setState("ready", `v${version} 已验证，将在退出当前账号或关闭工具后自动安装`, {
+          latestVersion: version,
+          percent: 100,
+          installDeferred: true
+        });
+        return;
+      }
+      this.scheduleInstall(version);
+    } catch (error) {
+      this.downloadedFile = null;
+      this.updater.autoInstallOnAppQuit = false;
+      this.onError(error);
+    }
+  }
+
+  scheduleInstall(version) {
+    if (this.installing || this.installTimer) return;
+    this.setState("installing", `v${version} 已验证，正在自动安装并重启…`, {
+      latestVersion: version,
+      percent: 100
+    });
+    this.installTimer = setTimeout(() => {
+      this.installTimer = null;
+      if (!this.canInstallNow()) {
+        this.setState("ready", `v${version} 已验证，将在关闭工具后自动安装`, {
+          latestVersion: version,
+          percent: 100,
+          installDeferred: true
+        });
+        return;
+      }
+      this.installing = true;
+      this.updater.quitAndInstall(true, true);
+    }, this.installDelayMs);
+  }
+
+  shutdown() {
+    if (this.installTimer) clearTimeout(this.installTimer);
+    this.installTimer = null;
+    if (!this.started) return;
+    this.updater.removeListener("checking-for-update", this.listeners.checking);
+    this.updater.removeListener("update-available", this.listeners.available);
+    this.updater.removeListener("update-not-available", this.listeners.unavailable);
+    this.updater.removeListener("download-progress", this.listeners.progress);
+    this.updater.removeListener("update-downloaded", this.listeners.downloaded);
+    this.updater.removeListener("error", this.listeners.error);
+  }
+}
+
+module.exports = { OfficialUpdateService };

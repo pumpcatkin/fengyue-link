@@ -1,0 +1,80 @@
+{
+  "name": "fengyue-link",
+  "version": "0.12.9",
+  "description": "风月多人联机桌面工具",
+  "author": "八爪毛米",
+  "private": true,
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "verify:sandbox": "electron scripts/verify-sandbox.cjs",
+    "desktop": "npm run build && electron .",
+    "pack:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "pack:dir": "npm run build && electron-builder --win dir --x64",
+    "release:keygen": "node scripts/generate-release-signing-key.cjs",
+    "release:manifest": "node scripts/create-release-manifest.cjs",
+    "release:verify": "node scripts/verify-release-manifest.cjs",
+    "verify:release-gate": "node scripts/verify-release-gate.cjs",
+    "verify:release-live": "electron scripts/verify-live-release.cjs",
+    "pack:release": "npm run pack:win && npm run release:manifest"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "cc.aiero.fengyue.link",
+    "productName": "风月联机工具",
+    "electronVersion": "44.0.0",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/cat-pumpkin-logo.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "fengyue-link-${version}-setup.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "pumpcatkin",
+        "repo": "fengyue-link",
+        "releaseType": "release"
+      }
+    ],
+    "nsis": {
+      "guid": "63340c0b-8899-4ec0-9aa3-5a80da4ed183",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "风月联机工具",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "uninstallDisplayName": "风月联机工具"
+    }
+  }
+}

@@ -49,42 +49,39 @@ const gateOptions = {
     const onlineGate = new ReleaseSecurityGate({ ...gateOptions, net: onlineNet });
     const onlineState = await onlineGate.ensureVerified();
     assert.equal(onlineState.status, "verified");
-    assert.equal(onlineState.source, "first-run-github-signed-manifest");
+    assert.equal(onlineState.source, "startup-github-signed-manifest");
+    assert.equal(onlineState.verifiedFileCount, 2);
     assert.equal(onlineNet.requests, 2);
+    assert.equal(fs.existsSync(path.join(userDataPath, "release-security")), false);
 
-    const offlineGate = new ReleaseSecurityGate({
+    const repeatedOnlineGate = new ReleaseSecurityGate({
       ...gateOptions,
-      net: { fetch: async () => { throw new Error("完成记录存在时不应再次访问网络"); } }
+      net: onlineNet
     });
-    const cachedState = await offlineGate.initialize();
-    assert.equal(cachedState.status, "verified");
-    assert.equal(cachedState.source, "first-run-record");
+    const repeatedState = await repeatedOnlineGate.initialize();
+    assert.equal(repeatedState.status, "verified");
+    assert.equal(repeatedState.source, "startup-github-signed-manifest");
+    assert.equal(onlineNet.requests, 4);
 
     fs.appendFileSync(path.join(resourcesPath, "app.asar"), Buffer.from([0]));
-    const recordedGate = new ReleaseSecurityGate({
+    const tamperedGate = new ReleaseSecurityGate({
       ...gateOptions,
-      net: { fetch: async () => { throw new Error("后续启动不得重新联网"); } }
+      net: onlineNet
     });
-    const recordedState = await recordedGate.initialize();
-    assert.equal(recordedState.status, "verified");
-    assert.equal(recordedState.source, "first-run-record");
-
-    const tamperUserDataPath = path.join(temporaryRoot, "tamper-first-run-user-data");
-    const tamperedGate = new ReleaseSecurityGate({ ...gateOptions, userDataPath: tamperUserDataPath, net: onlineNet });
     const tamperedState = await tamperedGate.initialize();
     assert.equal(tamperedState.status, "blocked");
     assert.equal(tamperedState.errorCode, "artifact-mismatch");
+    assert.equal(onlineNet.requests, 6);
 
-    const repeatedTamperedGate = new ReleaseSecurityGate({
-      ...gateOptions,
-      userDataPath: tamperUserDataPath,
-      net: { fetch: async () => { throw new Error("失败结果存在时不应再次访问网络"); } }
-    });
-    const repeatedTamperedState = await repeatedTamperedGate.initialize();
-    assert.equal(repeatedTamperedState.status, "blocked");
-    assert.equal(repeatedTamperedState.source, "first-run-record");
+    fs.copyFileSync(path.join(releaseRoot, "win-unpacked", "resources", "app.asar"), path.join(resourcesPath, "app.asar"));
+    fs.appendFileSync(executablePath, Buffer.from([0]));
+    const executableTamperedGate = new ReleaseSecurityGate({ ...gateOptions, net: onlineNet });
+    const executableTamperedState = await executableTamperedGate.initialize();
+    assert.equal(executableTamperedState.status, "blocked");
+    assert.equal(executableTamperedState.errorCode, "artifact-mismatch");
+    assert.equal(onlineNet.requests, 8);
 
-    process.stdout.write("安装版安全门端到端验证通过：首次启动自动验证、完成记录复用、首次篡改阻断且后续不重复联网。\n");
+    process.stdout.write("安装版安全门端到端验证通过：每次启动重新验签并校验 2 个关键文件，篡改 app.asar 或主 EXE 均会被阻断。\n");
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

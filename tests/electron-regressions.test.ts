@@ -172,14 +172,16 @@ describe("Electron platform API regressions", () => {
     expect(preload).toContain('listDomainCandidates: () => ipcRenderer.invoke("backend:list-domain-candidates")');
     expect(renderer).toContain("api.listDomainCandidates()");
     expect(renderer).toContain('item.online===false?"检测失败":"待检测"');
-    expect(renderer).toContain("void refreshDomains(false)");
+    expect(renderer).toContain("await refreshDomains(false)");
     expect(main).toContain("async prepareLoginPage()");
     expect(main).toContain("if (this.domainSelected) void this.prepareLoginPage()");
   });
 
   it("uses a lightweight bounded login route and protects each account profile from duplicate instances", () => {
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
-    const loginStart = main.indexOf("async login({ account, password, remember })");
+    const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
+    const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    const loginStart = main.indexOf("async login({ account, password, remember, autoLogin = false })");
     const loginEnd = main.indexOf("async startOAuth", loginStart);
     const login = main.slice(loginStart, loginEnd);
     expect(main).toContain("async readAccountSnapshot({ includeDetails = true, webContents = null } = {})");
@@ -190,6 +192,11 @@ describe("Electron platform API regressions", () => {
     expect(login).toContain("setTimeout(resolve, 200)");
     expect(login).toContain('event: "authenticated"');
     expect(login).not.toContain("await this.refreshAccount(true)");
+    expect(main).toContain("async loginWithFailover({ account, password, remember = true, autoLogin = true })");
+    expect(main).toContain("const candidates = orderLoginCandidates(directory?.domains)");
+    expect(main).toContain("const directory = await discoverDomainStatuses(false)");
+    expect(preload).toContain('autoLogin: credentials => ipcRenderer.invoke("backend:auto-login", credentials)');
+    expect(renderer).toContain('if(saved?.autoLogin&&!initial.loggedIn)await submitCredentials({automatic:true})');
     expect(main).toContain("function acquireProfileInstanceLock(profileId)");
     expect(main).toContain('fs.openSync(file, "wx", 0o600)');
     expect(main).toContain("账号实例“${profileId}”已经打开");
@@ -211,6 +218,22 @@ describe("Electron platform API regressions", () => {
     expect(html).not.toContain('id="refresh-models"');
     expect(html).not.toContain('id="apply-model"');
     expect(renderer).toContain('["loading-game","game","game-empty","guest-waiting","guest-syncing"]');
+  });
+
+  it("presents the revised home entries and highlights missing character setup", () => {
+    const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../electron/desktop/styles.css", import.meta.url), "utf8");
+    const theme = readFileSync(new URL("../electron/desktop/theme.css", import.meta.url), "utf8");
+    const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    expect(html).toContain('<b>联机同乐</b>');
+    expect(html).toContain('id="auto-login"');
+    expect(styles).toContain("font-size:34px;font-style:italic");
+    expect(styles).toContain("translateX(calc(-22px - .16em))");
+    expect(styles).toContain("font-size:12px;font-weight:700");
+    expect(theme).toContain(".feature-card.needs-attention");
+    expect(theme).toContain(".feature-card.primary > small");
+    expect(renderer).toContain('classList.toggle("needs-attention",needsSetup)');
+    expect(renderer).toContain('"首次联机前，请先完善角色资料"');
   });
 
   it("uses the Windows system proxy for every Electron session and leaves work selection unbounded", () => {
@@ -794,7 +817,7 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain("for (const window of BrowserWindow.getAllWindows())");
   });
 
-  it("runs one hidden first-launch verification and shows only branded result dialogs", () => {
+  it("revalidates the two token-relevant files on every hidden packaged startup and shows only branded result dialogs", () => {
     const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
@@ -816,7 +839,7 @@ describe("Electron platform API regressions", () => {
     expect(renderer).not.toContain("verifyOfficialRelease");
     expect(html).not.toContain('id="release-security-card"');
     expect(html).toContain('id="official-notice-overlay"');
-    expect(html).toContain("本工具始终完全免费");
+    expect(html).toContain("正在对照版本号");
     expect(html).toContain("github.com/pumpcatkin/fengyue-link/releases/latest");
     expect(html).not.toMatch(/公钥|指纹/);
     expect(html).toContain(`v${packageJson.version}`);
@@ -830,15 +853,25 @@ describe("Electron platform API regressions", () => {
     expect(releaseSecurity).toContain("const deadlineAt = Date.now() + this.networkTimeoutMs");
     expect(releaseSecurity).toContain('physicalFs = require("original-fs")');
     expect(releaseSecurity).toContain("physicalFs.createReadStream(file");
-    expect(releaseSecurity).toContain('`${safeVersion}.attempt.json`');
-    expect(releaseSecurity).toContain('source: "first-run-record"');
+    expect(releaseSecurity).toContain("const RUNTIME_INTEGRITY_FILE_COUNT = 2");
+    expect(releaseSecurity).toContain("initializeStartupVerification()");
+    expect(releaseSecurity).toContain('source: "startup-github-signed-manifest"');
+    expect(releaseSecurity).not.toContain("attempt.json");
     expect(releaseSecurity).not.toContain("refreshInBackground");
     expect(releaseSecurity).not.toContain("verifyCached");
     expect(releaseSecurity).not.toContain("keyFingerprint:");
     expect(main).toContain("executablePath: process.execPath");
     expect(releaseSecurity).not.toContain("PRIVATE KEY");
     expect(packageJson.scripts["release:manifest"]).toContain("create-release-manifest.cjs");
+    expect(packageJson.scripts["verify:electron-fuses"]).toContain("verify-electron-fuses.cjs");
     expect(packageJson.dependencies["electron-updater"]).toBe("^6.8.9");
+    expect(packageJson.build.electronFuses).toMatchObject({
+      enableEmbeddedAsarIntegrityValidation: true,
+      onlyLoadAppFromAsar: true,
+      runAsNode: false,
+      enableNodeOptionsEnvironmentVariable: false,
+      enableNodeCliInspectArguments: false
+    });
     expect(packageJson.build.publish).toEqual([expect.objectContaining({ provider: "github", owner: "pumpcatkin", repo: "fengyue-link" })]);
     expect(packageJson.build.win.artifactName).toBe("fengyue-link-${version}-setup.${ext}");
     expect(main).toContain("new OfficialUpdateService({");

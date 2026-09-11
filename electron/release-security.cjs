@@ -1,7 +1,6 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 let physicalFs = fs;
 try {
   // Electron's regular fs presents app.asar as a virtual directory. Integrity
@@ -25,6 +24,11 @@ const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_SIGNATURE_BYTES = 4096;
 const MAX_INSTALLER_BYTES = 512 * 1024 * 1024;
 const NETWORK_TIMEOUT_MS = 8000;
+// These two files are the complete trust boundary for application code at
+// runtime: app.asar contains the main/preload/renderer code and the executable
+// is the Electron host which loads it. Keep this deliberately small so every
+// startup can check it before credentials or a platform token are used.
+const RUNTIME_INTEGRITY_FILE_COUNT = 2;
 
 class ReleaseSecurityError extends Error {
   constructor(code, message, details = null) {
@@ -218,6 +222,42 @@ function validateManifestForRelease(value, release) {
   };
 }
 
+function validateManifestForRuntime(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单不是有效对象");
+  }
+  if (value.schemaVersion !== 1 || value.product !== "fengyue-link" || value.appId !== "cc.aiero.fengyue.link") {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单的产品身份无效");
+  }
+  const version = parseVersion(value.version)?.raw;
+  const tag = String(value.tag || "").trim();
+  if (!version || tag !== `v${version}`) {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单版本与标签不一致");
+  }
+  if (value.officialReleasePage !== OFFICIAL_RELEASE_PAGE || value.releasePage !== exactReleasePage(tag)) {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单指向的发布页不属于唯一官方仓库");
+  }
+  const appAsar = value.files?.appAsar;
+  const executable = value.files?.executable;
+  const appAsarSize = Number(appAsar?.size);
+  const executableSize = Number(executable?.size);
+  if (appAsar?.path !== "resources/app.asar" || !Number.isSafeInteger(appAsarSize) || appAsarSize <= 0) {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单中的 app.asar 信息无效");
+  }
+  if (executable?.name !== "风月联机工具.exe" || !Number.isSafeInteger(executableSize) || executableSize <= 0) {
+    throw new ReleaseSecurityError("invalid-manifest", "发布清单中的主程序信息无效");
+  }
+  return {
+    version,
+    tag,
+    releasePage: exactReleasePage(tag),
+    files: {
+      appAsar: { path: appAsar.path, size: appAsarSize, sha256: normalizeSha256(appAsar.sha256, "app.asar") },
+      executable: { name: executable.name, size: executableSize, sha256: normalizeSha256(executable.sha256, "主程序") }
+    }
+  };
+}
+
 async function readBoundedResponse(response, maxBytes, label) {
   if (!response?.ok) {
     throw new ReleaseSecurityError("network-response", `${label}请求失败（HTTP ${Number(response?.status) || 0}）`);
@@ -251,8 +291,8 @@ class ReleaseSecurityGate {
     this.currentArtifact = null;
     this.latestVerification = null;
     this.securityState = this.isPackaged
-      ? this.makeState("required", false, "安装后首次启动将在后台完成一次官方版本与完整性验证")
-      : this.makeState("development", true, "开发模式使用源码运行；安装版会在首次启动后台验证一次");
+      ? this.makeState("required", false, "每次启动都会对照版本号")
+      : this.makeState("development", true, "开发模式不进行版本号对照");
   }
 
   makeState(status, verified, message, extra = {}) {
@@ -303,77 +343,13 @@ class ReleaseSecurityGate {
     };
   }
 
-  cachePath() {
-    const safeVersion = this.appVersion.replace(/[^0-9A-Za-z.-]/g, "-");
-    return path.join(this.userDataPath, "release-security", `${safeVersion}.json`);
-  }
-
-  attemptPath() {
-    const safeVersion = this.appVersion.replace(/[^0-9A-Za-z.-]/g, "-");
-    return path.join(this.userDataPath, "release-security", `${safeVersion}.attempt.json`);
-  }
-
-  loadAttempt() {
-    const file = this.attemptPath();
-    if (!fs.existsSync(file)) return null;
-    try {
-      const attempt = readJsonWithBackupSync(fs, file, value => value?.schemaVersion === 1
-        && value?.version === this.appVersion
-        && ["verified", "failed"].includes(value?.outcome)
-        && typeof value?.status === "string"
-        && typeof value?.message === "string").value;
-      return attempt.version === this.appVersion ? attempt : null;
-    } catch {
-      return null;
-    }
-  }
-
-  saveAttempt(value) {
-    atomicWriteJsonSync(fs, this.attemptPath(), {
-      schemaVersion: 1,
-      version: this.appVersion,
-      outcome: value.outcome,
-      status: value.status,
-      message: value.message,
-      latestVersion: value.latestVersion || null,
-      releasePage: value.releasePage || null,
-      errorCode: value.errorCode || null,
-      checkedAt: value.checkedAt || new Date().toISOString()
-    }, { pretty: true });
-  }
-
-  saveCache(manifestBytes, signatureBytes, release, artifacts) {
-    atomicWriteJsonSync(fs, this.cachePath(), {
-      schemaVersion: 1,
-      version: this.appVersion,
-      releaseId: release.id,
-      releaseTag: release.tag,
-      releasePage: release.htmlUrl,
-      verifiedAt: new Date().toISOString(),
-      appAsarSha256: artifacts.appAsar.sha256,
-      executableSha256: artifacts.executable.sha256,
-      manifestBase64: manifestBytes.toString("base64"),
-      signature: signatureBytes.toString("utf8").trim()
-    }, { pretty: true });
-  }
-
   async initialize() {
     if (!this.isPackaged) return this.state();
-    if (!this.initializationPromise) this.initializationPromise = this.initializeFirstRun();
+    if (!this.initializationPromise) this.initializationPromise = this.initializeStartupVerification();
     return this.initializationPromise;
   }
 
-  async initializeFirstRun() {
-    const previousAttempt = this.loadAttempt();
-    if (previousAttempt) {
-      return this.setState(previousAttempt.status, previousAttempt.outcome === "verified", previousAttempt.message, {
-        latestVersion: previousAttempt.latestVersion || null,
-        checkedAt: previousAttempt.checkedAt || null,
-        source: "first-run-record",
-        releasePage: previousAttempt.releasePage || null,
-        errorCode: previousAttempt.errorCode || null
-      });
-    }
+  async initializeStartupVerification() {
     if (!this.inFlight) this.inFlight = this.verifyOnline().finally(() => { this.inFlight = null; });
     try {
       return await this.inFlight;
@@ -437,6 +413,23 @@ class ReleaseSecurityGate {
     return result;
   }
 
+  async fetchRuntimeVerification(deadlineAt) {
+    const assetHeaders = {
+      Accept: "application/octet-stream",
+      "User-Agent": `fengyue-link/${this.appVersion}`
+    };
+    const [manifestBytes, signatureBytes] = await Promise.all([
+      this.fetch(LATEST_MANIFEST_URL, { headers: assetHeaders }, MAX_MANIFEST_BYTES, RELEASE_MANIFEST_ASSET, deadlineAt),
+      this.fetch(LATEST_SIGNATURE_URL, { headers: assetHeaders }, MAX_SIGNATURE_BYTES, RELEASE_SIGNATURE_ASSET, deadlineAt)
+    ]);
+    verifyManifestSignature(manifestBytes, signatureBytes);
+    let rawManifest;
+    try { rawManifest = JSON.parse(manifestBytes.toString("utf8")); }
+    catch { throw new ReleaseSecurityError("invalid-manifest", "发布清单无法解析"); }
+    const manifest = validateManifestForRuntime(rawManifest);
+    return { manifest, manifestBytes, signatureBytes };
+  }
+
   signedUpdateSnapshot(result = this.latestVerification) {
     if (!result?.release || !result?.manifest) return null;
     return {
@@ -474,7 +467,12 @@ class ReleaseSecurityGate {
       : ["artifact-mismatch", "signature-mismatch", "unregistered-version"].includes(issue.code)
         ? "blocked"
         : "unavailable";
-    return this.setState(status, false, issue.message, {
+    const publicMessage = issue.code === "update-required"
+      ? `发现新版本 v${issue.details?.latestVersion || ""}`.trim()
+      : ["network-timeout", "network-error"].includes(issue.code)
+        ? "版本号对照暂未完成"
+        : "版本号对照未通过";
+    return this.setState(status, false, publicMessage, {
       errorCode: issue.code,
       latestVersion: issue.details?.latestVersion || null,
       releasePage: issue.details?.releasePage || null
@@ -483,15 +481,15 @@ class ReleaseSecurityGate {
 
   async verifyOnline() {
     if (!this.isPackaged) return this.state();
-    this.setState("checking", false, "正在连接唯一官方 GitHub 发布页并验证数字签名（最长 8 秒）…");
+    this.setState("checking", false, "正在对照版本号…");
     try {
       const deadlineAt = Date.now() + this.networkTimeoutMs;
-      const result = await this.fetchLatestVerification(deadlineAt);
+      const result = await this.fetchRuntimeVerification(deadlineAt);
       const comparison = compareVersions(this.appVersion, result.manifest.version);
       if (comparison < 0) {
-        throw new ReleaseSecurityError("update-required", `发现官方新版本 v${result.manifest.version}，正在后台自动下载并安装`, {
+        throw new ReleaseSecurityError("update-required", `发现新版本 v${result.manifest.version}`, {
           latestVersion: result.manifest.version,
-          releasePage: result.release.htmlUrl
+          releasePage: result.manifest.releasePage
         });
       }
       if (comparison > 0) {
@@ -502,35 +500,18 @@ class ReleaseSecurityGate {
           || artifacts.executable.size !== result.manifest.files.executable.size || artifacts.executable.sha256 !== result.manifest.files.executable.sha256) {
         throw new ReleaseSecurityError("artifact-mismatch", "本地程序文件与官方签名版本不一致，可能已损坏或被修改");
       }
-      this.saveCache(result.manifestBytes, result.signatureBytes, result.release, artifacts);
       this.currentArtifact = artifacts;
       const checkedAt = new Date().toISOString();
-      const verifiedState = this.setState("verified", true, "首次启动验证完成：当前版本与本机程序完整性均有效", {
+      const verifiedState = this.setState("verified", true, `版本号对照完成：v${this.appVersion}`, {
         latestVersion: result.manifest.version,
         checkedAt,
-        source: "first-run-github-signed-manifest",
-        releasePage: result.release.htmlUrl
-      });
-      this.saveAttempt({
-        outcome: "verified",
-        status: verifiedState.status,
-        message: verifiedState.message,
-        latestVersion: verifiedState.latestVersion,
-        releasePage: verifiedState.releasePage,
-        checkedAt
+        source: "startup-github-signed-manifest",
+        releasePage: result.manifest.releasePage,
+        verifiedFileCount: RUNTIME_INTEGRITY_FILE_COUNT
       });
       return verifiedState;
     } catch (error) {
       const failureState = this.setFailure(error);
-      this.saveAttempt({
-        outcome: "failed",
-        status: failureState.status,
-        message: failureState.message,
-        latestVersion: failureState.latestVersion,
-        releasePage: failureState.releasePage,
-        errorCode: failureState.errorCode,
-        checkedAt: new Date().toISOString()
-      });
       throw error;
     }
   }
@@ -541,7 +522,7 @@ class ReleaseSecurityGate {
     if (this.securityState.verified) return this.state();
     throw new ReleaseSecurityError(
       this.securityState.errorCode || "verification-failed",
-      this.securityState.message || "安装后的首次官方版本验证未通过"
+      this.securityState.message || "版本号对照未通过"
     );
   }
 }
@@ -566,7 +547,9 @@ module.exports = {
   verifyManifestSignature,
   validateReleaseMetadata,
   validateManifestForRelease,
+  validateManifestForRuntime,
   exactReleasePage,
   exactReleaseAssetUrl,
-  officialInstallerName
+  officialInstallerName,
+  RUNTIME_INTEGRITY_FILE_COUNT
 };

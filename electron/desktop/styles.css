@@ -20,8 +20,9 @@
 .landing-header .landing-logo{width:54px;height:54px;margin:0;border-radius:17px;font-size:24px}
 .landing-header h1{font-size:27px;text-align:right}
 .landing-actions{display:flex;min-width:0;gap:16px;overflow-x:auto;padding:12px 4px 18px;scroll-snap-type:x proximity}
-.feature-card{display:grid;min-width:230px;min-height:230px;flex:0 0 230px;align-content:end;gap:8px;border-radius:20px;padding:22px;text-align:left;scroll-snap-align:start;background:linear-gradient(155deg,#172333,#101722)}
-.feature-card>b{color:var(--text);font-size:18px}.feature-card>small{color:var(--muted);font-size:11px}
+.feature-card{display:grid;min-width:230px;min-height:230px;flex:0 0 230px;align-content:end;gap:10px;overflow:hidden;border-radius:20px;padding:22px;text-align:left;scroll-snap-align:start;background:linear-gradient(155deg,#172333,#101722)}
+.feature-card>b{transform:translateX(calc(-22px - .16em));opacity:.88;color:var(--text);font-size:34px;font-style:italic;font-weight:900;line-height:1.04;letter-spacing:-.06em;white-space:nowrap}.feature-card>small{border-radius:8px;padding:8px 10px;color:var(--text);font-size:12px;font-weight:700;line-height:1.4}
+#edit-profiles>b{font-size:30px}
 .feature-card.primary{background:linear-gradient(150deg,#17302e,#142333);box-shadow:inset 0 0 0 1px #75deb422}
 .feature-placeholder{border-style:dashed;opacity:.42;pointer-events:none}
 

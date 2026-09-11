@@ -67,7 +67,7 @@ if (process.type === "renderer") {
       await window.loadFile(path.join(root, "electron/desktop/index.html"));
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
-      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "本工具始终完全免费");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "正在对照版本号");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
       fs.writeFileSync(path.join(outputDir, "official-notice.png"), (await window.webContents.capturePage()).toPNG());
       await evaluate(`document.querySelector('#official-notice-action').click()`);
@@ -169,7 +169,7 @@ if (process.type === "renderer") {
       state = { ...state, releaseSecurity: { status: "update-required", verified: false, message: "发现官方新版本 v9.9.9", currentVersion: version, latestVersion: "9.9.9" } };
       window.webContents.send("qa:onState", state);
       await settle();
-      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "请更新到最新官方版本");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "请更新版本");
       assert.equal(await evaluate(`document.querySelector('#official-notice-action').textContent`), "退出工具");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
       fs.writeFileSync(path.join(outputDir, "official-update-required.png"), (await window.webContents.capturePage()).toPNG());

@@ -157,6 +157,32 @@ button.primary:hover:not(:disabled),
   color: var(--on-accent) !important;
 }
 
+.feature-card > small {
+  background: color-mix(in srgb, var(--canvas) 78%, transparent) !important;
+  color: var(--text-flat) !important;
+}
+
+.feature-card.primary > small {
+  background: color-mix(in srgb, var(--canvas) 82%, transparent) !important;
+  color: var(--text-flat) !important;
+}
+
+.feature-card.needs-attention {
+  border: 3px solid var(--warning-flat) !important;
+  background: var(--accent-soft) !important;
+  animation: profile-entry-attention 1.7s ease-in-out infinite;
+}
+
+.feature-card.needs-attention > small {
+  background: var(--warning-flat) !important;
+  color: var(--canvas) !important;
+}
+
+@keyframes profile-entry-attention {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
 nav button.active,
 .surface-button.active,
 .domain-option.selected,
@@ -634,7 +660,8 @@ main > footer {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .surface-button.attention {
+  .surface-button.attention,
+  .feature-card.needs-attention {
     animation: none !important;
   }
 }

@@ -10,6 +10,7 @@ const loginForm = document.querySelector("#login-form");
 const accountInput = document.querySelector("#login-account");
 const passwordInput = document.querySelector("#login-password");
 const rememberInput = document.querySelector("#remember-password");
+const autoLoginInput = document.querySelector("#auto-login");
 const submitLogin = document.querySelector("#submit-login");
 const domainList = document.querySelector("#domain-list");
 const domainNote = document.querySelector("#domain-selection-note");
@@ -32,6 +33,7 @@ const officialNoticeAction = document.querySelector("#official-notice-action");
 const authorName = document.querySelector("#author-name");
 const authorLinkButtons = [...document.querySelectorAll("[data-author-link]")];
 const UI_THEME_STORAGE_KEY = "fengyue-link-ui-theme";
+let automaticLoginActive=false;
 
 function applyReleaseIdentity(){
   const productName="风月联机工具";
@@ -60,11 +62,11 @@ function setOfficialNoticePoints(items){
 function showStartupOfficialNotice(){
   if(settingsOverlayMode)return;
   officialNoticeCard.dataset.mode="announcement";
-  officialNoticeEyebrow.textContent="唯一官方版本";
-  officialNoticeVersion.textContent="官方发布";
-  officialNoticeTitle.textContent="本工具始终完全免费";
-  officialNoticeMessage.textContent="请勿购买，也不要向第三方提供账号信息。安装后首次启动会在后台自动核对官方版本与程序完整性。";
-  setOfficialNoticePoints(["永久免费","仅认官方发布页","首次启动后台验证"]);
+  officialNoticeEyebrow.textContent="版本号对照";
+  officialNoticeVersion.textContent="启动检查";
+  officialNoticeTitle.textContent="正在对照版本号";
+  officialNoticeMessage.textContent="每次启动都会对照当前版本号与发布版本号。";
+  setOfficialNoticePoints(["当前版本","发布版本","每次启动"]);
   officialNoticeOpen.classList.remove("primary");
   officialNoticeAction.classList.add("primary");
   officialNoticeAction.disabled=false;
@@ -78,17 +80,15 @@ function showReleaseVerificationFailure(security,update={}){
   const updateRequired=security?.status==="update-required";
   const automaticUpdate=updateRequired&&["checking","downloading","verifying","installing","ready"].includes(update?.status);
   officialNoticeCard.dataset.mode=updateRequired?"update-required":"blocked";
-  officialNoticeEyebrow.textContent=automaticUpdate?"官方自动更新":updateRequired?"检测到版本更新":"官方验证未通过";
-  officialNoticeVersion.textContent=automaticUpdate?"自动处理":updateRequired?"需要更新":"已停止登录";
+  officialNoticeEyebrow.textContent="版本号对照";
+  officialNoticeVersion.textContent=automaticUpdate?"正在更新":updateRequired?"发现新版本":"未完成";
   officialNoticeTitle.textContent=automaticUpdate
-    ? update.status==="ready"?"更新已安全下载":"正在更新到最新官方版本"
-    : updateRequired?"请更新到最新官方版本":"请使用官方完整版本";
+    ? update.status==="ready"?"新版本已下载":"正在更新版本"
+    : updateRequired?"请更新版本":"版本号对照未完成";
   officialNoticeMessage.textContent=automaticUpdate
-    ? update.message||security.message||"正在后台自动下载并验证官方更新。"
-    : updateRequired
-      ? `${security.message||"当前版本已经过期。"} 自动更新未完成，请从唯一官方发布页下载安装。`
-    : `${security?.message||"当前安装内容未通过验证。"} 请重新从唯一官方发布页获取完整安装包。`;
-  setOfficialNoticePoints(automaticUpdate?["后台自动下载","签名与 SHA-256 复核","验证后自动安装"]:updateRequired?["停止使用旧版本","下载最新版本","仅认官方发布页"]:["登录已阻止","重新获取官方包","请勿使用修改版"]);
+    ? update.message||security.message||"正在获取发布版本。"
+    : security?.message||"版本号对照未完成。";
+  setOfficialNoticePoints([`当前 ${security?.currentVersion?`v${security.currentVersion}`:"版本未知"}`,`发布 ${security?.latestVersion?`v${security.latestVersion}`:"版本未知"}`]);
   officialNoticeOpen.classList.toggle("primary",!automaticUpdate);
   officialNoticeAction.classList.toggle("primary",automaticUpdate);
   officialNoticeAction.disabled=automaticUpdate;
@@ -663,6 +663,11 @@ function renderCharacterProfiles(next){
   document.querySelector("#profile-delete").disabled=Boolean(next.room)||(profiles.items||[]).length<=1;
   document.querySelector("#profile-new").disabled=Boolean(next.room);
   document.querySelector("#profile-save").disabled=Boolean(next.room);
+  const needsSetup=!(profiles.items||[]).some(item=>String(item.displayName||"").trim());
+  const editProfiles=document.querySelector("#edit-profiles");
+  editProfiles.classList.toggle("needs-attention",needsSetup);
+  editProfiles.setAttribute("aria-label",needsSetup?"编辑个人设定，首次联机前需要完成":"编辑个人设定");
+  document.querySelector("#edit-profiles-note").textContent=needsSetup?"首次联机前，请先完善角色资料":"管理联机角色资料";
 }
 
 function sortedDomains(){
@@ -682,7 +687,7 @@ function createDomainOption(item,{settings=false}={}){
   const selected=Boolean(state?.domainSelected&&(state.origin===item.origin||state.origin===item.finalOrigin));
   button.classList.toggle("selected",selected);
   button.classList.toggle("current",settings&&selected);
-  button.disabled=Boolean(state?.loginInProgress)||(settings?(selected||Boolean(state?.room)):Boolean(state?.originLocked));
+  button.disabled=automaticLoginActive||Boolean(state?.loginInProgress)||(settings?(selected||Boolean(state?.room)):Boolean(state?.originLocked));
   button.title=item.online===false?"后台检测未连通；如果浏览器可以打开该节点，仍可直接尝试":"";
   const name=document.createElement("b");
   name.textContent=new URL(item.origin).host;
@@ -898,8 +903,8 @@ function render(next){
   placeholder.classList.toggle("hidden",capturedGame);
   renderSurfaceButtons(next);
   const releaseReady=Boolean(next.releaseSecurity?.verified);
-  submitLogin.disabled=Boolean(next.loginInProgress)||!releaseReady||!next.domainSelected;
-  submitLogin.textContent=next.loginInProgress?"登录中…":"登录";
+  submitLogin.disabled=automaticLoginActive||Boolean(next.loginInProgress)||!releaseReady||(!autoLoginInput.checked&&!next.domainSelected);
+  submitLogin.textContent=automaticLoginActive?"自动登录中…":next.loginInProgress?"登录中…":"登录";
   document.querySelector("#google-login").disabled=Boolean(next.loginInProgress)||!releaseReady||!next.domainSelected;
   document.querySelector("#telegram-login").disabled=Boolean(next.loginInProgress)||!releaseReady||!next.domainSelected;
   document.querySelector("#refresh-domains").disabled=Boolean(next.originLocked);
@@ -1064,7 +1069,27 @@ document.querySelector("#profile-save").addEventListener("click",()=>invoke(asyn
 document.querySelector("#profile-delete").addEventListener("click",async()=>{if(!profileEditorId)return;if(!await confirmAction("确定删除这个本地角色设定吗？",{title:"删除角色设定",acceptText:"删除"}))return;invoke(async()=>{profileEditorDirty=false;await api.deleteCharacterProfile(profileEditorId);profileEditorId=null;toast("角色设定已删除")}).catch(()=>{})});
 document.querySelector("#active-character-profile").addEventListener("change",event=>invoke(async()=>{await api.selectCharacterProfile(event.currentTarget.value);toast("已切换联机角色设定")}).catch(()=>{}));
 document.querySelectorAll("[data-tab]").forEach(button=>button.addEventListener("click",()=>activateSidebarTab(button.dataset.tab)));
-loginForm.addEventListener("submit",event=>{event.preventDefault();invoke(async()=>{await api.login({account:accountInput.value,password:passwordInput.value,remember:rememberInput.checked});passwordInput.value="";toast("登录成功")}).catch(()=>{})});
+async function submitCredentials({automatic=autoLoginInput.checked}={}){
+  const payload={account:accountInput.value,password:passwordInput.value,remember:rememberInput.checked,autoLogin:autoLoginInput.checked};
+  if(automatic){
+    rememberInput.checked=true;
+    payload.remember=true;
+    payload.autoLogin=true;
+    automaticLoginActive=true;
+    if(state)render(state);
+  }
+  try{
+    if(automatic)await api.autoLogin(payload);
+    else await api.login(payload);
+    passwordInput.value="";
+    toast(automatic?"已使用当前延迟最低的可用节点登录":"登录成功");
+  }finally{
+    if(automatic){automaticLoginActive=false;if(state)render(state)}
+  }
+}
+loginForm.addEventListener("submit",event=>{event.preventDefault();invoke(()=>submitCredentials()).catch(()=>{})});
+autoLoginInput.addEventListener("change",()=>{if(autoLoginInput.checked)rememberInput.checked=true;if(state)render(state)});
+rememberInput.addEventListener("change",()=>{if(!rememberInput.checked)autoLoginInput.checked=false;if(state)render(state)});
 officialNoticeOpen.addEventListener("click",()=>invoke(()=>api.openOfficialReleasePage()).catch(()=>{}));
 officialNoticeAction.addEventListener("click",()=>{
   if(officialNoticeCard.dataset.mode==="announcement"){officialNoticeOverlay.classList.add("hidden");return}
@@ -1072,7 +1097,7 @@ officialNoticeAction.addEventListener("click",()=>{
 });
 document.querySelector("#google-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("google");toast("请在 Google 认证窗口中完成登录")}).catch(()=>{}));
 document.querySelector("#telegram-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("telegram");toast("请在 Telegram 认证窗口中完成登录")}).catch(()=>{}));
-document.querySelector("#clear-credentials").addEventListener("click",()=>invoke(async()=>{await api.clearCredentials();accountInput.value="";passwordInput.value="";rememberInput.checked=false;toast("已清除这个实例保存的账号和密码")}).catch(()=>{}));
+document.querySelector("#clear-credentials").addEventListener("click",()=>invoke(async()=>{await api.clearCredentials();accountInput.value="";passwordInput.value="";rememberInput.checked=false;autoLoginInput.checked=false;toast("已清除这个实例保存的账号和密码")}).catch(()=>{}));
 document.querySelector("#refresh-domains").addEventListener("click",()=>refreshDomains(true).catch(error=>toast(error?.message||String(error))));
 document.querySelector("#choose-work").addEventListener("click",()=>state?.room?toast("房间开启期间不能更换作品；退出房间后会恢复"):invoke(()=>api.chooseWork()).catch(()=>{}));
 slot.addEventListener("click",()=>{if(slot.classList.contains("select-work-empty"))invoke(()=>api.chooseWork()).catch(()=>{})});
@@ -1282,4 +1307,9 @@ api.onLog(entry=>{if(state?.isAdmin)receiveSessionLog(entry)});
 api.getAppVersion().then(version=>{appVersion.textContent=`v${version}`}).catch(()=>{});
 api.getReleaseChannel().then(applyReleaseIdentity).catch(applyReleaseIdentity);
 showStartupOfficialNotice();
-Promise.all([api.getState(),api.loadCredentials(),api.listDomainCandidates(),api.getAuthorInfo().catch(()=>null)]).then(([initial,saved,candidates,authorInfo])=>{if(saved){accountInput.value=saved.account||"";passwordInput.value=saved.password||"";rememberInput.checked=true}renderAuthorInfo(authorInfo);domainDirectory=candidates;lastObservedResultKey=roundResultKey(initial);render(initial);renderDomainList();void refreshDomains(false).catch(error=>toast(error.message))}).catch(error=>toast(error.message));
+Promise.all([api.getState(),api.loadCredentials(),api.listDomainCandidates(),api.getAuthorInfo().catch(()=>null)]).then(async([initial,saved,candidates,authorInfo])=>{
+  if(saved){accountInput.value=saved.account||"";passwordInput.value=saved.password||"";rememberInput.checked=true;autoLoginInput.checked=Boolean(saved.autoLogin)}
+  renderAuthorInfo(authorInfo);domainDirectory=candidates;lastObservedResultKey=roundResultKey(initial);render(initial);renderDomainList();
+  await refreshDomains(false);
+  if(saved?.autoLogin&&!initial.loggedIn)await submitCredentials({automatic:true});
+}).catch(error=>toast(friendlyError(error)));

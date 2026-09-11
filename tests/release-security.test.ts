@@ -15,6 +15,7 @@ const {
   sha256File,
   sha256FileAsync,
   validateManifestForRelease,
+  validateManifestForRuntime,
   validateReleaseMetadata,
   verifyManifestSignature
 } = require("../electron/release-security.cjs");
@@ -139,7 +140,18 @@ describe("official release security", () => {
     expect(requested).toBe(false);
   });
 
-  it("reuses a completed first-run result without another network request", async () => {
+  it("limits startup integrity validation to the two token-relevant runtime files", () => {
+    const runtimeManifest = validateManifestForRuntime(signedManifestShape());
+    expect(runtimeManifest.files).toEqual({
+      appAsar: expect.objectContaining({ path: "resources/app.asar" }),
+      executable: expect.objectContaining({ name: "风月联机工具.exe" })
+    });
+    const withoutInstaller = signedManifestShape();
+    delete (withoutInstaller.files as { installer?: unknown }).installer;
+    expect(validateManifestForRuntime(withoutInstaller).version).toBe("0.12.0");
+  });
+
+  it("performs a fresh signed-manifest request on every packaged startup", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "fengyue-release-attempt-"));
     temporaryDirectories.push(directory);
     const options = {
@@ -149,21 +161,13 @@ describe("official release security", () => {
       executablePath: path.join(directory, "风月联机工具.exe"),
       userDataPath: directory
     };
-    const writer = new ReleaseSecurityGate({ ...options, net: { fetch: async () => { throw new Error("unused"); } } });
-    writer.saveAttempt({
-      outcome: "failed",
-      status: "update-required",
-      message: "发现官方新版本 v9.9.9",
-      latestVersion: "9.9.9",
-      errorCode: "update-required"
-    });
     let requested = false;
     const reader = new ReleaseSecurityGate({
       ...options,
-      net: { fetch: async () => { requested = true; throw new Error("不应联网"); } }
+      net: { fetch: async () => { requested = true; throw new Error("expected online verification"); } }
     });
     const state = await reader.initialize();
-    expect(state).toMatchObject({ status: "update-required", verified: false, source: "first-run-record" });
-    expect(requested).toBe(false);
+    expect(state).toMatchObject({ status: "unavailable", verified: false, errorCode: "network-error" });
+    expect(requested).toBe(true);
   });
 });

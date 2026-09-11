@@ -48,6 +48,7 @@ const {
 } = require("./release-security.cjs");
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
+const { orderLoginCandidates } = require("./login-failover.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -200,8 +201,12 @@ function loadCredentials(profileId) {
 function saveCredentials(profileId, credentials) {
   if (!safeStorage.isEncryptionAvailable()) throw new Error("当前系统无法使用 Windows 加密存储");
   const file = credentialPath(profileId);
-  const encrypted = safeStorage.encryptString(JSON.stringify({ account: credentials.account, password: credentials.password })).toString("base64");
-  atomicWriteJsonSync(fs, file, { version: 1, encrypted });
+  const encrypted = safeStorage.encryptString(JSON.stringify({
+    account: credentials.account,
+    password: credentials.password,
+    autoLogin: Boolean(credentials.autoLogin)
+  })).toString("base64");
+  atomicWriteJsonSync(fs, file, { version: 2, encrypted });
 }
 
 function clearCredentials(profileId) {
@@ -2502,10 +2507,11 @@ class AccountBackend {
     void this.updateService.start();
     const releaseState = await this.releaseSecurity.initialize();
     this.appendSessionLog("release-security", {
-      event: releaseState.verified ? "first-run-verification-complete" : "first-run-verification-blocked",
+      event: releaseState.verified ? "startup-verification-complete" : "startup-verification-blocked",
       version: releaseState.currentVersion,
       latestVersion: releaseState.latestVersion,
       source: releaseState.source,
+      verifiedFileCount: releaseState.verifiedFileCount || 0,
       code: releaseState.errorCode || null
     });
     this.emit();
@@ -2529,8 +2535,8 @@ class AccountBackend {
         code: error?.code || "verification-failed",
         error: error?.message || String(error)
       });
-      this.emit({ releaseSecurityError: error?.message || "官方版本安全验证失败" });
-      throw new Error(`${error?.message || "官方版本安全验证失败"}。请只从唯一官方发布页获取完整安装包`);
+      this.emit({ releaseSecurityError: error?.message || "版本号对照未通过" });
+      throw new Error(error?.message || "版本号对照未通过");
     }
   }
 
@@ -2872,9 +2878,10 @@ class AccountBackend {
     this.emit();
   }
 
-  async login({ account, password, remember }) {
+  async login({ account, password, remember, autoLogin = false }) {
     account = String(account || "").trim();
     password = String(password || "");
+    remember = Boolean(remember || autoLogin);
     if (!this.domainSelected) throw new Error("请先从域名列表选择一个可用节点");
     if (!account || !password) throw new Error("请输入账号和密码");
     if (account.length > 320 || password.length > 1024) throw new Error("账号或密码长度超过安全上限");
@@ -2968,7 +2975,7 @@ class AccountBackend {
         updatedAt: Date.now()
       };
       saveSelectedOrigin(this.profileId, this.origin);
-      if (remember) saveCredentials(this.profileId, { account, password });
+      if (remember) saveCredentials(this.profileId, { account, password, autoLogin });
       else clearCredentials(this.profileId);
       this.appendSessionLog("login", { event: "authenticated", elapsedMs: Date.now() - startedAt, origin: this.origin });
       this.emit({ loginSucceeded: true });
@@ -2986,6 +2993,28 @@ class AccountBackend {
       this.loginInProgress = false;
       this.emit();
     }
+  }
+
+  async loginWithFailover({ account, password, remember = true, autoLogin = true }) {
+    if (this.loggedIn) return true;
+    if (this.loginInProgress) throw new Error("登录流程已经在进行中");
+    // Startup has just measured every domain; reuse that fresh result and only
+    // re-probe when the shared cache has expired.
+    const directory = await discoverDomainStatuses(false);
+    const candidates = orderLoginCandidates(directory?.domains);
+    if (!candidates.length) throw new Error("域名测速没有找到可用节点，请重新检测网络后再试");
+    const failures = [];
+    for (const candidate of candidates) {
+      await this.setOrigin(candidate.origin);
+      try {
+        return await this.login({ account, password, remember, autoLogin });
+      } catch (error) {
+        failures.push({ origin: candidate.origin, error: error?.message || String(error) });
+        this.appendSessionLog("login", { event: "failover-next", origin: candidate.origin, latency: candidate.latency, error: error?.message || String(error) });
+      }
+    }
+    const last = failures.at(-1);
+    throw new Error(`自动登录已按延迟依次尝试 ${failures.length} 个节点，均未成功${last?.error ? `；最后一次：${last.error}` : ""}`);
   }
 
   closeOAuthWindows() {
@@ -8824,6 +8853,7 @@ handleLocalIpc("backend:set-origin", (_event, origin) => backend.setOrigin(origi
 handleLocalIpc("backend:switch-origin", (_event, origin) => backend.switchOrigin(origin));
 handleLocalIpc("backend:logout", () => backend.logout());
 handleLocalIpc("backend:login", (_event, credentials) => backend.login(credentials || {}));
+handleLocalIpc("backend:auto-login", (_event, credentials) => backend.loginWithFailover(credentials || {}));
 handleLocalIpc("backend:oauth-login", (_event, provider) => backend.oauthLogin(provider));
 handleLocalIpc("backend:create-room", (_event, settings) => backend.createRoom(settings || {}));
 handleLocalIpc("backend:join-room", (_event, settings) => backend.joinRoom(settings || {}));

@@ -11,6 +11,7 @@
 .secure-badge { justify-self: start; border: 1px solid #75deb455; border-radius: 999px; background: #75deb410; color: var(--mint); padding: 5px 9px; font-size: 10px; }
 .checkbox-row { display: flex; align-items: center; gap: 8px; }
 .checkbox-row input { width: 15px; height: 15px; margin: 0; accent-color: var(--mint); }
+.login-options { display: flex; align-items: center; gap: 22px; }
 .oauth-divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; }
 .oauth-divider::before, .oauth-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .domain-picker { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 12px; background: #0d131c; padding: 10px; }

@@ -194,6 +194,23 @@ function findObject(root, predicate) {
   return null;
 }
 
+function identityFieldPaths(root) {
+  const result = [];
+  const queue = [{ value: root, path: "$", depth: 0 }];
+  const seen = new Set();
+  while (queue.length && seen.size < 2000) {
+    const { value, path, depth } = queue.shift();
+    if (!value || typeof value !== "object" || seen.has(value) || depth > 8) continue;
+    seen.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = `${path}.${key}`;
+      if (child && typeof child === "object") queue.push({ value: child, path: childPath, depth: depth + 1 });
+      else if (/author|creator|owner|created_by|account|user|name|^id$/i.test(key)) result.push({ path: childPath, value: String(child ?? "").slice(0, 160) });
+    }
+  }
+  return result;
+}
+
 async function createIsolatedClient(label, account, password) {
   const isolatedSession = session.fromPartition(`fyow-live-${label}-${Date.now()}`, { cache:false });
   await isolatedSession.setProxy({ mode:"system" });
@@ -662,6 +679,14 @@ async function main() {
         catch (error) { pages.push({ pathname, error: error.message || String(error) }); }
       }
       process.stdout.write(`${JSON.stringify({ login: loginResult, pages }, null, 2)}\n`);
+      return;
+    }
+    if (MODE === "inspect-installed-author") {
+      const workId = requiredEnvironment("FYOW_TEST_WORK_ID");
+      await load(window, `/zh/explore/installed/${encodeURIComponent(workId)}`);
+      const response = await authenticatedJson(window, `/console/api/installed-apps/${encodeURIComponent(workId)}`);
+      const data = unwrapPayload(response);
+      process.stdout.write(`${JSON.stringify({ ok:response.ok, status:response.status, workId, rootKeys:data && typeof data === "object" ? Object.keys(data) : [], identityFields:identityFieldPaths(data) }, null, 2)}\n`);
       return;
     }
     if (MODE === "discover-create") {

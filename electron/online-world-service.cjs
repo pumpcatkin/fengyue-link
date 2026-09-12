@@ -64,14 +64,19 @@ function firstObject(value, predicate) {
 }
 
 function normalizeWorkDetail(payload, fallbackId) {
-  const detail = firstObject(payload, item => String(item?.id || item?.app_id || "") === String(fallbackId))
-    || payload?.data?.app || payload?.app || payload?.data || payload;
+  const matchesWork = item => String(item?.id || item?.app_id || item?.appId || "") === String(fallbackId);
+  const authorId = item => item?.created_by_account_id || item?.author_account_id || item?.creator_account_id || item?.owner_account_id
+    || item?.author?.id || item?.creator?.id || item?.owner?.id || item?.created_by?.id || item?.createdBy?.id || "";
+  const authorDetail = firstObject(payload, item => matchesWork(item) && Boolean(authorId(item)));
+  const namedDetail = firstObject(payload, item => matchesWork(item) && Boolean(item?.name || item?.title || item?.description || item?.desc));
+  const detail = authorDetail || namedDetail || payload?.data?.app || payload?.app || payload?.data || payload;
+  const author = detail?.author || detail?.creator || detail?.owner || detail?.created_by || detail?.createdBy || {};
   return {
-    id: String(detail?.id || detail?.app_id || fallbackId),
+    id: String(detail?.id || detail?.app_id || detail?.appId || fallbackId),
     name: String(detail?.name || detail?.title || "在线游戏世界"),
     description: String(detail?.description || detail?.desc || ""),
-    authorAccountId: String(detail?.created_by_account_id || detail?.author?.id || detail?.account_id || ""),
-    authorName: String(detail?.created_by_account_name || detail?.author?.name || detail?.account_name || "")
+    authorAccountId: String(authorId(detail)),
+    authorName: String(detail?.created_by_account_name || detail?.author_account_name || detail?.creator_account_name || detail?.owner_account_name || author?.name || author?.username || "")
   };
 }
 
@@ -257,6 +262,8 @@ class OnlineWorldService {
       work: this.work ? { ...this.work, description: undefined } : null,
       initialized: Boolean(this.control && this.world),
       isAuthor: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
+      isServerOwner: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
+      serverOwnerName: this.work?.authorName || null,
       isAuthority: this.isAuthority(),
       revision: Number(this.world?.revision || 0),
       lastSyncAt: this.lastSyncAt,

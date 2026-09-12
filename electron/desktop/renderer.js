@@ -717,17 +717,19 @@ function renderOnlineWorld(next){
   onlineWorldState=next;
   loadOnlineWorldProgram(next);
   const status=document.querySelector("#online-world-status");
-  const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":"等待作者初始化赛季",degraded:"使用缓存，等待重新同步",error:"读取失败"};
+  const serverOwner=Boolean(next?.isServerOwner||next?.isAuthor);
+  const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":serverOwner?"已确认服主身份 · 可以开服":"等待服主开服",degraded:"使用缓存，等待重新同步",error:"读取失败"};
   status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
   const initialized=Boolean(next?.initialized);
   document.querySelector("#online-world-setup").classList.toggle("hidden",initialized);
   onlineWorldFrame.classList.toggle("hidden",!initialized);
   const initializeButton=document.querySelector("#online-world-initialize");
-  initializeButton.classList.toggle("hidden",!next?.isAuthor||initialized);
+  initializeButton.classList.toggle("hidden",!serverOwner||initialized);
   initializeButton.disabled=!["work-description","card-package"].includes(next?.program?.source);
-  document.querySelector("#online-world-activate-program").classList.toggle("hidden",!next?.isAuthor||!initialized);
-  document.querySelector("#online-world-export-card").classList.toggle("hidden",!next?.isAuthor||!next?.work);
-  document.querySelector("#online-world-migrate").classList.toggle("hidden",!next?.isAuthor||!initialized);
+  initializeButton.title=serverOwner?"平台伴生作品作者专用：创建首个在线赛季":"";
+  document.querySelector("#online-world-activate-program").classList.toggle("hidden",!serverOwner||!initialized);
+  document.querySelector("#online-world-export-card").classList.toggle("hidden",!serverOwner||!next?.work);
+  document.querySelector("#online-world-migrate").classList.toggle("hidden",!serverOwner||!initialized);
   document.querySelector("#online-world-sync").disabled=!next?.work||Boolean(next?.syncing);
   document.querySelector("#online-world-title").textContent=next?.work?(next?.card?.title||"艳猎征途"):"联机游戏";
   renderOnlineWorldProfileChoices();
@@ -1192,8 +1194,8 @@ document.querySelector("#online-world-export-card").addEventListener("click",()=
   if(!result.canceled)toast("完整游戏卡已导出，包含伴生作品创作页配置快照");
 }).catch(()=>{}));
 document.querySelector("#online-world-initialize").addEventListener("click",async()=>{
-  if(!await confirmAction("这会在当前作品评论区写入新赛季控制记录和第一份地图快照。",{title:"初始化在线赛季",acceptText:"初始化"}))return;
-  invoke(async()=>{renderOnlineWorld(await api.initializeOnlineWorld());toast("新赛季已初始化")}).catch(()=>{});
+  if(!await confirmAction("这会以伴生作品作者作为服主，在评论区写入赛季控制记录和第一份地图快照。",{title:"服主开服",acceptText:"立即开服"}))return;
+  invoke(async()=>{renderOnlineWorld(await api.initializeOnlineWorld());toast("开服成功，在线赛季已经启动")}).catch(()=>{});
 });
 document.querySelector("#online-world-activate-program").addEventListener("click",async()=>{
   if(!await confirmAction("这会重新读取作品详细介绍，并用作者密钥签名启用其中的游戏程序包。",{title:"启用详情程序",acceptText:"签名启用"}))return;

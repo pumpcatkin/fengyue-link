@@ -96,6 +96,10 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`document.querySelector('#online-world-open-form').children.length`), 3);
       assert.equal(await evaluate(`document.querySelector('#online-world-profile').value`), "qa-profile");
       assert.equal(await evaluate(`document.querySelector('#online-world-detail').textContent.includes('b27218e6')`), false);
+      window.webContents.send("qa:onOnlineWorldState", { status: "needs-initialization", initialized: false, isAuthor: true, isServerOwner: true, work: { id: "fixture", name: "艳猎征途[b27218e680f94c0d]" }, program: { source: "card-package", digest: "fixture-owner" } });
+      await settle();
+      assert.equal(await evaluate(`document.querySelector('#online-world-initialize').classList.contains('hidden')`), false);
+      assert.equal(await evaluate(`document.querySelector('#online-world-initialize').textContent`), "服主开服");
       fs.writeFileSync(path.join(outputDir, "online-world-details.png"), (await window.webContents.capturePage()).toPNG());
       const mapFacts = Array.from({ length: 4096 }, (_, index) => ({ x: index % 64, y: Math.floor(index / 64), population: 100 + index % 9901, resourceGrade: ["D-", "C", "B", "A", "S+"][index % 5], resourceRank: index % 15, garrisonCap: 20 + index % 1980, neutralPower: 20 + index % 1980 }));
       const runtime = require(path.join(root, "electron/online-world-runtime.cjs"));

@@ -155,6 +155,23 @@ function shapeOf(value) {
   }));
 }
 
+function identityFieldPaths(root) {
+  const result = [];
+  const queue = [{ value: root, path: "$", depth: 0 }];
+  const seen = new Set();
+  while (queue.length && seen.size < 2000) {
+    const { value, path: valuePath, depth } = queue.shift();
+    if (!value || typeof value !== "object" || seen.has(value) || depth > 8) continue;
+    seen.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = `${valuePath}.${key}`;
+      if (child && typeof child === "object") queue.push({ value: child, path: childPath, depth: depth + 1 });
+      else if (/author|creator|owner|created_by|account|user|name|^id$/i.test(key)) result.push({ path: childPath, value: String(child ?? "").slice(0, 160) });
+    }
+  }
+  return result;
+}
+
 function roleKeys(value, desired) {
   const roles = {};
   for (const [key, item] of Object.entries(value && typeof value === "object" ? value : {})) {
@@ -294,6 +311,19 @@ async function main() {
   try {
     await login(window, loadCredentials());
     await load(window, `/zh/app/${encodeURIComponent(workId)}/configuration`);
+    if (process.env.FYOW_INSPECT_AUTHOR === "1") {
+      const [installedResponse, profileResponse] = await Promise.all([
+        api(window, `/console/api/installed-apps/${encodeURIComponent(workId)}`),
+        api(window, "/go/api/account/profile")
+      ]);
+      if (!installedResponse.ok) throw new Error(`读取作品作者失败：HTTP ${installedResponse.status}`);
+      const installed = unwrap(installedResponse);
+      const profile = unwrap(profileResponse);
+      const authorAccountId = String(installed?.app?.created_by_account_id || "");
+      const signedInAccountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+      process.stdout.write(`${JSON.stringify({ ok:true, status:installedResponse.status, workId, authorAccountId, signedInAccountId, signedInIsAuthor:Boolean(authorAccountId && authorAccountId === signedInAccountId), rootKeys:installed && typeof installed === "object" ? Object.keys(installed) : [], identityFields:identityFieldPaths(installed) }, null, 2)}\n`);
+      return;
+    }
     const beforeResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
     if (!beforeResponse.ok) throw new Error(`读取创作配置失败：HTTP ${beforeResponse.status}`);
     const before = findConfig(unwrap(beforeResponse));

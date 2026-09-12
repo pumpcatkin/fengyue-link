@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld } = require("../electron/grid-world-game.cjs");
@@ -33,6 +33,37 @@ describe("online world platform service", () => {
   it("normalizes only installed-work links", () => {
     expect(workReference("https://aigirlfriend.baby/zh/explore/installed/4ac2ab60-67ff-459d-ae9a-6274f1802195", "https://aigirlfriend.baby").workId).toBe("4ac2ab60-67ff-459d-ae9a-6274f1802195");
     expect(() => workReference("https://aigirlfriend.baby/zh/app/abc/configuration", "https://aigirlfriend.baby")).toThrow(/已安装作品/);
+  });
+
+  it("resolves the platform author from the nested installed-app app record", () => {
+    const workId = "b27218e6-80f9-4c0d-91c7-4b8f87d47be8";
+    const detail = normalizeWorkDetail({
+      id: workId,
+      app: {
+        id: workId,
+        name: "艳猎征途[b27218e680f94c0d]",
+        created_by_account_id: "39404f0e-7678-45a1-86c6-9a21116bacbd"
+      }
+    }, workId);
+    expect(detail.id).toBe(workId);
+    expect(detail.name).toContain("艳猎征途");
+    expect(detail.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
+  });
+
+  it("marks the signed-in platform author as the server owner", async () => {
+    const card = createBundledGridCard();
+    const authorAccountId = "39404f0e-7678-45a1-86c6-9a21116bacbd";
+    const instance = service({
+      getAccount: () => ({ accountId: authorAccountId, username: "服主" }),
+      requestConsole: async (endpoint: string) => endpoint.startsWith("/installed-apps/")
+        ? { id: card.companion.workId, app: { id: card.companion.workId, name: card.companion.name, created_by_account_id: authorAccountId } }
+        : { data: { items: [] } }
+    });
+    const state = await instance.open({ card, displayName: "服主", orientation: "any" });
+    instance.close();
+    expect(state.isAuthor).toBe(true);
+    expect(state.isServerOwner).toBe(true);
+    expect(state.work.authorAccountId).toBe(authorAccountId);
   });
 
   it("loads the verified program snapshot from the game card when the installed page omits its description", async () => {

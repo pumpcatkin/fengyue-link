@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
 const zlib = require("node:zlib");
-const { atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory } = require("./runtime-utils.cjs");
+const { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory } = require("./runtime-utils.cjs");
 const {
   upsertMultiplayerPrefix,
   upsertMultiplayerProfiles,
@@ -51,6 +51,7 @@ const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
+const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -222,6 +223,10 @@ function onlineWorldIdentityPath(profileId, accountId) {
 
 function onlineWorldCachePath(profileId) {
   return path.join(app.getPath("userData"), "online-world", "cache", `${safeProfileId(profileId)}.json`);
+}
+
+function onlineWorldCardLibraryPath(profileId) {
+  return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.json`);
 }
 
 function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
@@ -589,6 +594,8 @@ class AccountBackend {
     this.loginPageWarmPromise = null;
     this.accountRefreshPromise = null;
     this.account = { username: null, email: null, points: null, level: null, accountId: null, updatedAt: null };
+    this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
+    this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, createBundledGridCard());
     this.onlineWorldService = new OnlineWorldService({
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),
@@ -3409,6 +3416,81 @@ class AccountBackend {
         clearTimeout(timeoutId);
       }
     })()`, true);
+  }
+
+  listOnlineWorldCards() {
+    return {
+      cards: [...this.onlineWorldCards.values()].map(summarizeGameCard),
+      activeCardId: this.onlineWorldService?.card?.cardId || null
+    };
+  }
+
+  onlineWorldCard(cardId) {
+    const requested = String(cardId || "");
+    const card = this.onlineWorldCards.get(requested) || (requested ? null : this.onlineWorldCards.values().next().value);
+    if (!card) throw new Error("这张游戏卡尚未导入");
+    return card;
+  }
+
+  async openOnlineWorldCard(options = {}) {
+    const card = this.onlineWorldCard(options.cardId);
+    return this.onlineWorldService.open({
+      card,
+      displayName: options.displayName,
+      orientation: options.orientation
+    });
+  }
+
+  async importOnlineWorldCard() {
+    const selected = await dialog.showOpenDialog(this.window, {
+      title: "导入在线游戏世界游戏卡",
+      properties: ["openFile"],
+      filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
+    });
+    if (selected.canceled || !selected.filePaths[0]) return { canceled: true, ...this.listOnlineWorldCards() };
+    const file = selected.filePaths[0];
+    const size = fs.statSync(file).size;
+    if (size > 8 * 1024 * 1024) throw new Error("游戏卡文件超过 8 MiB 上限");
+    const card = validateGameCard(JSON.parse(fs.readFileSync(file, "utf8")));
+    this.onlineWorldCards.set(card.cardId, card);
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    return { canceled: false, imported: summarizeGameCard(card), ...this.listOnlineWorldCards() };
+  }
+
+  async exportOnlineWorldCard() {
+    const card = await this.onlineWorldService.exportGameCard();
+    this.onlineWorldCards.set(card.cardId, card);
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    const safeName = String(card.title || "online-world").replace(/[<>:\"/\\|?*\x00-\x1f]/g, "-").slice(0, 60) || "online-world";
+    const selected = await dialog.showSaveDialog(this.window, {
+      title: "导出完整游戏卡",
+      defaultPath: `${safeName}-${card.version}.fyow-card.json`,
+      filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
+    });
+    if (selected.canceled || !selected.filePath) return { canceled: true, card: summarizeGameCard(card) };
+    atomicWriteFileSync(fs, selected.filePath, `${JSON.stringify(card, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    return { canceled: false, filePath: selected.filePath, card: summarizeGameCard(card) };
+  }
+
+  async followOnlineWorldMigration(options = {}) {
+    const migration = this.onlineWorldService?.pendingMigration;
+    const current = this.onlineWorldService?.card;
+    if (!current || !migration?.workId || migration.workId === this.onlineWorldService?.work?.id) return this.onlineWorldService.state();
+    const card = rebindGameCard(current, migration.workId, this.origin);
+    this.onlineWorldCards.set(card.cardId, card);
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    return this.onlineWorldService.open({ card, displayName: options.displayName, orientation: options.orientation });
+  }
+
+  async migrateOnlineWorldCard() {
+    const result = await this.onlineWorldService.exportMigrationDraft();
+    if (result?.redirectPublished && this.onlineWorldService.card && result.workId) {
+      const card = rebindGameCard(this.onlineWorldService.card, result.workId, this.origin);
+      this.onlineWorldService.card = card;
+      this.onlineWorldCards.set(card.cardId, card);
+      saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    }
+    return result;
   }
 
   async onlineWorldModelRequest(request = {}) {
@@ -9022,14 +9104,18 @@ handleLocalIpc("backend:game-pointer", (_event, payload) => backend.dispatchGame
 handleLocalIpc("backend:game-key", (_event, payload) => backend.dispatchGameKey(payload));
 handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
-handleLocalIpc("online-world:open", (_event, options) => backend.onlineWorldService.open(options || {}));
+handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
+handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
+handleLocalIpc("online-world:export-card", () => backend.exportOnlineWorldCard());
+handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorldCard(options || {}));
+handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));
 handleLocalIpc("online-world:close", () => { backend.onlineWorldService.close(); return backend.onlineWorldService.state(); });
 handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
 handleLocalIpc("online-world:activate-program", () => backend.onlineWorldService.activateProgramUpdate());
 handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));
 handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineWorldService.submitIntent(intent || {}));
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
-handleLocalIpc("online-world:migrate", () => backend.onlineWorldService.exportMigrationDraft());
+handleLocalIpc("online-world:migrate", () => backend.migrateOnlineWorldCard());
 handleLocalIpc("backend:new-instance", (_event, requested) => {
   backend.assertAdminAccount();
   return new Promise((resolve, reject) => {

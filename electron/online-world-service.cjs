@@ -1,6 +1,5 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const path = require("node:path");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const {
   FYOW_SCHEMAS,
@@ -16,7 +15,8 @@ const {
   createResetDirective
 } = require("./online-world-protocol.cjs");
 const { sealJson, openSealedJson, publicIdentity } = require("./online-world-crypto.cjs");
-const { packProgram, parseProgram, injectSandboxCsp, composeSingleFileProgram } = require("./online-world-runtime.cjs");
+const { parseProgram } = require("./online-world-runtime.cjs");
+const { builtInGridProgram, validateGameCard, createExportedGameCard, summarizeGameCard } = require("./online-world-card.cjs");
 const {
   GRID_GAME_ID,
   GRID_SIZE,
@@ -37,17 +37,6 @@ const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
 const INTENT_RATE_WINDOW_MS = 60 * 1000;
 const INTENT_RATE_LIMIT = 30;
 const INTENT_PROCESS_LIMIT_PER_SYNC = 60;
-
-function builtInGridProgram() {
-  const directory = path.join(__dirname, "desktop", "online-world", "grid-conquest");
-  const html = composeSingleFileProgram(
-    fs.readFileSync(path.join(directory, "index.html"), "utf8"),
-    fs.readFileSync(path.join(directory, "styles.css"), "utf8"),
-    fs.readFileSync(path.join(directory, "game.js"), "utf8")
-  );
-  const packed = packProgram({ gameId: GRID_GAME_ID, title: "烽火慧眼", html });
-  return { manifest: { format: "fyow.program/1", gameId: GRID_GAME_ID, title: "烽火慧眼", apiVersion: 1 }, digest: packed.digest, html: injectSandboxCsp(html), compressedBytes: packed.compressedBytes, source: "builtin-preview" };
-}
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -106,32 +95,46 @@ function parseJsonAnswer(value) {
 }
 
 function exportedConfig(payload) {
-  return firstObject(payload, item => Object.hasOwn(item, "world_book") && (Object.hasOwn(item, "prpt") || Object.hasOwn(item, "pre_prompt")))
+  return firstObject(payload, item => ["world_book", "wbook", "lore_bk", "world_bk", "wb"].some(key => Object.hasOwn(item, key))
+    && ["prpt", "ppt", "pre_pt", "prompt_pre", "pre_prompt"].some(key => Object.hasOwn(item, key)))
     || payload?.data || payload;
 }
 
 function modelConfigSavePayload(exported, workId, name, description) {
   const payload = JSON.parse(JSON.stringify(exported || {}));
+  const firstString = (...values) => values.find(value => typeof value === "string") || "";
+  const summary = String(payload.summary ?? payload.smry ?? payload.abs_txt ?? payload.sum_info ?? payload.abstract ?? payload.app?.summary ?? "在线游戏世界");
   payload.app = {
     ...(payload.app && typeof payload.app === "object" ? payload.app : {}),
     id: String(workId),
     name: String(name),
-    description: String(description)
+    description: String(description),
+    summary,
+    language: String(payload.lang ?? payload.locale ?? payload.lc ?? payload.lng ?? payload.language ?? payload.app?.language ?? "zh-Hans"),
+    gender: Number(payload.gender ?? payload.ref_id2 ?? payload.app?.gender ?? 0),
+    cover: firstString(payload.cover, payload.cover_url, payload.cvr_url, payload.app?.cover),
+    cover_tiny: firstString(payload.cover_tiny, payload.cvr_tiny, payload.cover_sm, payload.app?.cover_tiny),
+    is_anonymous: Boolean(payload.is_anonymous ?? payload.is_anon ?? payload.ianon ?? payload.anon ?? payload.app?.is_anonymous ?? false),
+    update_content: "",
+    mod_permission: Number(payload.mod_permission ?? payload.mod_perm ?? payload.mod_pm ?? payload.mperm ?? payload.app?.mod_permission ?? 0),
+    disable_css_mod: Boolean(payload.disable_css_mod ?? payload.disable_cssmod ?? payload.dcm ?? payload.no_css_mod ?? payload.app?.disable_css_mod ?? false),
+    is_available_not_public: Boolean(payload.is_available_not_public ?? payload.avail_not_pub ?? payload.is_avail_np ?? payload.avail_np ?? payload.ianp ?? payload.app?.is_available_not_public ?? false),
+    schedule_publish_or_not: false
   };
-  payload.pre_prompt = payload.pre_prompt ?? payload.prpt ?? "";
-  payload.pre_text = payload.pre_text ?? payload.pretxt ?? "";
-  payload.post_text = payload.post_text ?? payload.posttxt ?? "";
-  payload.world_book = Array.isArray(payload.world_book) ? payload.world_book : [];
+  payload.pre_prompt = payload.pre_prompt ?? payload.prpt ?? payload.ppt ?? payload.pre_pt ?? payload.prompt_pre ?? "";
+  payload.pre_text = payload.pre_text ?? payload.pretxt ?? payload.ptx ?? payload.pre_tx ?? payload.prefix_txt ?? "";
+  payload.post_text = payload.post_text ?? payload.posttxt ?? payload.potx ?? payload.post_tx ?? payload.suffix_txt ?? "";
+  payload.world_book = payload.world_book || payload.wbook || payload.lore_bk || payload.world_bk || payload.wb || [];
   return payload;
 }
 
 function coreConfigMatches(exported, expected) {
   const fields = value => ({
-    description: String(value?.desc ?? value?.description ?? value?.app?.description ?? ""),
-    prePrompt: String(value?.prpt ?? value?.pre_prompt ?? ""),
-    preText: String(value?.pretxt ?? value?.pre_text ?? ""),
-    postText: String(value?.posttxt ?? value?.post_text ?? ""),
-    worldBook: value?.world_book || []
+    description: String(value?.desc ?? value?.descr ?? value?.dsc ?? value?.intro ?? value?.description ?? value?.app?.description ?? ""),
+    prePrompt: String(value?.prpt ?? value?.ppt ?? value?.pre_pt ?? value?.prompt_pre ?? value?.pre_prompt ?? ""),
+    preText: String(value?.pretxt ?? value?.ptx ?? value?.pre_tx ?? value?.prefix_txt ?? value?.pre_text ?? ""),
+    postText: String(value?.posttxt ?? value?.potx ?? value?.post_tx ?? value?.suffix_txt ?? value?.post_text ?? ""),
+    worldBook: value?.world_book || value?.wbook || value?.lore_bk || value?.world_bk || value?.wb || []
   });
   return canonicalJson(fields(exported)) === canonicalJson(fields(expected));
 }
@@ -199,6 +202,7 @@ class OnlineWorldService {
     this.lastClockCalibrationMono = null;
     this.readPlatformTime = options.readPlatformTime;
     this.now = () => this.clockAnchor ? this.clockAnchor.platformTime + (this.monotonicNow() - this.clockAnchor.monotonicTime) : this.rawNow();
+    this.card = null;
     this.work = null;
     this.program = builtInGridProgram();
     this.control = null;
@@ -235,6 +239,7 @@ class OnlineWorldService {
       status: this.status,
       syncing: this.syncing,
       error: this.error,
+      card: this.card ? summarizeGameCard(this.card) : null,
       work: this.work ? { ...this.work, description: undefined } : null,
       initialized: Boolean(this.control && this.world),
       isAuthor: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
@@ -325,16 +330,20 @@ class OnlineWorldService {
     return this.now();
   }
 
-  async open({ workUrl, orientation, displayName } = {}) {
+  async open({ card, workUrl, orientation, displayName } = {}) {
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
     const origin = String(this.getOrigin?.() || "").replace(/\/$/, "");
-    const reference = workReference(workUrl, origin);
+    const normalizedCard = card ? validateGameCard(card) : null;
+    const fixedWorkUrl = normalizedCard ? `${origin}/zh/explore/installed/${encodeURIComponent(normalizedCard.companion.workId)}` : workUrl;
+    const reference = workReference(fixedWorkUrl, origin);
+    if (normalizedCard && reference.workId !== normalizedCard.companion.workId) throw new Error("游戏卡绑定的伴生作品编号不一致");
     this.status = "opening";
     this.error = null;
     this.notify();
     await this.calibrateClock().catch(() => null);
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
+    this.card = normalizedCard;
     this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || builtInGridProgram();
     this.mapFactsCache = null;
@@ -357,6 +366,14 @@ class OnlineWorldService {
     this.startPolling();
     this.notify();
     return this.state();
+  }
+
+  async exportGameCard() {
+    if (!this.card || !this.work) throw new Error("请先打开一张游戏卡");
+    if (this.account().accountId !== this.work.authorAccountId) throw new Error("只有伴生作品作者可以导出包含创作页的完整游戏卡");
+    const payload = await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 });
+    const exported = exportedConfig(payload);
+    return createExportedGameCard(this.card, exported);
   }
 
   async refreshWorkProgram() {
@@ -1034,7 +1051,7 @@ class OnlineWorldService {
     const exported = exportedConfig(exportedPayload);
     const exportJson = canonicalJson(exported);
     const exportHash = sha256(Buffer.from(exportJson));
-    const description = String(exported.desc || exported.description || this.work.description || "");
+    const description = String(exported.desc || exported.descr || exported.dsc || exported.intro || exported.description || this.work.description || "");
     const created = await this.requestConsole("/apps", { method: "POST", body: { name: this.work.name, description, icon: "", icon_background: "", mode: "chat", type: 2 }, timeout: 30000 });
     const newWorkId = String(created?.data?.app?.id || created?.app?.id || created?.data?.id || created?.id || "");
     if (!newWorkId) throw new Error("平台没有返回新作品编号");
@@ -1053,7 +1070,7 @@ class OnlineWorldService {
       await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config`, { method: "POST", body: oldPayload, timeout: 30000 });
       const oldVerifiedPayload = await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 });
       const oldVerified = exportedConfig(oldVerifiedPayload);
-      oldWorkRenamed = String(oldVerified?.name ?? oldVerified?.app?.name ?? "") === archivedName;
+      oldWorkRenamed = String(oldVerified?.name ?? oldVerified?.nm ?? oldVerified?.ttl ?? oldVerified?.title ?? oldVerified?.app_name ?? oldVerified?.app?.name ?? "") === archivedName;
       if (!oldWorkRenamed) throw new Error("旧作品改名后回读不一致");
     } catch (error) {
       importError = String(error?.message || error || "配置导入失败");

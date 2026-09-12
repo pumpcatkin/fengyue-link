@@ -60,8 +60,8 @@
     </section>
     <section id="online-world-page" class="online-world-page hidden">
       <header class="online-world-toolbar">
-        <span><small>在线游戏世界</small><b>烽火慧眼</b><em id="online-world-status">尚未连接伴生作品</em></span>
-        <div><button id="online-world-sync" type="button">同步评论账本</button><button id="online-world-back" type="button">返回主页</button></div>
+        <span><small>在线游戏世界</small><b id="online-world-title">烽火慧眼</b><em id="online-world-status">尚未打开游戏卡</em></span>
+        <div><button id="online-world-initialize" class="hidden" type="button">初始化新赛季</button><button id="online-world-activate-program" class="hidden" type="button">签名启用程序</button><button id="online-world-migrate" class="hidden" type="button">重置并迁移</button><button id="online-world-export-card" class="hidden" type="button">导出完整游戏卡</button><button id="online-world-sync" type="button">同步评论账本</button><button id="online-world-back" type="button">返回主页</button></div>
       </header>
       <section id="online-world-setup" class="online-world-setup">
         <div>
@@ -70,17 +70,13 @@
           <p>在 64×64 的大陆上开采、练兵、行军、争夺领地并结识将领。所有计时由工具宿主读取真实时间，公开状态来自伴生作品评论账本。</p>
         </div>
         <form id="online-world-open-form">
-          <label>伴生作品地址<input id="online-world-url" type="url" placeholder="https://…/zh/explore/installed/作品编号" required></label>
+          <label>已导入游戏卡<select id="online-world-card" required></select><small id="online-world-card-binding">游戏卡固定绑定唯一伴生作品，玩家无需填写作品地址。</small></label>
+          <button id="online-world-import-card" type="button">从文件导入整张游戏卡</button>
           <label>游戏内姓名<input id="online-world-name" maxlength="40" placeholder="默认使用当前个人设定" required></label>
           <label>将领性别偏好<select id="online-world-orientation" required><option value="women">仅生成女性将领</option><option value="men">仅生成男性将领</option><option value="any">不限制将领性别</option></select><small>作为私人配置加密保存，不写入公开地图。</small></label>
           <button class="primary" id="online-world-open" type="submit">读取在线世界</button>
         </form>
-        <div id="online-world-setup-message" class="notice">请填写游戏卡伴生作品地址。普通玩家只需进入已安装作品页面复制地址。</div>
-        <div class="online-world-author-actions">
-          <button id="online-world-initialize" class="hidden" type="button">作者：初始化新赛季</button>
-          <button id="online-world-activate-program" class="hidden" type="button">作者：签名启用详情程序</button>
-          <button id="online-world-migrate" class="hidden" type="button">作者：重置游戏卡并迁移作品</button>
-        </div>
+        <div id="online-world-setup-message" class="notice">选择已导入游戏卡即可进入；伴生作品由卡包固定绑定。</div>
       </section>
       <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="online-world/grid-conquest/index.html" title="烽火慧眼游戏前端"></iframe>
     </section>
@@ -312,7 +308,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.14.0</div>
+    <div id="app-version" aria-label="当前版本">v0.14.1</div>
     <div id="toast"></div>
     <script src="renderer.js"></script>
   </body>

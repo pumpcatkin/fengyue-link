@@ -128,6 +128,7 @@ function applyUiTheme(value,{persist=true,syncBackend=true}={}){
 let uiTheme=applyUiTheme(initialUiTheme(),{persist:false});
 let state = null;
 let onlineWorldState = null;
+let onlineWorldCards = [];
 let onlineWorldFrameReady = false;
 let onlineWorldProgramHash = "builtin-preview";
 let onlineWorldProgramUrl = null;
@@ -622,6 +623,25 @@ function postOnlineWorldState(){
   onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"state",state:onlineWorldState},"*");
 }
 
+function renderOnlineWorldCards(library={}){
+  onlineWorldCards=Array.isArray(library.cards)?library.cards:onlineWorldCards;
+  const select=document.querySelector("#online-world-card");
+  const previous=library.activeCardId||select.value;
+  select.innerHTML="";
+  for(const card of onlineWorldCards){
+    const option=document.createElement("option");
+    option.value=card.cardId;
+    option.textContent=`${card.title} · ${card.workId}`;
+    select.appendChild(option);
+  }
+  if(previous&&onlineWorldCards.some(card=>card.cardId===previous))select.value=previous;
+  const selected=onlineWorldCards.find(card=>card.cardId===select.value)||onlineWorldCards[0];
+  select.disabled=!selected;
+  document.querySelector("#online-world-open").disabled=!selected;
+  document.querySelector("#online-world-card-binding").textContent=selected?`固定伴生作品：${selected.workName||selected.title}（${selected.workId}）`:`尚未导入游戏卡`;
+  document.querySelector("#online-world-title").textContent=selected?.title||"在线游戏世界";
+}
+
 function loadOnlineWorldProgram(next){
   const hash=next?.program?.digest||"builtin-preview";
   if(hash===onlineWorldProgramHash)return;
@@ -640,8 +660,8 @@ function followOnlineWorldMigration(next){
   onlineWorldMigrationTarget=migration.workId;
   setTimeout(async()=>{
     try{
-      const migrated=await api.openOnlineWorld({workUrl:migration.url,displayName:document.querySelector("#online-world-name").value.trim()||currentCharacterProfile()?.displayName||state?.account?.username||"玩家",orientation:document.querySelector("#online-world-orientation").value});
-      try{localStorage.setItem("fyow:last-work-url",migration.url)}catch{}
+      const migrated=await api.followOnlineWorldMigration({displayName:document.querySelector("#online-world-name").value.trim()||currentCharacterProfile()?.displayName||state?.account?.username||"玩家",orientation:document.querySelector("#online-world-orientation").value});
+      renderOnlineWorldCards(await api.listOnlineWorldCards());
       renderOnlineWorld(migrated);toast("游戏卡已按照作者签名指令迁移到新作品");
     }catch(error){toast(`游戏卡迁移地址暂时不可用：${friendlyError(error)}`)}
   },500);
@@ -651,7 +671,7 @@ function renderOnlineWorld(next){
   onlineWorldState=next;
   loadOnlineWorldProgram(next);
   const status=document.querySelector("#online-world-status");
-  const messages={closed:"尚未连接伴生作品",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":"等待作者初始化赛季",degraded:"使用缓存，等待重新同步",error:"读取失败"};
+  const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":"等待作者初始化赛季",degraded:"使用缓存，等待重新同步",error:"读取失败"};
   status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
   const initialized=Boolean(next?.initialized);
   document.querySelector("#online-world-setup").classList.toggle("hidden",initialized);
@@ -660,9 +680,14 @@ function renderOnlineWorld(next){
   initializeButton.classList.toggle("hidden",!next?.isAuthor||initialized);
   initializeButton.disabled=next?.program?.source!=="work-description";
   document.querySelector("#online-world-activate-program").classList.toggle("hidden",!next?.isAuthor||!initialized);
+  document.querySelector("#online-world-export-card").classList.toggle("hidden",!next?.isAuthor||!next?.work);
   document.querySelector("#online-world-migrate").classList.toggle("hidden",!next?.isAuthor||!initialized);
   document.querySelector("#online-world-sync").disabled=!next?.work||Boolean(next?.syncing);
-  document.querySelector("#online-world-setup-message").textContent=next?.error?`读取失败：${next.error}`:next?.work&&!initialized&&next?.program?.source!=="work-description"?`已连接《${next.work.name}》，但详细介绍中没有有效游戏程序包。请由作者按伴生作品文档填入程序。`:next?.work&&!initialized?`已连接《${next.work.name}》，该作品还没有在线赛季。${next.isAuthor?"可以由作者初始化。":"请等待作品作者初始化。"}`:"请填写游戏卡伴生作品地址。普通玩家只需进入已安装作品页面复制地址。";
+  document.querySelector("#online-world-setup-message").textContent=next?.error?`读取失败：${next.error}`:next?.work&&!initialized&&next?.program?.source!=="work-description"?`已连接《${next.work.name}》，但详细介绍中没有有效游戏程序包。请由作者按伴生作品文档填入程序。`:next?.work&&!initialized?`已连接《${next.work.name}》，该作品还没有在线赛季。${next.isAuthor?"可以由作者初始化。":"请等待作品作者初始化。"}`:"选择已导入游戏卡即可进入；伴生作品由卡包固定绑定。";
+  if(next?.card){
+    document.querySelector("#online-world-title").textContent=next.card.title||"在线游戏世界";
+    document.querySelector("#online-world-card-binding").textContent=`固定伴生作品：${next.card.workName||next.card.title}（${next.card.workId}）`;
+  }
   postOnlineWorldState();
   followOnlineWorldMigration(next);
 }
@@ -1090,23 +1115,31 @@ document.querySelector("#enter-online-world").addEventListener("click",async()=>
   if(!state?.loggedIn){toast("请先登录风月账号");return}
   const profile=currentCharacterProfile();
   document.querySelector("#online-world-name").value=document.querySelector("#online-world-name").value||profile?.displayName||state.account?.username||"";
-  try{const saved=localStorage.getItem("fyow:last-work-url");if(saved&&!document.querySelector("#online-world-url").value)document.querySelector("#online-world-url").value=saved}catch{}
   showPage("online-world");
-  try{renderOnlineWorld(await api.getOnlineWorldState())}catch(error){toast(friendlyError(error))}
+  try{renderOnlineWorldCards(await api.listOnlineWorldCards());renderOnlineWorld(await api.getOnlineWorldState())}catch(error){toast(friendlyError(error))}
 });
+document.querySelector("#online-world-card").addEventListener("change",()=>renderOnlineWorldCards({cards:onlineWorldCards,activeCardId:document.querySelector("#online-world-card").value}));
+document.querySelector("#online-world-import-card").addEventListener("click",()=>invoke(async()=>{
+  const result=await api.importOnlineWorldCard();
+  renderOnlineWorldCards(result);
+  if(!result.canceled)toast(`已导入《${result.imported.title}》，伴生作品绑定已锁定`);
+}).catch(()=>{}));
 document.querySelector("#online-world-back").addEventListener("click",()=>invoke(async()=>{await api.closeOnlineWorld();showPage("home")}).catch(()=>{}));
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();
   const button=document.querySelector("#online-world-open");button.disabled=true;button.textContent="正在读取评论账本…";
-  const workUrl=document.querySelector("#online-world-url").value.trim();
   try{
-    const next=await api.openOnlineWorld({workUrl,displayName:document.querySelector("#online-world-name").value.trim(),orientation:document.querySelector("#online-world-orientation").value});
-    try{localStorage.setItem("fyow:last-work-url",workUrl)}catch{}
+    const next=await api.openOnlineWorld({cardId:document.querySelector("#online-world-card").value,displayName:document.querySelector("#online-world-name").value.trim(),orientation:document.querySelector("#online-world-orientation").value});
     renderOnlineWorld(next);
   }catch(error){renderOnlineWorld({...onlineWorldState,status:"error",error:friendlyError(error)});toast(friendlyError(error))}
   finally{button.disabled=false;button.textContent="读取在线世界"}
 });
 document.querySelector("#online-world-sync").addEventListener("click",()=>invoke(async()=>renderOnlineWorld(await api.syncOnlineWorld(true))).catch(()=>{}));
+document.querySelector("#online-world-export-card").addEventListener("click",()=>invoke(async()=>{
+  const result=await api.exportOnlineWorldCard();
+  renderOnlineWorldCards(await api.listOnlineWorldCards());
+  if(!result.canceled)toast("完整游戏卡已导出，包含伴生作品创作页配置快照");
+}).catch(()=>{}));
 document.querySelector("#online-world-initialize").addEventListener("click",async()=>{
   if(!await confirmAction("这会在当前作品评论区写入新赛季控制记录和第一份地图快照。",{title:"初始化在线赛季",acceptText:"初始化"}))return;
   invoke(async()=>{renderOnlineWorld(await api.initializeOnlineWorld());toast("新赛季已初始化")}).catch(()=>{});

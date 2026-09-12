@@ -22,10 +22,15 @@ function cellKey(x,y){return `${x},${y}`}
 function dynamicCell(x,y){return payload?.world?.cells?.[cellKey(x,y)]||{ownerAccountId:null,soldiers:0,generalIds:[]}}
 function fact(x,y){return payload?.mapFacts?.[y*64+x]||{x,y,population:0,resourceGrade:"—",resourceRank:0,garrisonCap:0,neutralPower:0}}
 function ownerColor(owner,rank){
-  if(!owner)return `hsl(137 13% ${19+rank*.7}%)`;
-  if(owner===payload?.account?.accountId)return `hsl(${34+rank*1.7} 45% ${31+rank*.6}%)`;
+  const neutral=["#b6c88d","#a9bf82","#9fb679","#95ad70","#8aa568"];
+  const mine=["#f3cf76","#edbf61","#e6b151","#dc9f45","#d18f3c"];
+  const rivals=["#d98169","#cb6b5d","#bd5e54","#ae514b","#9b4745"];
+  const palette=!owner?neutral:owner===payload?.account?.accountId?mine:rivals;
+  if(!owner)return palette[Math.min(palette.length-1,Math.floor(rank/3))];
+  if(owner===payload?.account?.accountId)return palette[Math.min(palette.length-1,Math.floor(rank/3))];
   let hash=0;for(const char of owner)hash=(hash*31+char.charCodeAt(0))|0;
-  return `hsl(${Math.abs(hash)%360} 34% ${27+rank*.55}%)`;
+  const offset=Math.abs(hash)%palette.length;
+  return palette[(offset+Math.min(palette.length-1,Math.floor(rank/3)))%palette.length];
 }
 function zoomLabel(){return `${Number(zoom.toFixed(3))}×`}
 function updateMapScale(preserveCenter=true){
@@ -61,10 +66,11 @@ function draw(){
     context.fillStyle=ownerColor(cell.ownerAccountId,info.resourceRank);context.fillRect(x*size,y*size,size,size);
     if(cell.generalIds?.length){context.fillStyle="#f4d889";context.fillRect(x*size+size*.34,y*size+size*.34,size*.32,size*.32)}
   }
-  context.strokeStyle="rgba(238,224,184,.10)";context.lineWidth=.5;
+  context.strokeStyle="#5c704e";context.globalAlpha=.36;context.lineWidth=2;
   for(let i=0;i<=64;i+=1){context.beginPath();context.moveTo(i*size,0);context.lineTo(i*size,canvas.height);context.stroke();context.beginPath();context.moveTo(0,i*size);context.lineTo(canvas.width,i*size);context.stroke()}
-  if(selected){context.strokeStyle="#fff2ae";context.lineWidth=3;context.strokeRect(selected.x*size+1,selected.y*size+1,size-2,size-2)}
-  const player=ownPlayer();if(player){context.strokeStyle="#fff";context.lineWidth=2;context.beginPath();context.arc((player.position.x+.5)*size,(player.position.y+.5)*size,size*.35,0,Math.PI*2);context.stroke()}
+  context.globalAlpha=1;
+  if(selected){context.fillStyle="#fff1ac";context.globalAlpha=.36;context.fillRect(selected.x*size+2,selected.y*size+2,size-4,size-4);context.globalAlpha=1;context.strokeStyle="#4f3b2a";context.lineWidth=6;context.strokeRect(selected.x*size+3,selected.y*size+3,size-6,size-6)}
+  const player=ownPlayer();if(player){const px=(player.position.x+.5)*size,py=(player.position.y+.5)*size;context.fillStyle="#fff8e5";context.strokeStyle="#9d3f34";context.lineWidth=4;context.beginPath();context.moveTo(px,py-size*.34);context.lineTo(px+size*.28,py);context.lineTo(px,py+size*.34);context.lineTo(px-size*.28,py);context.closePath();context.fill();context.stroke()}
 }
 function showMessage(text){message.textContent=text;message.classList.remove("flash");requestAnimationFrame(()=>message.classList.add("flash"))}
 function formatDuration(ms){const seconds=Math.max(0,Math.ceil(ms/1000));if(seconds<60)return `${seconds}秒`;const minutes=Math.floor(seconds/60);const rest=seconds%60;return `${minutes}分${String(rest).padStart(2,"0")}秒`}

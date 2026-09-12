@@ -17,6 +17,7 @@ const {
   loadGameCardLibrary,
   saveGameCardLibrary
 } = require("../electron/online-world-card.cjs");
+const { parseProgram } = require("../electron/online-world-runtime.cjs");
 
 const temporaryDirectories: string[] = [];
 afterEach(() => {
@@ -31,11 +32,14 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("艳猎征途");
-    expect(card.version).toBe(2);
+    expect(card.version).toBe(3);
     expect(card.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
     expect(card.companion.configuration.app.summary).toContain("64×64");
     expect(card.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
+    const embeddedProgram = parseProgram(card.companion.configuration.app.description, card.gameId);
+    expect(embeddedProgram.html).not.toMatch(/<(?:script|link)\b[^>]+(?:src|href)=/i);
+    expect(embeddedProgram.html).toContain("#f7e6bd");
     expect(card.companion.configuration.pre_text).toContain("结构化任务引擎");
     expect(card.companion.configuration.pre_prompt).toContain("只有天生拥有“慧眼”");
     expect(card.companion.configuration.post_text).toContain("单个 JSON 对象");

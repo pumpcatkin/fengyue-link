@@ -84,8 +84,8 @@ GET /console/api/apps/{workId}/model-config/export
 ```text
 作品名：艳猎征途[b27218e680f94c0d]
 世界书：2 条
-详细介绍：13,870 字符
-程序 SHA-256：0b6523b9c5c1ef9783cfd2ce13af0031a98d66ea960ed8971121d235ec74e231
+详细介绍：14,656 字符
+程序 SHA-256：c41ad57299e4bea9dd58688a712ded4102cec21e5dc3836a30c9d43f26f1d009
 ```
 
 ## 5. 导出接口的动态别名

@@ -387,7 +387,7 @@ SDK 不暴露通用 `fetch`、`ipcRenderer`、文件路径、Token、Cookie、�
 固定伴生作品 `b27218e6-80f9-4c0d-91c7-4b8f87d47be8` 又在 2026-09-13 完成一次正式配置保存：
 
 - 作品名 `艳猎征途[b27218e680f94c0d]`，其中方括号内为从固定作品 UUID 派生的 16 位实例 ID；简介、前置词、世界观提示词和后置词均为本仓库固定模板。
-- “详细介绍”保存 13,870 字符的 `FYOW-PROGRAM/1` 信封，程序 SHA-256 为 `0b6523b9c5c1ef9783cfd2ce13af0031a98d66ea960ed8971121d235ec74e231`。
+- “详细介绍”保存 14,656 字符的 `FYOW-PROGRAM/1` 信封，程序 SHA-256 为 `c41ad57299e4bea9dd58688a712ded4102cec21e5dc3836a30c9d43f26f1d009`。
 - 将领生成和将领对话两个世界书均为 `key_region=2`、`enable=true`、`probability=100`。
 - 保存接口 HTTP 200，随后导出接口 HTTP 200；上述七项逐一比对全部通过。
 - 具体操作和平台字段经验见 `docs/aiero-creation-page-save-experience.md`。

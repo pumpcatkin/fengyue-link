@@ -16,6 +16,8 @@ const domainList = document.querySelector("#domain-list");
 const domainNote = document.querySelector("#domain-selection-note");
 const homePage = document.querySelector("#home-page");
 const profilesPage = document.querySelector("#profiles-page");
+const onlineWorldPage = document.querySelector("#online-world-page");
+const onlineWorldFrame = document.querySelector("#online-world-frame");
 const multiplayerPage = document.querySelector("#multiplayer-page");
 const appVersion = document.querySelector("#app-version");
 const settingsToggle = document.querySelector("#settings-toggle");
@@ -125,6 +127,11 @@ function applyUiTheme(value,{persist=true,syncBackend=true}={}){
 
 let uiTheme=applyUiTheme(initialUiTheme(),{persist:false});
 let state = null;
+let onlineWorldState = null;
+let onlineWorldFrameReady = false;
+let onlineWorldProgramHash = "builtin-preview";
+let onlineWorldProgramUrl = null;
+let onlineWorldMigrationTarget = null;
 let activePage = "home";
 let profileEditorDirty = false;
 let profileEditorId = null;
@@ -605,8 +612,59 @@ function showPage(page){
   activePage=page;
   homePage.classList.toggle("hidden",page!=="home");
   profilesPage.classList.toggle("hidden",page!=="profiles");
+  onlineWorldPage.classList.toggle("hidden",page!=="online-world");
   multiplayerPage.classList.toggle("hidden",page!=="multiplayer");
   if(page==="multiplayer")syncSurfaceBounds();
+}
+
+function postOnlineWorldState(){
+  if(!onlineWorldFrameReady||!onlineWorldState)return;
+  onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"state",state:onlineWorldState},"*");
+}
+
+function loadOnlineWorldProgram(next){
+  const hash=next?.program?.digest||"builtin-preview";
+  if(hash===onlineWorldProgramHash)return;
+  onlineWorldProgramHash=hash;
+  onlineWorldFrameReady=false;
+  if(onlineWorldProgramUrl){URL.revokeObjectURL(onlineWorldProgramUrl);onlineWorldProgramUrl=null}
+  if(next?.programHtml){
+    onlineWorldProgramUrl=URL.createObjectURL(new Blob([next.programHtml],{type:"text/html;charset=utf-8"}));
+    onlineWorldFrame.src=onlineWorldProgramUrl;
+  }else onlineWorldFrame.src="online-world/grid-conquest/index.html";
+}
+
+function followOnlineWorldMigration(next){
+  const migration=next?.migration;
+  if(!migration?.url||migration.workId===next?.work?.id||onlineWorldMigrationTarget===migration.workId)return;
+  onlineWorldMigrationTarget=migration.workId;
+  setTimeout(async()=>{
+    try{
+      const migrated=await api.openOnlineWorld({workUrl:migration.url,displayName:document.querySelector("#online-world-name").value.trim()||currentCharacterProfile()?.displayName||state?.account?.username||"玩家",orientation:document.querySelector("#online-world-orientation").value});
+      try{localStorage.setItem("fyow:last-work-url",migration.url)}catch{}
+      renderOnlineWorld(migrated);toast("游戏卡已按照作者签名指令迁移到新作品");
+    }catch(error){toast(`游戏卡迁移地址暂时不可用：${friendlyError(error)}`)}
+  },500);
+}
+
+function renderOnlineWorld(next){
+  onlineWorldState=next;
+  loadOnlineWorldProgram(next);
+  const status=document.querySelector("#online-world-status");
+  const messages={closed:"尚未连接伴生作品",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":"等待作者初始化赛季",degraded:"使用缓存，等待重新同步",error:"读取失败"};
+  status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
+  const initialized=Boolean(next?.initialized);
+  document.querySelector("#online-world-setup").classList.toggle("hidden",initialized);
+  onlineWorldFrame.classList.toggle("hidden",!initialized);
+  const initializeButton=document.querySelector("#online-world-initialize");
+  initializeButton.classList.toggle("hidden",!next?.isAuthor||initialized);
+  initializeButton.disabled=next?.program?.source!=="work-description";
+  document.querySelector("#online-world-activate-program").classList.toggle("hidden",!next?.isAuthor||!initialized);
+  document.querySelector("#online-world-migrate").classList.toggle("hidden",!next?.isAuthor||!initialized);
+  document.querySelector("#online-world-sync").disabled=!next?.work||Boolean(next?.syncing);
+  document.querySelector("#online-world-setup-message").textContent=next?.error?`读取失败：${next.error}`:next?.work&&!initialized&&next?.program?.source!=="work-description"?`已连接《${next.work.name}》，但详细介绍中没有有效游戏程序包。请由作者按伴生作品文档填入程序。`:next?.work&&!initialized?`已连接《${next.work.name}》，该作品还没有在线赛季。${next.isAuthor?"可以由作者初始化。":"请等待作品作者初始化。"}`:"请填写游戏卡伴生作品地址。普通玩家只需进入已安装作品页面复制地址。";
+  postOnlineWorldState();
+  followOnlineWorldMigration(next);
 }
 
 async function setSettingsOpen(open){
@@ -787,6 +845,7 @@ function render(next){
   loginPanel.classList.toggle("hidden",!requiresLogin);
   document.querySelector("#home-actions-panel").classList.toggle("hidden",requiresLogin);
   document.querySelector("#enter-multiplayer").disabled=requiresLogin;
+  document.querySelector("#enter-online-world").disabled=requiresLogin;
   document.querySelector("#edit-profiles").disabled=requiresLogin;
   document.querySelector("#profile-label").textContent=`账号实例 · ${next.profileId}`;
   document.querySelector("#account-status").textContent=next.loginInProgress?"正在登录":next.loggedIn?"账号已登录":"账号未登录";
@@ -1027,6 +1086,65 @@ function render(next){
 }
 
 document.querySelector("#enter-multiplayer").addEventListener("click",()=>{if(!state?.loggedIn){toast("请先登录风月账号");return}showPage("multiplayer")});
+document.querySelector("#enter-online-world").addEventListener("click",async()=>{
+  if(!state?.loggedIn){toast("请先登录风月账号");return}
+  const profile=currentCharacterProfile();
+  document.querySelector("#online-world-name").value=document.querySelector("#online-world-name").value||profile?.displayName||state.account?.username||"";
+  try{const saved=localStorage.getItem("fyow:last-work-url");if(saved&&!document.querySelector("#online-world-url").value)document.querySelector("#online-world-url").value=saved}catch{}
+  showPage("online-world");
+  try{renderOnlineWorld(await api.getOnlineWorldState())}catch(error){toast(friendlyError(error))}
+});
+document.querySelector("#online-world-back").addEventListener("click",()=>invoke(async()=>{await api.closeOnlineWorld();showPage("home")}).catch(()=>{}));
+document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  const button=document.querySelector("#online-world-open");button.disabled=true;button.textContent="正在读取评论账本…";
+  const workUrl=document.querySelector("#online-world-url").value.trim();
+  try{
+    const next=await api.openOnlineWorld({workUrl,displayName:document.querySelector("#online-world-name").value.trim(),orientation:document.querySelector("#online-world-orientation").value});
+    try{localStorage.setItem("fyow:last-work-url",workUrl)}catch{}
+    renderOnlineWorld(next);
+  }catch(error){renderOnlineWorld({...onlineWorldState,status:"error",error:friendlyError(error)});toast(friendlyError(error))}
+  finally{button.disabled=false;button.textContent="读取在线世界"}
+});
+document.querySelector("#online-world-sync").addEventListener("click",()=>invoke(async()=>renderOnlineWorld(await api.syncOnlineWorld(true))).catch(()=>{}));
+document.querySelector("#online-world-initialize").addEventListener("click",async()=>{
+  if(!await confirmAction("这会在当前作品评论区写入新赛季控制记录和第一份地图快照。",{title:"初始化在线赛季",acceptText:"初始化"}))return;
+  invoke(async()=>{renderOnlineWorld(await api.initializeOnlineWorld());toast("新赛季已初始化")}).catch(()=>{});
+});
+document.querySelector("#online-world-activate-program").addEventListener("click",async()=>{
+  if(!await confirmAction("这会重新读取作品详细介绍，并用作者密钥签名启用其中的游戏程序包。",{title:"启用详情程序",acceptText:"签名启用"}))return;
+  invoke(async()=>{renderOnlineWorld(await api.activateOnlineWorldProgram());toast("详情程序已经签名启用")}).catch(()=>{});
+});
+document.querySelector("#online-world-migrate").addEventListener("click",async()=>{
+  if(!await confirmAction("这会导出当前作品配置、创建同配置的新作品并搬迁赛季账本；所有回读校验成功后，才会在旧作品评论区发布签名重置指令。",{title:"重置并迁移在线游戏卡",acceptText:"建立迁移作品"}))return;
+  invoke(async()=>{const result=await api.migrateOnlineWorld();await api.copyText(result.url);toast(result.redirectPublished?"迁移配置已回读验证，地址已复制；发布新作品后即可完成切换":`迁移草稿地址已复制；${result.importError||"请在创作页补全配置"}`)}).catch(()=>{});
+});
+window.addEventListener("message",async event=>{
+  if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest")return;
+  if(event.data.type==="ready"){
+    onlineWorldFrameReady=true;
+    if(!onlineWorldState)try{onlineWorldState=await api.getOnlineWorldState()}catch{}
+    postOnlineWorldState();return;
+  }
+  if(event.data.type==="direct"){
+    try{
+      const result=await api.sendOnlineWorldDirect(event.data.message||{});
+      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{...result,direct:true}},"*");
+    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+    return;
+  }
+  if(event.data.type!=="intent")return;
+  const intent={...(event.data.intent||{})};
+  if(intent.type==="join"){
+    intent.orientation=document.querySelector("#online-world-orientation").value;
+    intent.displayName=document.querySelector("#online-world-name").value.trim()||currentCharacterProfile()?.displayName||state?.account?.username||"玩家";
+  }
+  try{
+    const result=await api.submitOnlineWorldIntent(intent);
+    if(result?.state)renderOnlineWorld(result.state);
+    onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result},"*");
+  }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+});
 settingsToggle.addEventListener("click",()=>invoke(()=>setSettingsOpen(!settingsOpen)).catch(()=>{}));
 document.querySelector("#settings-close").addEventListener("click",()=>invoke(()=>setSettingsOpen(false)).catch(()=>{}));
 document.querySelectorAll("[data-theme-choice]").forEach(button=>button.addEventListener("click",()=>{uiTheme=applyUiTheme(button.dataset.themeChoice)}));
@@ -1303,6 +1421,7 @@ window.addEventListener("resize",syncSurfaceBounds);
 new ResizeObserver(syncSurfaceBounds).observe(slot);
 api.onState(next=>{const previous=state;consumeStateEffects(next,previous);render(next);if(next.roundCompleted)toast("本轮结果已同步，对话界面已经开放");if(next.roundError)toast(next.roundError);if(next.workLoadError)toast(next.workLoadError);if(next.introUnavailable)toast("平台预览页尚未返回作品介绍视窗");if(next.protocolError)toast(`会话同步重试中：${next.protocolError}`);if(next.messageOperationCompleted)toast("记录操作已在全体成员端完成");if(next.messageOperationError)toast(`记录同步失败：${next.messageOperationError}`);if(next.hostModelChanged)toast("房主已更换平台模型");if(next.roomChatError)toast(next.roomChatError);if(next.appUpdateChanged&&next.appUpdate?.status==="ready")toast(next.appUpdate.message);if(next.appUpdateChanged&&next.appUpdate?.status==="error"&&next.releaseSecurity?.verified)toast(next.appUpdate.message)});
 api.onGameFrame(frame=>{if(frame?.reset){resetGameFrame();return}if(!frame?.bytes||state?.backgroundPages?.gamePresentationAllowed===false)return;pendingGameFrame=frame;void drainGameFrames()});
+api.onOnlineWorldState(next=>renderOnlineWorld(next));
 api.onLog(entry=>{if(state?.isAdmin)receiveSessionLog(entry)});
 api.getAppVersion().then(version=>{appVersion.textContent=`v${version}`}).catch(()=>{});
 api.getReleaseChannel().then(applyReleaseIdentity).catch(applyReleaseIdentity);

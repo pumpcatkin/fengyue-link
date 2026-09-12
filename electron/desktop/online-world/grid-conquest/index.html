@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'">
+    <title>烽火慧眼 · 在线游戏世界</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="game-header">
+        <div><small>在线游戏世界 · 首款游戏</small><h1>烽火慧眼</h1><p>64 × 64 大陆争夺</p></div>
+        <div class="clock"><small>宿主校准时间</small><b id="clock">--:--:--</b><span id="year">第 1 年</span></div>
+      </header>
+      <section class="layout">
+        <div class="map-card">
+          <div class="map-toolbar">
+            <span id="world-status">等待工具宿主…</span>
+            <div><button id="zoom-out" type="button">−</button><b id="zoom-label">1×</b><button id="zoom-in" type="button">＋</button><button id="center-map" type="button">定位</button></div>
+          </div>
+          <div id="map-viewport" class="map-viewport"><canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas></div>
+          <div class="legend"><span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span><span>颜色深浅代表资源等级</span><span>鼠标右键拖动地图</span></div>
+        </div>
+        <aside>
+          <section class="panel player-panel">
+            <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
+            <div class="metrics"><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
+            <button id="join-world" class="primary hidden" type="button">加入本赛季</button>
+          </section>
+          <section class="panel cell-panel">
+            <header><span><small>当前格子</small><b id="cell-coordinate">请选择地图格子</b></span><em id="cell-owner">—</em></header>
+            <div class="cell-facts"><span>人口 <b id="cell-population">—</b></span><span>资源 <b id="cell-resource">—</b></span><span>驻军 <b id="cell-garrison">—</b></span><span>守备战力 <b id="cell-power">—</b></span></div>
+            <div class="action-grid">
+              <button id="start-mining" type="button">挂机开采</button>
+              <label>练兵数量<input id="train-amount" type="number" min="1" max="10000" value="10"></label>
+              <button id="train" type="button">开始练兵</button>
+              <label>行军士兵<input id="march-soldiers" type="number" min="0" value="0"></label>
+              <div id="march-generals" class="march-generals"><small>随行将领</small><span>暂无可选将领</span></div>
+              <label class="check"><input id="march-attack" type="checkbox"><span>抵达后攻打</span></label>
+              <button id="march" class="primary" type="button">向这里行军</button>
+            </div>
+          </section>
+          <section class="panel">
+            <header><span><small>现实时间队列</small><b>进行中的行动</b></span></header>
+            <div id="jobs" class="stack empty">暂无任务</div>
+          </section>
+          <section class="panel">
+            <header><span><small>身边与部署</small><b>将领</b></span></header>
+            <div id="generals" class="stack empty">尚无将领</div>
+          </section>
+          <section id="direct-panel" class="panel direct-panel">
+            <header><span><small>评论唤醒 · 定向私信</small><b>密谈与将领书信</b></span><em id="direct-count">0 封来信</em></header>
+            <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
+            <form id="direct-form">
+              <label>收信玩家<select id="direct-recipient"></select></label>
+              <label>消息类型<select id="direct-type"><option value="diplomacy">私人密谈</option><option value="captured-general-letter">被俘将领书信</option></select></label>
+              <label id="direct-general-row" class="hidden">写信将领<select id="direct-general"></select></label>
+              <textarea id="direct-text" maxlength="500" placeholder="输入只发送给指定玩家的内容"></textarea>
+              <button type="submit">发送定向消息</button>
+            </form>
+          </section>
+          <section class="panel dialogue hidden" id="dialogue-panel">
+            <header><span><small id="dialogue-general">将领对话</small><b>交谈</b></span><button id="close-dialogue" type="button">关闭</button></header>
+            <div id="dialogue-history" class="dialogue-history"></div>
+            <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button class="primary" type="submit">发送</button></form>
+          </section>
+          <div id="message" class="message">游戏前端不接触平台 Token，所有行动均交给工具宿主验证。</div>
+        </aside>
+      </section>
+    </main>
+    <script src="game.js"></script>
+  </body>
+</html>

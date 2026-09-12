@@ -77,6 +77,34 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`document.querySelector('[data-author-link="homepage"]').disabled`), true);
       await evaluate(`document.querySelector('[data-author-link="github"]').click()`);
       assert(calls.some(call => call.name === "openAuthorLink" && call.args[0] === "github"));
+      assert.equal(await evaluate(`document.querySelector('#enter-multiplayer').nextElementSibling.id`), "enter-online-world");
+      assert.equal(await evaluate(`document.querySelector('#enter-online-world').nextElementSibling.id`), "edit-profiles");
+      assert.equal(await evaluate(`document.querySelector('#online-world-frame').getAttribute('sandbox')`), "allow-scripts");
+      await evaluate(`document.querySelector('#enter-online-world').click()`);
+      await settle();
+      assert.equal(await evaluate(`!document.querySelector('#online-world-page').classList.contains('hidden')`), true);
+      assert.equal(await evaluate(`document.querySelector('#online-world-setup h1').textContent`), "烽火慧眼");
+      fs.writeFileSync(path.join(outputDir, "online-world-setup.png"), (await window.webContents.capturePage()).toPNG());
+      const mapFacts = Array.from({ length: 4096 }, (_, index) => ({ x: index % 64, y: Math.floor(index / 64), population: 100 + index % 9901, resourceGrade: ["D-", "C", "B", "A", "S+"][index % 5], resourceRank: index % 15, garrisonCap: 20 + index % 1980, neutralPower: 20 + index % 1980 }));
+      const runtime = require(path.join(root, "electron/online-world-runtime.cjs"));
+      const gameDirectory = path.join(root, "electron/desktop/online-world/grid-conquest");
+      const programHtml = runtime.injectSandboxCsp(runtime.composeSingleFileProgram(fs.readFileSync(path.join(gameDirectory, "index.html"), "utf8"), fs.readFileSync(path.join(gameDirectory, "styles.css"), "utf8"), fs.readFileSync(path.join(gameDirectory, "game.js"), "utf8")));
+      window.webContents.send("qa:onOnlineWorldState", { status: "ready", initialized: true, revision: 1, work: { id: "fixture", name: "烽火慧眼" }, control: { seasonId: "fixture-season" }, account: { accountId: "a", username: "本地测试" }, world: { seed: "fixture", startedAt: Date.now(), revision: 1, cells: { "4,7": { ownerAccountId: "a", soldiers: 80, generalIds: [] }, "5,7": { ownerAccountId: "b", soldiers: 60, generalIds: [] } }, players: { a: { accountId: "a", displayName: "本地测试", gold: 1000, position: { x: 4, y: 7 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"] }, b: { accountId: "b", displayName: "北境玩家", position: { x: 5, y: 7 } } }, generals: { g1: { id: "g1", name: "青禾", power: 500, holderAccountId: "a", loyalToAccountId: "b", capturedFromAccountId: "b", status: "carried", setting: "善守城，重信义。", memoryText: "言谈：暂无\n经历：[1年]战败被俘" } }, jobs: {} }, directInbox: [{ messageId: "dm1", fromAccountId: "b", type: "diplomacy", payload: { text: "愿暂息兵戈，共商边界。" }, createdAt: Date.now() }], mapFacts, serverNow: Date.now(), program: { source: "builtin-preview", digest: "fixture-builtin-loaded" }, programHtml });
+      await settle();
+      assert.equal(await evaluate(`!document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
+      fs.writeFileSync(path.join(outputDir, "online-world-game.png"), (await window.webContents.capturePage()).toPNG());
+      const embeddedGameFrame = window.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
+      assert(embeddedGameFrame, "missing sandboxed online-world frame");
+      const mapMetrics = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');const canvas=document.querySelector('#map');return{label:document.querySelector('#zoom-label').textContent,visibleColumns:viewport.clientWidth/(canvas.getBoundingClientRect().width/64)}})()`);
+      assert.equal(mapMetrics.label, "1×");
+      assert(mapMetrics.visibleColumns >= 11 && mapMetrics.visibleColumns <= 13);
+      const zoomed = await embeddedGameFrame.executeJavaScript(`(()=>{document.querySelector('#zoom-in').click();return document.querySelector('#zoom-label').textContent})()`);
+      assert.equal(zoomed, "1.25×");
+      const panned = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');viewport.scrollTo(1000,1000);viewport.setPointerCapture=()=>{};viewport.hasPointerCapture=()=>false;viewport.dispatchEvent(new PointerEvent('pointerdown',{button:2,pointerId:7,clientX:500,clientY:500,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointermove',{button:2,buttons:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointerup',{button:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));return viewport.scrollLeft>1000&&viewport.scrollTop>1000})()`);
+      assert.equal(panned, true);
+      await evaluate(`document.querySelector('#online-world-back').click()`);
+      await settle();
+      assert.equal(await evaluate(`!document.querySelector('#home-page').classList.contains('hidden')`), true);
       state = { ...state, settingsVisible: true };
       const settingsWindow = new BrowserWindow({ show: false, width: 370, height: 720, webPreferences: { preload: __filename, contextIsolation: true, sandbox: false, backgroundThrottling: false, offscreen: true } });
       try {
@@ -236,7 +264,7 @@ if (process.type === "renderer") {
         assert.equal(await page.webContents.executeJavaScript(`document.querySelectorAll('[data-fymp-conversation-tool]').length`), 1);
         assert.deepEqual(errors, []);
       } finally { page.destroy(); server.close(); }
-      fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ passed: true, version, electron: process.versions.electron, errors, checks: ["branded official notice", "hidden first-run verification result dialog", "lobby selection", "tab and member placement", "appearance privacy and collapse state", "native confirmation IPC", "conversation management UI wiring", "guest native view and frame gating", "plugin UI", "guest read-only", "real response projection", "server original preserved", "platform theme storage and DOM", "output card anchor and idempotence"] }, null, 2));
+      fs.writeFileSync(path.join(outputDir, "result.json"), JSON.stringify({ passed: true, version, electron: process.versions.electron, errors, checks: ["branded official notice", "hidden first-run verification result dialog", "online world entry and sandbox", "lobby selection", "tab and member placement", "appearance privacy and collapse state", "native confirmation IPC", "conversation management UI wiring", "guest native view and frame gating", "plugin UI", "guest read-only", "real response projection", "server original preserved", "platform theme storage and DOM", "output card anchor and idempotence"] }, null, 2));
       console.log("Offline desktop integration QA passed: " + outputDir);
       window.destroy();
       app.exit(0);

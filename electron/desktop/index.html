@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'nonce-fyow-game-v1'; script-src 'self' 'nonce-fyow-game-v1'; connect-src 'none'; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
     <title>风月联机工具</title>
     <link rel="icon" type="image/png" href="assets/cat-pumpkin-logo.png">
     <link rel="stylesheet" href="styles.css">
@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="layout-fixes.css">
     <link rel="stylesheet" href="logs.css">
     <link rel="stylesheet" href="game-frame.css">
+    <link rel="stylesheet" href="online-world.css">
     <link rel="stylesheet" href="theme.css">
   </head>
   <body>
@@ -19,8 +20,8 @@
         <header class="landing-header"><img class="landing-logo" src="assets/cat-pumpkin-logo.png" alt=""><h1 data-product-name>风月联机工具</h1></header>
         <div class="landing-actions" aria-label="功能入口">
           <button class="feature-card primary" id="enter-multiplayer"><b>联机同乐</b><small>创建或加入多人房间</small></button>
+          <button class="feature-card online-world-entry" id="enter-online-world"><b>在线游戏世界</b><small>在同一片持久在线大陆中发展与征战</small></button>
           <button class="feature-card" id="edit-profiles"><b>编辑个人设定</b><small id="edit-profiles-note">管理联机角色资料</small></button>
-          <div class="feature-card feature-placeholder" aria-hidden="true"><b>更多功能</b><small>后续更新</small></div>
         </div>
       </div>
       <div id="login-panel" class="login-panel">
@@ -56,6 +57,32 @@
         <div class="profile-editor-actions"><button id="profile-new">新建角色</button><button id="profile-delete">删除角色</button><button class="primary" id="profile-save">保存并设为当前</button></div>
         <div class="notice">当前选中的设定会自动用于创建或加入房间；房间开启后不能切换。</div>
       </div>
+    </section>
+    <section id="online-world-page" class="online-world-page hidden">
+      <header class="online-world-toolbar">
+        <span><small>在线游戏世界</small><b>烽火慧眼</b><em id="online-world-status">尚未连接伴生作品</em></span>
+        <div><button id="online-world-sync" type="button">同步评论账本</button><button id="online-world-back" type="button">返回主页</button></div>
+      </header>
+      <section id="online-world-setup" class="online-world-setup">
+        <div>
+          <small>第一款持久在线游戏</small>
+          <h1>烽火慧眼</h1>
+          <p>在 64×64 的大陆上开采、练兵、行军、争夺领地并结识将领。所有计时由工具宿主读取真实时间，公开状态来自伴生作品评论账本。</p>
+        </div>
+        <form id="online-world-open-form">
+          <label>伴生作品地址<input id="online-world-url" type="url" placeholder="https://…/zh/explore/installed/作品编号" required></label>
+          <label>游戏内姓名<input id="online-world-name" maxlength="40" placeholder="默认使用当前个人设定" required></label>
+          <label>将领性别偏好<select id="online-world-orientation" required><option value="women">仅生成女性将领</option><option value="men">仅生成男性将领</option><option value="any">不限制将领性别</option></select><small>作为私人配置加密保存，不写入公开地图。</small></label>
+          <button class="primary" id="online-world-open" type="submit">读取在线世界</button>
+        </form>
+        <div id="online-world-setup-message" class="notice">请填写游戏卡伴生作品地址。普通玩家只需进入已安装作品页面复制地址。</div>
+        <div class="online-world-author-actions">
+          <button id="online-world-initialize" class="hidden" type="button">作者：初始化新赛季</button>
+          <button id="online-world-activate-program" class="hidden" type="button">作者：签名启用详情程序</button>
+          <button id="online-world-migrate" class="hidden" type="button">作者：重置游戏卡并迁移作品</button>
+        </div>
+      </section>
+      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="online-world/grid-conquest/index.html" title="烽火慧眼游戏前端"></iframe>
     </section>
     <div class="app-shell hidden" id="multiplayer-page">
       <aside class="sidebar">
@@ -285,7 +312,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.13.1</div>
+    <div id="app-version" aria-label="当前版本">v0.14.0</div>
     <div id="toast"></div>
     <script src="renderer.js"></script>
   </body>

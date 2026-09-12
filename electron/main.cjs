@@ -49,6 +49,8 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
+const { OnlineWorldService } = require("./online-world-service.cjs");
+const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -212,6 +214,31 @@ function saveCredentials(profileId, credentials) {
 function clearCredentials(profileId) {
   const file = credentialPath(profileId);
   for (const candidate of [file, `${file}.bak`]) if (fs.existsSync(candidate)) fs.rmSync(candidate, { force: true });
+}
+
+function onlineWorldIdentityPath(profileId, accountId) {
+  return path.join(app.getPath("userData"), "online-world", "identities", `${safeProfileId(profileId)}-${safeProfileId(accountId || "unknown")}.json`);
+}
+
+function onlineWorldCachePath(profileId) {
+  return path.join(app.getPath("userData"), "online-world", "cache", `${safeProfileId(profileId)}.json`);
+}
+
+function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("当前系统不能加密保存在线世界设备密钥");
+  if (!accountId) throw new Error("登录账号尚未完成在线世界设备绑定");
+  const file = onlineWorldIdentityPath(profileId, accountId);
+  if (fs.existsSync(file)) {
+    try {
+      const payload = readJsonWithBackupSync(fs, file, value => value?.version === 1 && typeof value?.encrypted === "string").value;
+      const identity = JSON.parse(safeStorage.decryptString(Buffer.from(payload.encrypted, "base64")));
+      if (identity?.version === 1 && identity.signingPrivateKey && identity.encryptionPrivateKey) return identity;
+    } catch {}
+  }
+  const identity = generateOnlineWorldIdentity();
+  const encrypted = safeStorage.encryptString(JSON.stringify(identity)).toString("base64");
+  atomicWriteJsonSync(fs, file, { version: 1, encrypted }, { pretty: false });
+  return identity;
 }
 
 function saveAnchorPath(profileId) {
@@ -562,6 +589,19 @@ class AccountBackend {
     this.loginPageWarmPromise = null;
     this.accountRefreshPromise = null;
     this.account = { username: null, email: null, points: null, level: null, accountId: null, updatedAt: null };
+    this.onlineWorldService = new OnlineWorldService({
+      requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
+      requestGo: (pathname, options) => this.platformGoApi(pathname, options),
+      requestModel: request => this.onlineWorldModelRequest(request),
+      getAccount: () => this.account,
+      getIdentity: () => loadOrCreateOnlineWorldIdentity(this.profileId, this.account.accountId),
+      getOrigin: () => this.origin,
+      readPlatformTime: () => this.platformServerTime(),
+      cacheFile: onlineWorldCachePath(this.profileId),
+      onChange: worldState => {
+        if (!this.destroying && this.window && !this.window.isDestroyed()) this.window.webContents.send("online-world:state", worldState);
+      }
+    });
     this.saveAnchors = loadSaveAnchors(profileId);
     this.prefixAdapters = loadPrefixAdapters();
     this.prefixAdapterBusy = false;
@@ -769,6 +809,7 @@ class AccountBackend {
         accountId: this.account.accountId,
         updatedAt: this.account.updatedAt
       },
+      onlineWorld: this.onlineWorldService.summary(),
       room: this.room ? {
         id: this.room.id,
         role: this.room.role,
@@ -2592,6 +2633,7 @@ class AccountBackend {
     if (this.room) throw new Error("请先退出或关闭当前房间，再登出账号");
     if (this.loginInProgress) throw new Error("登录流程进行中，请稍后再试");
     const previousOrigin = this.origin;
+    this.onlineWorldService.close();
     this.authSessionRevision += 1;
     this.clearAuthenticationFailures("explicit-logout");
     this.closeOAuthWindows();
@@ -3317,6 +3359,22 @@ class AccountBackend {
     })()`, true);
   }
 
+  async platformServerTime() {
+    const anchor = await this.ensureAnchor();
+    if (anchor.webContents.isLoading()) await Promise.race([
+      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
+    ]);
+    return anchor.webContents.executeJavaScript(`(async () => {
+      const token = localStorage.getItem('console_token') || '';
+      const response = await fetch('/go/api/account/profile', { method:'GET', credentials:'include', cache:'no-store', headers:{Authorization:'Bearer ' + token,'X-Language':'zh-Hans'} });
+      if (!response.ok) throw new Error('平台时间校准请求失败：' + response.status);
+      const serverTime = Date.parse(response.headers.get('date') || '');
+      if (!Number.isFinite(serverTime)) throw new Error('平台响应缺少服务器时间');
+      return serverTime;
+    })()`, true);
+  }
+
   async platformGoApi(pathname, { method = "GET", body, timeout = 12000 } = {}) {
     const anchor = await this.ensureAnchor();
     if (anchor.webContents.isLoading()) await Promise.race([
@@ -3350,6 +3408,76 @@ class AccountBackend {
       } finally {
         clearTimeout(timeoutId);
       }
+    })()`, true);
+  }
+
+  async onlineWorldModelRequest(request = {}) {
+    this.assertToolLoggedIn();
+    const workId = this.onlineWorldService?.work?.id;
+    if (!workId) throw new Error("在线世界尚未绑定伴生作品");
+    const keyword = String(request.keyword || `[[FYOW:TASK:${request.task || "unknown"}:v1]]`).slice(0, 200);
+    const query = `${keyword}\n${JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} })}`;
+    const anchor = await this.ensureAnchor();
+    if (anchor.webContents.isLoading()) await Promise.race([
+      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
+    ]);
+    return anchor.webContents.executeJavaScript(`(async () => {
+      const token = localStorage.getItem('console_token') || '';
+      if (!token) throw new Error('账号登录令牌不存在');
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      try {
+        const response = await fetch('/go/api/apps/chat-messages', {
+          method:'POST', credentials:'include', cache:'no-store', signal:controller.signal,
+          headers:{Authorization:'Bearer ' + token,'Content-Type':'application/json','X-Language':'zh-Hans'},
+          body:JSON.stringify({app_id:${JSON.stringify(workId)},inputs:{},conversation_id:'',query:${JSON.stringify(query)},response_mode:'streaming',files:[]})
+        });
+        if (!response.ok) {
+          const failure = await response.json().catch(() => ({}));
+          throw new Error(failure?.message || failure?.msg || ('模型请求失败：' + response.status));
+        }
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('模型响应缺少数据流');
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let answer = '';
+        let taskId = null;
+        let messageId = null;
+        let conversationId = null;
+        let usage = null;
+        const accept = raw => {
+          const line = raw.trim();
+          if (!line.startsWith('data:')) return;
+          const body = line.slice(5).trim();
+          if (!body || body === '[DONE]') return;
+          let data; try { data = JSON.parse(body); } catch { return; }
+          if (data.event === 'error') throw new Error(data.message || data.error || '模型流返回错误');
+          taskId ||= data.task_id || data.taskId || null;
+          messageId ||= data.message_id || data.messageId || null;
+          conversationId ||= data.conversation_id || data.conversationId || null;
+          const text = data.answer ?? data.text ?? data.data?.answer ?? data.data?.text ?? '';
+          if (typeof text === 'string' && text) {
+            if (data.event === 'message_replace' || data.event === 'text_replace') answer = text;
+            else answer += text;
+          }
+          usage = data.metadata?.usage || data.usage || usage;
+        };
+        while (true) {
+          const chunk = await reader.read();
+          buffer += decoder.decode(chunk.value || new Uint8Array(), {stream:!chunk.done});
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || '';
+          for (const line of lines) accept(line);
+          if (chunk.done) break;
+        }
+        if (buffer) accept(buffer);
+        if (!answer.trim()) throw new Error('模型没有返回正文');
+        return {answer:answer.trim(),taskId,messageId,conversationId,usage};
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new Error('模型请求超过 60 秒');
+        throw error;
+      } finally { clearTimeout(timeoutId); }
     })()`, true);
   }
 
@@ -8706,6 +8834,7 @@ class AccountBackend {
   destroy() {
     if (this.destroying) return;
     this.destroying = true;
+    this.onlineWorldService.close();
     clearInterval(this.statusTimer);
     clearInterval(this.accountTimer);
     clearInterval(this.heartbeatTimer);
@@ -8892,6 +9021,15 @@ handleLocalIpc("backend:scroll-game", (_event, deltaY) => backend.scrollGame(del
 handleLocalIpc("backend:game-pointer", (_event, payload) => backend.dispatchGamePointer(payload));
 handleLocalIpc("backend:game-key", (_event, payload) => backend.dispatchGameKey(payload));
 handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
+handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
+handleLocalIpc("online-world:open", (_event, options) => backend.onlineWorldService.open(options || {}));
+handleLocalIpc("online-world:close", () => { backend.onlineWorldService.close(); return backend.onlineWorldService.state(); });
+handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
+handleLocalIpc("online-world:activate-program", () => backend.onlineWorldService.activateProgramUpdate());
+handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));
+handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineWorldService.submitIntent(intent || {}));
+handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
+handleLocalIpc("online-world:migrate", () => backend.onlineWorldService.exportMigrationDraft());
 handleLocalIpc("backend:new-instance", (_event, requested) => {
   backend.assertAdminAccount();
   return new Promise((resolve, reject) => {

@@ -55,8 +55,18 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   gamePointer: payload => ipcRenderer.invoke("backend:game-pointer", payload),
   gameKey: payload => ipcRenderer.invoke("backend:game-key", payload),
   hidePlatform: () => ipcRenderer.invoke("backend:hide-platform"),
+  getOnlineWorldState: () => ipcRenderer.invoke("online-world:get-state"),
+  openOnlineWorld: options => ipcRenderer.invoke("online-world:open", options),
+  closeOnlineWorld: () => ipcRenderer.invoke("online-world:close"),
+  initializeOnlineWorld: () => ipcRenderer.invoke("online-world:initialize"),
+  activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program"),
+  syncOnlineWorld: full => ipcRenderer.invoke("online-world:sync", full),
+  submitOnlineWorldIntent: intent => ipcRenderer.invoke("online-world:submit-intent", intent),
+  sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message),
+  migrateOnlineWorld: () => ipcRenderer.invoke("online-world:migrate"),
   newInstance: profileId => ipcRenderer.invoke("backend:new-instance", profileId),
   onState: callback => ipcRenderer.on("backend:state", (_event, state) => callback(state)),
   onGameFrame: callback => ipcRenderer.on("backend:game-frame", (_event, frame) => callback(frame)),
+  onOnlineWorldState: callback => ipcRenderer.on("online-world:state", (_event, state) => callback(state)),
   onLog: callback => ipcRenderer.on("backend:log", (_event, entry) => callback(entry))
 });

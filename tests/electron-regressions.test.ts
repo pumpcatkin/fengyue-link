@@ -236,6 +236,35 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain('"首次联机前，请先完善角色资料"');
   });
 
+  it("mounts the online game world between home entries behind a no-network sandbox", () => {
+    const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
+    const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
+    const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    const runtime = readFileSync(new URL("../electron/online-world-runtime.cjs", import.meta.url), "utf8");
+    expect(html.indexOf('id="enter-multiplayer"')).toBeLessThan(html.indexOf('id="enter-online-world"'));
+    expect(html.indexOf('id="enter-online-world"')).toBeLessThan(html.indexOf('id="edit-profiles"'));
+    expect(html).toContain('sandbox="allow-scripts"');
+    expect(html).not.toMatch(/id="online-world-frame"[^>]*allow-same-origin/);
+    expect(html).toContain("frame-src 'self' blob:");
+    expect(renderer).toContain('event.source!==onlineWorldFrame.contentWindow');
+    expect(renderer).toContain("URL.createObjectURL(new Blob([next.programHtml]");
+    expect(preload).toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
+    expect(main).toContain('handleLocalIpc("online-world:submit-intent"');
+    expect(main).toContain('handleLocalIpc("online-world:activate-program"');
+    expect(preload).toContain('sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message)');
+    expect(renderer).toContain('if(event.data.type==="direct")');
+    expect(readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8")).toContain('id="direct-panel"');
+    const gridGame = readFileSync(new URL("../electron/desktop/online-world/grid-conquest/game.js", import.meta.url), "utf8");
+    expect(gridGame).toContain("const DEFAULT_VISIBLE_CELLS=12");
+    expect(gridGame).toContain('if(event.button!==2)return');
+    expect(gridGame).toContain('viewport.addEventListener("contextmenu"');
+    expect(main).toContain("async platformServerTime()");
+    expect(main).toContain("response.headers.get('date')");
+    expect(runtime).toContain("connect-src 'none'");
+    expect(runtime).toContain("worker-src 'none'");
+  });
+
   it("uses the Windows system proxy for every Electron session and leaves work selection unbounded", () => {
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     expect(main).toContain('targetSession.setProxy({ mode: "system" })');

@@ -1,6 +1,6 @@
 {
   "name": "fengyue-link",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "description": "风月多人联机桌面工具",
   "author": "八爪毛米",
   "private": true,
@@ -20,6 +20,7 @@
     "verify:release-gate": "node scripts/verify-release-gate.cjs",
     "verify:electron-fuses": "node scripts/verify-electron-fuses.cjs",
     "verify:release-live": "electron scripts/verify-live-release.cjs",
+    "game:bundle": "node scripts/build-grid-conquest-program.cjs",
     "pack:release": "npm run pack:win && npm run release:manifest"
   },
   "dependencies": {

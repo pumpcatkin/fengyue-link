@@ -1,6 +1,6 @@
 # Aiero 创作页面填写与保存经验
 
-本文记录 2026-09-13（Asia/Shanghai）在 staging 环境对《烽火慧眼》固定伴生作品完成的一次真实保存。目标页为：
+本文记录 2026-09-13（Asia/Shanghai）在 staging 环境对《艳猎征途》固定伴生作品完成的一次真实保存。目标页为：
 
 ```text
 https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configuration
@@ -21,7 +21,7 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 5. 后置词。
 6. 提示词：保存共同世界观。
 
-《烽火慧眼》的准确文本保存在 `docs/grid-conquest-companion-work.md`，程序信封由 `npm run game:bundle` 生成。不要把 `<script>`、`<iframe>` 或其他可执行标签直接放入详细介绍；页面会拦截。程序信封只是惰性文本，实际代码由工具下载、验摘要后放进隔离运行时。
+《艳猎征途》的准确文本保存在 `docs/grid-conquest-companion-work.md`，程序信封由 `npm run game:bundle` 生成。不要把 `<script>`、`<iframe>` 或其他可执行标签直接放入详细介绍；页面会拦截。程序信封只是惰性文本，实际代码由工具下载、验摘要后放进隔离运行时。
 
 ## 2. 新增世界书
 
@@ -82,10 +82,10 @@ GET /console/api/apps/{workId}/model-config/export
 本次结果：
 
 ```text
-作品名：烽火慧眼
+作品名：艳猎征途[b27218e680f94c0d]
 世界书：2 条
-详细介绍：13,864 字符
-程序 SHA-256：cb906e2fb1ca8454203dc8ffa4ed12887e20694057cb3b7e52eb10adbaa26d62
+详细介绍：13,870 字符
+程序 SHA-256：0b6523b9c5c1ef9783cfd2ce13af0031a98d66ea960ed8971121d235ec74e231
 ```
 
 ## 5. 导出接口的动态别名

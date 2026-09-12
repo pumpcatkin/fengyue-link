@@ -75,6 +75,20 @@ function normalizeWorkDetail(payload, fallbackId) {
   };
 }
 
+function programFromGameCard(card) {
+  if (!card?.companion?.configuration?.app?.description) return null;
+  try {
+    const program = parseProgram(card.companion.configuration.app.description, String(card.gameId || GRID_GAME_ID));
+    return program ? { ...program, source: "card-package" } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isVerifiedProgram(program) {
+  return program?.source === "work-description" || program?.source === "card-package";
+}
+
 function commentId(value) {
   return String(value?.id || value?.comment_id || value?.data?.id || value?.data?.comment_id || value?.comment?.id || value?.data?.comment?.id || "");
 }
@@ -250,7 +264,7 @@ class OnlineWorldService {
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
-      program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "烽火慧眼", apiVersion: this.program.manifest?.apiVersion || 1 }
+      program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "艳猎征途", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
   }
 
@@ -345,7 +359,8 @@ class OnlineWorldService {
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
     this.card = normalizedCard;
     this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
-    this.program = parseProgram(this.work.description, GRID_GAME_ID) || builtInGridProgram();
+    if (normalizedCard && this.work.name === "在线游戏世界") this.work.name = normalizedCard.companion.name;
+    this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
     this.mapFactsCache = null;
     const cached = this.loadCache(this.work.id);
     if (cached?.world?.gameId === GRID_GAME_ID) {
@@ -380,13 +395,13 @@ class OnlineWorldService {
     if (!this.work) return null;
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`);
     this.work = { ...normalizeWorkDetail(payload, this.work.id), url: this.work.url };
-    this.program = parseProgram(this.work.description, GRID_GAME_ID) || builtInGridProgram();
+    this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(this.card) || builtInGridProgram();
     return this.program;
   }
 
   async initialize() {
     if (!this.work) throw new Error("请先选择伴生作品");
-    if (this.program?.source !== "work-description") throw new Error("伴生作品详细介绍尚未包含有效游戏程序包");
+    if (!isVerifiedProgram(this.program)) throw new Error("游戏卡中尚未包含有效游戏程序包");
     const account = this.account();
     if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以初始化新赛季");
     const identity = await this.getIdentity();

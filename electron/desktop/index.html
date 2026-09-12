@@ -60,25 +60,24 @@
     </section>
     <section id="online-world-page" class="online-world-page hidden">
       <header class="online-world-toolbar">
-        <span><small>在线游戏世界</small><b id="online-world-title">烽火慧眼</b><em id="online-world-status">尚未打开游戏卡</em></span>
+        <span><small>在线游戏世界</small><b id="online-world-title">联机游戏</b><em id="online-world-status">选择一张游戏卡</em></span>
         <div><button id="online-world-initialize" class="hidden" type="button">初始化新赛季</button><button id="online-world-activate-program" class="hidden" type="button">签名启用程序</button><button id="online-world-migrate" class="hidden" type="button">重置并迁移</button><button id="online-world-export-card" class="hidden" type="button">导出完整游戏卡</button><button id="online-world-sync" type="button">同步评论账本</button><button id="online-world-back" type="button">返回主页</button></div>
       </header>
-      <section id="online-world-setup" class="online-world-setup">
-        <div>
-          <small>第一款持久在线游戏</small>
-          <h1>烽火慧眼</h1>
-          <p>在 64×64 的大陆上开采、练兵、行军、争夺领地并结识将领。所有计时由工具宿主读取真实时间，公开状态来自伴生作品评论账本。</p>
+      <section id="online-world-setup" class="online-world-library">
+        <header class="online-world-library-head">
+          <span><small>在线游戏世界</small><h1>联机游戏</h1></span>
+          <button id="online-world-import-card" type="button">＋ 从文件导入游戏卡</button>
+        </header>
+        <div id="online-world-library-grid" class="online-world-library-grid" role="list" aria-label="已导入游戏卡"></div>
+        <div id="online-world-detail" class="online-world-detail hidden" role="dialog" aria-modal="true" aria-labelledby="online-world-detail-title">
+          <form id="online-world-open-form" class="online-world-detail-card">
+            <h1 id="online-world-detail-title">艳猎征途</h1>
+            <label>选择使用的角色设定<select id="online-world-profile" required></select></label>
+            <button class="primary" id="online-world-open" type="submit">开始游戏</button>
+          </form>
         </div>
-        <form id="online-world-open-form">
-          <label>已导入游戏卡<select id="online-world-card" required></select><small id="online-world-card-binding">游戏卡固定绑定唯一伴生作品，玩家无需填写作品地址。</small></label>
-          <button id="online-world-import-card" type="button">从文件导入整张游戏卡</button>
-          <label>游戏内姓名<input id="online-world-name" maxlength="40" placeholder="默认使用当前个人设定" required></label>
-          <label>将领性别偏好<select id="online-world-orientation" required><option value="women">仅生成女性将领</option><option value="men">仅生成男性将领</option><option value="any">不限制将领性别</option></select><small>作为私人配置加密保存，不写入公开地图。</small></label>
-          <button class="primary" id="online-world-open" type="submit">读取在线世界</button>
-        </form>
-        <div id="online-world-setup-message" class="notice">选择已导入游戏卡即可进入；伴生作品由卡包固定绑定。</div>
       </section>
-      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="online-world/grid-conquest/index.html" title="烽火慧眼游戏前端"></iframe>
+      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="online-world/grid-conquest/index.html" title="艳猎征途游戏前端"></iframe>
     </section>
     <div class="app-shell hidden" id="multiplayer-page">
       <aside class="sidebar">
@@ -308,7 +307,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.14.1</div>
+    <div id="app-version" aria-label="当前版本">v0.14.2</div>
     <div id="toast"></div>
     <script src="renderer.js"></script>
   </body>

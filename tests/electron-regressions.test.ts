@@ -247,11 +247,18 @@ describe("Electron platform API regressions", () => {
     expect(html).toContain('sandbox="allow-scripts"');
     expect(html).not.toMatch(/id="online-world-frame"[^>]*allow-same-origin/);
     expect(html).not.toContain('id="online-world-url"');
-    expect(html).toContain('id="online-world-card"');
+    expect(html).not.toContain('id="online-world-card"');
+    expect(html).not.toContain('id="online-world-card-binding"');
+    expect(html).toContain('id="online-world-library-grid"');
+    expect(html).toContain('id="online-world-detail"');
+    expect(html).toContain('id="online-world-profile"');
+    expect(html).toContain('id="online-world-detail-title">艳猎征途');
     expect(html).toContain('id="online-world-import-card"');
     expect(html).toContain('id="online-world-export-card"');
     expect(html).toContain("frame-src 'self' blob:");
     expect(renderer).toContain('event.source!==onlineWorldFrame.contentWindow');
+    expect(renderer).toContain('Math.max(0,10-real.length)');
+    expect(renderer).toContain('className="online-world-card-tile"');
     expect(renderer).toContain("URL.createObjectURL(new Blob([next.programHtml]");
     expect(preload).toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
     expect(preload).toContain('importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card")');
@@ -283,7 +290,7 @@ describe("Electron platform API regressions", () => {
     const chooseStart = main.indexOf("async chooseWork()");
     const chooseEnd = main.indexOf("async setUiTheme", chooseStart);
     const choose = main.slice(chooseStart, chooseEnd);
-    expect(choose).toContain('"作品选择页",\n        0');
+    expect(choose).toMatch(/"作品选择页",\s*0/);
     expect(main).toContain("if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0)");
   });
 

@@ -31,7 +31,7 @@ if (process.type === "renderer") {
     loggedIn: true, profileId: "offline-qa", mode: "lobby", uiTheme: "light", origin: "https://staging.aiero.cc", domainSelected: true, originLocked: true,
     releaseSecurity: { status: "development", verified: true, message: "离线界面测试", currentVersion: version },
     account: { accountId: "a", username: "本地测试", level: 10, points: 1000 }, accountLevel: 10,
-    work: null, room: null, conversation: { items: [] }, models: { items: [] }, characterProfiles: { items: [] },
+    work: null, room: null, conversation: { items: [] }, models: { items: [] }, characterProfiles: { items: [{ id: "qa-profile", label: "远征统帅", displayName: "本地测试", basicInfo: "离线界面测试角色", appearance: "" }], selectedId: "qa-profile" },
     plugins: { definitions: [{ id: "effect-judge", ...pipeline.normalizePluginSettings().plugins["effect-judge"] }, { id: "perspective-split", ...pipeline.normalizePluginSettings().plugins["perspective-split"] }], currentRuns: [], lastRuns: [] },
     workSettings: {}
   };
@@ -52,6 +52,8 @@ if (process.type === "renderer") {
     };
     if (name === "listDomains" || name === "listDomainCandidates") return domains;
     if (name === "getLogs") return [];
+    if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "艳猎征途", version: 2, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "艳猎征途[b27218e680f94c0d]" }], activeCardId: null };
+    if (name === "getOnlineWorldState") return { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "setOrigin") return state;
     if (name === "confirmAction") return true;
     if (name === "openOfficialReleasePage") return true;
@@ -83,15 +85,26 @@ if (process.type === "renderer") {
       await evaluate(`document.querySelector('#enter-online-world').click()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-page').classList.contains('hidden')`), true);
-      assert.equal(await evaluate(`document.querySelector('#online-world-setup h1').textContent`), "烽火慧眼");
-      fs.writeFileSync(path.join(outputDir, "online-world-setup.png"), (await window.webContents.capturePage()).toPNG());
+      assert.equal(await evaluate(`document.querySelector('.online-world-library-head h1').textContent`), "联机游戏");
+      assert.equal(await evaluate(`document.querySelectorAll('.online-world-card-tile').length`), 10);
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-library-grid')).gridTemplateColumns.split(' ').length`), 5);
+      assert.equal(await evaluate(`document.querySelector('#online-world-detail').classList.contains('hidden')`), true);
+      fs.writeFileSync(path.join(outputDir, "online-world-library.png"), (await window.webContents.capturePage()).toPNG());
+      await evaluate(`document.querySelector('.online-world-card-tile[data-card-id="cc.aiero.fyow.grid-conquest.official"]').click()`);
+      assert.equal(await evaluate(`document.querySelector('#online-world-detail').classList.contains('hidden')`), false);
+      assert.equal(await evaluate(`document.querySelector('#online-world-detail-title').textContent`), "艳猎征途");
+      assert.equal(await evaluate(`document.querySelector('#online-world-open-form').children.length`), 3);
+      assert.equal(await evaluate(`document.querySelector('#online-world-profile').value`), "qa-profile");
+      assert.equal(await evaluate(`document.querySelector('#online-world-detail').textContent.includes('b27218e6')`), false);
+      fs.writeFileSync(path.join(outputDir, "online-world-details.png"), (await window.webContents.capturePage()).toPNG());
       const mapFacts = Array.from({ length: 4096 }, (_, index) => ({ x: index % 64, y: Math.floor(index / 64), population: 100 + index % 9901, resourceGrade: ["D-", "C", "B", "A", "S+"][index % 5], resourceRank: index % 15, garrisonCap: 20 + index % 1980, neutralPower: 20 + index % 1980 }));
       const runtime = require(path.join(root, "electron/online-world-runtime.cjs"));
       const gameDirectory = path.join(root, "electron/desktop/online-world/grid-conquest");
       const programHtml = runtime.injectSandboxCsp(runtime.composeSingleFileProgram(fs.readFileSync(path.join(gameDirectory, "index.html"), "utf8"), fs.readFileSync(path.join(gameDirectory, "styles.css"), "utf8"), fs.readFileSync(path.join(gameDirectory, "game.js"), "utf8")));
-      window.webContents.send("qa:onOnlineWorldState", { status: "ready", initialized: true, revision: 1, work: { id: "fixture", name: "烽火慧眼" }, control: { seasonId: "fixture-season" }, account: { accountId: "a", username: "本地测试" }, world: { seed: "fixture", startedAt: Date.now(), revision: 1, cells: { "4,7": { ownerAccountId: "a", soldiers: 80, generalIds: [] }, "5,7": { ownerAccountId: "b", soldiers: 60, generalIds: [] } }, players: { a: { accountId: "a", displayName: "本地测试", gold: 1000, position: { x: 4, y: 7 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"] }, b: { accountId: "b", displayName: "北境玩家", position: { x: 5, y: 7 } } }, generals: { g1: { id: "g1", name: "青禾", power: 500, holderAccountId: "a", loyalToAccountId: "b", capturedFromAccountId: "b", status: "carried", setting: "善守城，重信义。", memoryText: "言谈：暂无\n经历：[1年]战败被俘" } }, jobs: {} }, directInbox: [{ messageId: "dm1", fromAccountId: "b", type: "diplomacy", payload: { text: "愿暂息兵戈，共商边界。" }, createdAt: Date.now() }], mapFacts, serverNow: Date.now(), program: { source: "builtin-preview", digest: "fixture-builtin-loaded" }, programHtml });
+      window.webContents.send("qa:onOnlineWorldState", { status: "ready", initialized: true, revision: 1, card: { cardId: "cc.aiero.fyow.grid-conquest.official", title: "艳猎征途" }, work: { id: "fixture", name: "艳猎征途[b27218e680f94c0d]" }, control: { seasonId: "fixture-season" }, account: { accountId: "a", username: "本地测试" }, world: { seed: "fixture", startedAt: Date.now(), revision: 1, cells: { "4,7": { ownerAccountId: "a", soldiers: 80, generalIds: [] }, "5,7": { ownerAccountId: "b", soldiers: 60, generalIds: [] } }, players: { a: { accountId: "a", displayName: "本地测试", gold: 1000, position: { x: 4, y: 7 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"] }, b: { accountId: "b", displayName: "北境玩家", position: { x: 5, y: 7 } } }, generals: { g1: { id: "g1", name: "青禾", power: 500, holderAccountId: "a", loyalToAccountId: "b", capturedFromAccountId: "b", status: "carried", setting: "善守城，重信义。", memoryText: "言谈：暂无\n经历：[1年]战败被俘" } }, jobs: {} }, directInbox: [{ messageId: "dm1", fromAccountId: "b", type: "diplomacy", payload: { text: "愿暂息兵戈，共商边界。" }, createdAt: Date.now() }], mapFacts, serverNow: Date.now(), program: { source: "card-package", digest: "fixture-card-loaded" }, programHtml });
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
+      assert.equal(await evaluate(`document.querySelector('#online-world-profile').disabled`), true);
       fs.writeFileSync(path.join(outputDir, "online-world-game.png"), (await window.webContents.capturePage()).toPNG());
       const embeddedGameFrame = window.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
       assert(embeddedGameFrame, "missing sandboxed online-world frame");

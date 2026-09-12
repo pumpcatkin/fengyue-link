@@ -7,6 +7,7 @@ const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto
 const { assembleCommentRecords, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
+const { createBundledGridCard } = require("../electron/online-world-card.cjs");
 
 function service(options: Record<string, unknown>) {
   return new OnlineWorldService({
@@ -34,15 +35,30 @@ describe("online world platform service", () => {
     expect(() => workReference("https://aigirlfriend.baby/zh/app/abc/configuration", "https://aigirlfriend.baby")).toThrow(/已安装作品/);
   });
 
+  it("loads the verified program snapshot from the game card when the installed page omits its description", async () => {
+    const card = createBundledGridCard();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      requestConsole: async (endpoint: string) => endpoint.startsWith("/installed-apps/")
+        ? { data: { id: card.companion.workId, name: "在线游戏世界" } }
+        : { data: { items: [] } }
+    });
+    const state = await instance.open({ card, displayName: "玩家", orientation: "any" });
+    instance.close();
+    expect(state.program.source).toBe("card-package");
+    expect(state.program.title).toBe("艳猎征途");
+    expect(state.work.name).toBe(card.companion.name);
+  });
+
   it("initializes an author season with signed, comment-sized control and snapshot records", async () => {
     const identity = generateOnlineWorldIdentity();
-    const program = packProgram({ gameId: "cc.aiero.fyow.grid-conquest", title: "烽火慧眼", html: "<!doctype html><html><head></head><body><script>parent.postMessage({source:'fyow-grid-conquest',type:'ready'},'*')</script></body></html>" });
+    const program = packProgram({ gameId: "cc.aiero.fyow.grid-conquest", title: "艳猎征途", html: "<!doctype html><html><head></head><body><script>parent.postMessage({source:'fyow-grid-conquest',type:'ready'},'*')</script></body></html>" });
     const comments: any[] = [];
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestConsole: async (endpoint: string, options: any = {}) => {
-        if (endpoint.startsWith("/installed-apps/")) return { data: { id: "4ac2ab60-67ff-459d-ae9a-6274f1802195", name: "烽火慧眼", description: program.envelope, created_by_account_id: "author" } };
+        if (endpoint.startsWith("/installed-apps/")) return { data: { id: "4ac2ab60-67ff-459d-ae9a-6274f1802195", name: "艳猎征途", description: program.envelope, created_by_account_id: "author" } };
         if (endpoint.startsWith("/comments/") && options.method !== "POST") return { data: { items: [] } };
         if (endpoint.startsWith("/comments/") && options.method === "POST") {
           const item = { id: `c${comments.length + 1}`, account_id: "author", is_author: true, content: options.body.content };
@@ -169,14 +185,14 @@ describe("online world platform service", () => {
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestConsole: async (endpoint: string, options: any = {}) => {
-        if (endpoint === "/apps/old/model-config/export") return { data: { name: "烽火慧眼", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] } };
+        if (endpoint === "/apps/old/model-config/export") return { data: { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] } };
         if (endpoint === "/apps" && options.method === "POST") return { data: { app: { id: "new-work-id" } } };
         if (endpoint === "/apps/new-work-id/model-config" && options.method === "POST") throw new Error("fixture import rejected");
         if (endpoint.startsWith("/comments/") && options.method === "POST") { postedComments.push(options.body); return { id: "comment" }; }
         throw new Error(`unexpected migration endpoint ${endpoint}`);
       }
     });
-    instance.work = { id: "old", name: "烽火慧眼", description: "program", authorAccountId: "author" };
+    instance.work = { id: "old", name: "艳猎征途", description: "program", authorAccountId: "author" };
     instance.control = { seasonId: world.seasonId, authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
     const result = await instance.exportMigrationDraft();
@@ -189,7 +205,7 @@ describe("online world platform service", () => {
   it("initializes the copied ledger before publishing a verified reset redirect", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
-    const exportData = { name: "烽火慧眼", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
+    const exportData = { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
     const comments: Array<{ endpoint: string; content: string }> = [];
     let oldSavedName = "";
     const instance = service({
@@ -205,7 +221,7 @@ describe("online world platform service", () => {
         throw new Error(`unexpected migration endpoint ${endpoint}`);
       }
     });
-    instance.work = { id: "old", name: "烽火慧眼", description: "program", authorAccountId: "author" };
+    instance.work = { id: "old", name: "艳猎征途", description: "program", authorAccountId: "author" };
     instance.control = { schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "old", seasonId: world.seasonId, programHash: instance.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey, startedAt: world.startedAt, updatedAt: world.startedAt };
     instance.world = world;
     const result = await instance.exportMigrationDraft();

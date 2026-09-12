@@ -9,6 +9,7 @@ const {
   GAME_CARD_SCHEMA,
   GRID_CARD_ID,
   GRID_COMPANION_WORK_ID,
+  GRID_COMPANION_INSTANCE_ID,
   createBundledGridCard,
   createExportedGameCard,
   validateGameCard,
@@ -28,6 +29,10 @@ describe("online world game cards", () => {
     expect(card.schema).toBe(GAME_CARD_SCHEMA);
     expect(card.cardId).toBe(GRID_CARD_ID);
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
+    expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
+    expect(card.title).toBe("艳猎征途");
+    expect(card.version).toBe(2);
+    expect(card.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
     expect(card.companion.configuration.app.summary).toContain("64×64");
     expect(card.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
@@ -51,7 +56,7 @@ describe("online world game cards", () => {
   it("exports a live creation-page snapshot and preserves it through the local library", () => {
     const original = createBundledGridCard();
     const live = {
-      nm: "烽火慧眼",
+      nm: `艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`,
       summary: "64×64 持久在线策略世界",
       desc: original.companion.configuration.app.description,
       pretxt: original.companion.configuration.pre_text,
@@ -78,7 +83,7 @@ describe("online world game cards", () => {
   it("normalizes the rotating aliases returned by the creation export endpoint", () => {
     const original = createBundledGridCard();
     const live = {
-      app_name: "烽火慧眼",
+      app_name: `艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`,
       abstract: original.companion.configuration.app.summary,
       intro: original.companion.configuration.app.description,
       prefix_txt: original.companion.configuration.pre_text,
@@ -89,7 +94,7 @@ describe("online world game cards", () => {
       locale: "zh-Hans"
     };
     const exported = validateGameCard(createExportedGameCard(original, live));
-    expect(exported.companion.configuration.app.name).toBe("烽火慧眼");
+    expect(exported.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(exported.companion.configuration.app.summary).toContain("64×64");
     expect(exported.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
     expect(exported.companion.configuration.world_book).toHaveLength(2);

@@ -30,7 +30,8 @@ describe("grid conquest rules", () => {
     expect(request.input.initialWish).toBe("白发猫亚人，善于守城");
     expect(request.input.directionTags).toEqual([]);
     expect(request.input.instruction).toContain("最高优先级绑定要求");
-    expect(request.input.instruction).toContain("600～1000");
+    expect(request.input.instruction).toContain("appearanceSetting");
+    expect(request.input.instruction).toContain("coreSetting");
   });
 
   it("derives immutable 64x64 cell facts from seed and coordinates", () => {
@@ -95,6 +96,48 @@ describe("grid conquest rules", () => {
     const player = state.players.a;
     const first = game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-one" }, { actorAccountId: "a", now });
     expect(() => game.applyIntent(first.state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/只能同时进行一项练兵/);
+  });
+
+  it("uses Cookie-style exponential costs for player and undeployed-general power training", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    const firstCost = game.powerTrainingCost(300, 0, 1);
+    const secondCost = game.powerTrainingCost(300, 1, 1);
+    expect(secondCost).toBeGreaterThan(firstCost);
+    expect(secondCost / firstCost).toBeCloseTo(1.15, 1);
+    const selfTraining = game.applyIntent(state, { type: "power-train", targetType: "player", levels: 2, idempotencyKey: "self-power" }, { actorAccountId: "a", now });
+    const selfJob = selfTraining.state.jobs[selfTraining.result.jobId];
+    expect(selfTraining.result.nextPower).toBeGreaterThan(300);
+    state = game.settleWorld(selfTraining.state, selfJob.finishAt).state;
+    expect(state.players.a.trainingLevel).toBe(2);
+    expect(state.players.a.power).toBe(game.trainingPower(300, 2));
+
+    state.players.a.gold = 100000;
+    state = game.applyIntent(state, { type: "grant-general", generalId: "trainee", name: "青禾", gender: "female", setting: "善守城。", power: 500, discoveryId: "trainee", idempotencyKey: "grant-trainee" }, { actorAccountId: "a", authorityAccountId: "a", now: now + 1 }).state;
+    const generalTraining = game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "trainee", levels: 1, idempotencyKey: "general-power" }, { actorAccountId: "a", now: now + 2 });
+    expect(() => game.applyIntent(generalTraining.state, { type: "deploy-general", generalId: "trainee", idempotencyKey: "deploy-training" }, { actorAccountId: "a", now: now + 3 })).toThrow(/正在修炼/);
+    const completed = game.settleWorld(generalTraining.state, generalTraining.result.finishAt).state;
+    expect(completed.generals.trainee.trainingLevel).toBe(1);
+    expect(completed.generals.trainee.power).toBeGreaterThan(500);
+  });
+
+  it("does not allow a deployed general to start power training", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    state = game.applyIntent(state, { type: "grant-general", generalId: "guard", name: "守将", gender: "female", setting: "守土有方。", power: 500, discoveryId: "guard", idempotencyKey: "grant-guard" }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
+    state = game.applyIntent(state, { type: "deploy-general", generalId: "guard", idempotencyKey: "deploy-guard" }, { actorAccountId: "a", now: now + 1 }).state;
+    expect(() => game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "guard", levels: 1, idempotencyKey: "train-deployed" }, { actorAccountId: "a", now: now + 2 })).toThrow(/未部署/);
+  });
+
+  it("migrates legacy general settings into the separated profile without minimum-value measurements", () => {
+    const general: any = { gender: "female", setting: "旧版将领的核心经历与性格。", power: 800 };
+    game.ensureGeneralProfile(general);
+    expect(general.coreSetting).toBe("旧版将领的核心经历与性格。");
+    expect(general.setting).toBe(general.coreSetting);
+    expect(general.appearanceSetting.length).toBeGreaterThan(40);
+    expect(general.measurements).toEqual({ chestCm: 86, waistCm: 60, hipCm: 88 });
+    expect(general.basePower).toBe(800);
+    expect(general.trainingLevel).toBe(0);
   });
 
   it("charges and times a march while ignoring caller-provided timestamps", () => {

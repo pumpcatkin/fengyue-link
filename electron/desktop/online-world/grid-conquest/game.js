@@ -6,6 +6,8 @@ const viewport = document.querySelector("#map-viewport");
 const tagCatalog = typeof ACG_CHARACTER_TAGS === "undefined" ? [] : ACG_CHARACTER_TAGS;
 const ZOOM_LEVELS = [.25, .375, .5, .75, 1, 1.25, 1.5, 2, 3];
 const DEFAULT_VISIBLE_CELLS = 12;
+const TRAINING_COST_GROWTH = 1.15;
+const MAX_TRAINING_LEVEL = 100;
 let payload = null;
 let selected = null;
 let zoom = 1;
@@ -35,6 +37,25 @@ function formatDuration(ms) {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
   if (seconds < 60) return `${seconds}秒`;
   return `${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`;
+}
+function trainingPower(entity) {
+  const base = Math.max(1, Number(entity?.basePower || entity?.power || 300));
+  const level = Math.max(0, Math.min(MAX_TRAINING_LEVEL, Number(entity?.trainingLevel || 0)));
+  return Math.floor(base * (1 + level * .06) * Math.pow(1.25, Math.floor(level / 10)));
+}
+function trainingQuote(entity, levelsValue) {
+  const base = Math.max(1, Number(entity?.basePower || entity?.power || 300));
+  const current = Math.max(0, Math.min(MAX_TRAINING_LEVEL, Number(entity?.trainingLevel || 0)));
+  const levels = Math.max(1, Math.min(10, MAX_TRAINING_LEVEL - current, Math.trunc(Number(levelsValue) || 1)));
+  const baseCost = Math.max(50, Math.ceil(base * .2));
+  let cost = 0;
+  let durationMs = 0;
+  for (let offset = 0; offset < levels; offset += 1) {
+    cost += Math.ceil(baseCost * Math.pow(TRAINING_COST_GROWTH, current + offset));
+    durationMs += 60000 * (1 + Math.floor((current + offset) / 10));
+  }
+  const nextPower = Math.floor(base * (1 + (current + levels) * .06) * Math.pow(1.25, Math.floor((current + levels) / 10)));
+  return { current, levels, cost, durationMs: Math.min(3600000, durationMs), currentPower: trainingPower(entity), nextPower };
 }
 function hostTime() { return serverNow + (Date.now() - receivedAt); }
 function gameYear() { const now = hostTime(); return 1 + Math.floor(Math.max(0, now - Number(payload?.world?.startedAt || now)) / 86400000); }
@@ -162,11 +183,52 @@ function renderPlayer() {
   document.querySelector("#edit-preferences").disabled = !player;
   document.querySelector("#player-name").textContent = player?.displayName || "尚未加入";
   document.querySelector("#gold").textContent = `${formatNumber(player?.gold)} 金币`;
+  document.querySelector("#player-power").textContent = player ? formatNumber(trainingPower(player)) : "0";
   const cells = Object.values(payload?.world?.cells || {}).filter(cell => cell.ownerAccountId === ownAccountId());
   document.querySelector("#territories").textContent = formatNumber(cells.length);
   document.querySelector("#soldiers").textContent = formatNumber(cells.reduce((sum, cell) => sum + Number(cell.soldiers || 0), Number(player?.fieldArmySoldiers || 0)));
   document.querySelector("#position").textContent = player?.position ? `${player.position.x}, ${player.position.y}` : "—";
   renderMarchParty();
+}
+
+function powerTrainingTargets() {
+  const player = ownPlayer();
+  if (!player) return [];
+  return [
+    { value: `player:${ownAccountId()}`, type: "player", id: ownAccountId(), name: `${player.displayName}（自己）`, entity: player },
+    ...Object.values(allGenerals())
+      .filter(general => general.holderAccountId === ownAccountId() && general.status !== "deployed")
+      .map(general => ({ value: `general:${general.id}`, type: "general", id: general.id, name: `${general.name}（将领）`, entity: general }))
+  ];
+}
+function renderPowerTraining() {
+  const select = document.querySelector("#training-target");
+  const input = document.querySelector("#training-levels");
+  const preview = document.querySelector("#training-preview");
+  const button = document.querySelector("#start-power-training");
+  const previous = select.value;
+  const targets = powerTrainingTargets();
+  select.replaceChildren();
+  for (const target of targets) {
+    const option = document.createElement("option"); option.value = target.value; option.textContent = target.name; select.append(option);
+  }
+  if (targets.some(target => target.value === previous)) select.value = previous;
+  const target = targets.find(item => item.value === select.value) || targets[0];
+  select.disabled = !target;
+  input.disabled = !target;
+  button.disabled = !target;
+  if (!target) { preview.textContent = "加入游戏后可以修炼自己与未部署将领"; document.querySelector("#training-level").textContent = "0 阶"; return; }
+  const remaining = Math.max(0, MAX_TRAINING_LEVEL - Number(target.entity.trainingLevel || 0));
+  input.max = String(Math.max(1, Math.min(10, remaining)));
+  if (Number(input.value) > Number(input.max)) input.value = input.max;
+  const quote = remaining > 0 ? trainingQuote(target.entity, input.value) : { current: MAX_TRAINING_LEVEL, currentPower: trainingPower(target.entity), nextPower: trainingPower(target.entity), cost: 0, durationMs: 0 };
+  const active = Object.values(payload?.world?.jobs || {}).find(job => job.type === "power-training" && job.targetType === target.type && job.targetId === target.id);
+  document.querySelector("#training-level").textContent = `${quote.current} 阶`;
+  preview.textContent = active
+    ? `修炼中：${quote.current} → ${active.toLevel} 阶，完成后战力 ${formatNumber(Math.floor(Number(active.basePower || target.entity.basePower || 300) * (1 + Number(active.toLevel) * .06) * Math.pow(1.25, Math.floor(Number(active.toLevel) / 10))))}`
+    : `当前战力 ${formatNumber(quote.currentPower)} → ${formatNumber(quote.nextPower)}；消耗 ${formatNumber(quote.cost)} 金币；耗时 ${formatDuration(quote.durationMs)}。每 10 阶获得一次额外增幅。`;
+  button.disabled = Boolean(active) || remaining < 1 || Number(ownPlayer()?.gold || 0) < quote.cost;
+  button.textContent = active ? "正在修炼" : remaining < 1 ? "已经满阶" : "开始修炼";
 }
 
 function marchAvailable() {
@@ -201,7 +263,7 @@ function generalCard(general, mode) {
   node.className = "general-card";
   const line = document.createElement("div");
   const name = document.createElement("b"); name.textContent = general.name;
-  const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(general.power)}`;
+  const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(trainingPower(general))} · ${Number(general.trainingLevel || 0)}阶`;
   line.append(name, power);
   const note = document.createElement("small");
   note.textContent = mode === "captive" ? `原主：${accountLabel(general.loyalToAccountId || general.capturedFromAccountId)}` : general.status === "waiting" ? `留置于 ${general.location?.x},${general.location?.y}` : "随行中";
@@ -306,7 +368,7 @@ function renderJobs() {
     const node = document.createElement("div"); node.className = "job";
     const line = document.createElement("div");
     const title = document.createElement("b");
-    title.textContent = job.type === "mining" ? `开采 ${job.x},${job.y}` : job.type === "training" ? `练兵 ${formatNumber(job.amount)} 人` : `行军至 ${job.to.x},${job.to.y}`;
+    title.textContent = job.type === "mining" ? `开采 ${job.x},${job.y}` : job.type === "training" ? `练兵 ${formatNumber(job.amount)} 人` : job.type === "power-training" ? `${job.targetName || "角色"}修炼 ${job.levels} 阶` : `行军至 ${job.to.x},${job.to.y}`;
     const remaining = document.createElement("small");
     const finish = job.type === "mining" ? Number(job.lastSettledAt) + Number(job.cycleMs) : Number(job.finishAt);
     remaining.dataset.finish = String(finish); remaining.textContent = formatDuration(finish - hostTime());
@@ -411,9 +473,16 @@ function openGeneral(id) {
   if (!general) return;
   document.querySelector("#general-status").textContent = general.status === "captured" ? "俘虏档案" : general.status === "deployed" ? "部署档案" : "随行档案";
   document.querySelector("#general-name").textContent = general.name;
-  document.querySelector("#general-power").textContent = formatNumber(general.power);
+  document.querySelector("#general-profile-name").textContent = general.name;
+  document.querySelector("#general-gender").textContent = general.gender === "female" ? "女" : "男";
+  document.querySelector("#general-height").textContent = `${Number(general.heightCm || (general.gender === "female" ? 166 : 178))} cm`;
+  document.querySelector("#general-weight").textContent = `${Number(general.weightKg || (general.gender === "female" ? 55 : 72))} kg`;
+  const measurements = general.measurements || {};
+  document.querySelector("#general-measurements").textContent = `${Number(measurements.chestCm || 0)} / ${Number(measurements.waistCm || 0)} / ${Number(measurements.hipCm || 0)} cm`;
+  document.querySelector("#general-power").textContent = `${formatNumber(trainingPower(general))} / ${Number(general.trainingLevel || 0)} 阶`;
   document.querySelector("#general-holder").textContent = accountLabel(general.holderAccountId);
-  document.querySelector("#general-setting").textContent = redactAccountIds(general.setting || "暂无设定");
+  document.querySelector("#general-appearance").textContent = redactAccountIds(general.appearanceSetting || "沿用旧档案，暂无独立外观分类。");
+  document.querySelector("#general-core-setting").textContent = redactAccountIds(general.coreSetting || general.setting || "暂无核心设定");
   const service = document.querySelector("#general-service-history"); service.replaceChildren();
   const records = [
     ...(general.masterHistory || []).map(item => `[${item.fromYear}年${item.toYear == null ? "至今" : "—" + item.toYear + "年"}] 主公：${accountLabel(item.accountId)}（${item.reason || "效忠"}）`),
@@ -459,7 +528,7 @@ function openDialogue(id) {
 }
 
 function renderAll() {
-  renderClock(); renderPlayer(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
+  renderClock(); renderPlayer(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
   const player = ownPlayer();
   const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
   document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);
@@ -671,6 +740,12 @@ document.querySelector("#owner-ban-player-button").addEventListener("click", () 
 });
 document.querySelector("#banned-return-library").addEventListener("click", () => host("library"));
 document.querySelector("#march-soldiers").addEventListener("input", renderMarchParty);
+document.querySelector("#training-target").addEventListener("change", renderPowerTraining);
+document.querySelector("#training-levels").addEventListener("input", renderPowerTraining);
+document.querySelector("#start-power-training").addEventListener("click", () => {
+  const [targetType, targetId] = document.querySelector("#training-target").value.split(":");
+  sendIntent({ type: "power-train", targetType, targetId, levels: Number(document.querySelector("#training-levels").value) });
+});
 document.querySelector("#start-mining").addEventListener("click", () => { if (selected) sendIntent({ type: "start-mining", x: selected.x, y: selected.y, auto: true }); });
 document.querySelector("#train").addEventListener("click", () => { if (selected) sendIntent({ type: "train", x: selected.x, y: selected.y, amount: Number(document.querySelector("#train-amount").value) }); });
 document.querySelector("#march").addEventListener("click", () => {

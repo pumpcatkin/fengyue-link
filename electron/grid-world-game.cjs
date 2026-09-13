@@ -7,6 +7,10 @@ const ORIENTATIONS = new Set(["men", "women", "any"]);
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DIALOGUE_COOLDOWN_MS = 15 * 1000;
+const TRAINING_COST_GROWTH = 1.15;
+const TRAINING_BATCH_MAX = 10;
+const MAX_TRAINING_LEVEL = 100;
+const DEFAULT_PLAYER_BASE_POWER = 300;
 
 function clone(value) {
   return typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value));
@@ -168,6 +172,60 @@ function trainDurationMs(amount) {
   return clamp(MINUTE + Math.ceil(Number(amount) / 5) * 1000, MINUTE, HOUR);
 }
 
+function trainingPower(basePowerValue, levelValue) {
+  const basePower = clamp(Math.trunc(Number(basePowerValue) || DEFAULT_PLAYER_BASE_POWER), 1, 100000);
+  const level = clamp(Math.trunc(Number(levelValue) || 0), 0, MAX_TRAINING_LEVEL);
+  const milestoneMultiplier = Math.pow(1.25, Math.floor(level / 10));
+  return Math.min(100000000, Math.floor(basePower * (1 + level * 0.06) * milestoneMultiplier));
+}
+
+function ensurePowerProgress(target, fallbackBasePower = DEFAULT_PLAYER_BASE_POWER) {
+  if (!target || typeof target !== "object") return target;
+  const legacyPower = Number(target.power);
+  const basePower = Number.isSafeInteger(Number(target.basePower)) && Number(target.basePower) > 0
+    ? Number(target.basePower)
+    : (Number.isSafeInteger(legacyPower) && legacyPower > 0 ? legacyPower : fallbackBasePower);
+  const trainingLevel = clamp(Math.trunc(Number(target.trainingLevel) || 0), 0, MAX_TRAINING_LEVEL);
+  target.basePower = clamp(basePower, 1, 100000);
+  target.trainingLevel = trainingLevel;
+  target.power = trainingPower(target.basePower, trainingLevel);
+  return target;
+}
+
+function powerTrainingCost(basePowerValue, currentLevelValue, levelsValue = 1) {
+  const basePower = clamp(Math.trunc(Number(basePowerValue) || DEFAULT_PLAYER_BASE_POWER), 1, 100000);
+  const currentLevel = clamp(Math.trunc(Number(currentLevelValue) || 0), 0, MAX_TRAINING_LEVEL);
+  const levels = clamp(Math.trunc(Number(levelsValue) || 1), 1, Math.min(TRAINING_BATCH_MAX, MAX_TRAINING_LEVEL - currentLevel || 1));
+  const baseCost = Math.max(50, Math.ceil(basePower * 0.2));
+  let total = 0;
+  for (let offset = 0; offset < levels; offset += 1) total += Math.ceil(baseCost * Math.pow(TRAINING_COST_GROWTH, currentLevel + offset));
+  return total;
+}
+
+function powerTrainingDurationMs(currentLevelValue, levelsValue = 1) {
+  const currentLevel = clamp(Math.trunc(Number(currentLevelValue) || 0), 0, MAX_TRAINING_LEVEL);
+  const levels = clamp(Math.trunc(Number(levelsValue) || 1), 1, TRAINING_BATCH_MAX);
+  let total = 0;
+  for (let offset = 0; offset < levels; offset += 1) total += MINUTE * (1 + Math.floor((currentLevel + offset) / 10));
+  return clamp(total, MINUTE, HOUR);
+}
+
+function powerTrainingQuote(target, levelsValue = 1) {
+  ensurePowerProgress(target);
+  const remaining = MAX_TRAINING_LEVEL - target.trainingLevel;
+  if (remaining < 1) throw new Error("该角色已经达到当前修炼上限");
+  const levels = integer(levelsValue, "修炼级数", 1, Math.min(TRAINING_BATCH_MAX, remaining));
+  return {
+    levels,
+    fromLevel: target.trainingLevel,
+    toLevel: target.trainingLevel + levels,
+    cost: powerTrainingCost(target.basePower, target.trainingLevel, levels),
+    durationMs: powerTrainingDurationMs(target.trainingLevel, levels),
+    currentPower: target.power,
+    nextPower: trainingPower(target.basePower, target.trainingLevel + levels)
+  };
+}
+
 function marchDurationMs(distance) {
   return clamp(Number(distance) * MINUTE, MINUTE, HOUR);
 }
@@ -177,7 +235,7 @@ function marchCost(distance, soldiers) {
 }
 
 function generalPower(general) {
-  return Number(general?.power || 0);
+  return trainingPower(general?.basePower ?? general?.power, general?.trainingLevel || 0);
 }
 
 function regionPower(state, x, y) {
@@ -239,12 +297,53 @@ function appendGeneralMemory(general, { year, category, text, accountId, intimac
   general.memoryText = formatGeneralMemory(general).slice(0, 1000);
 }
 
-function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting, power, holderAccountId, holderName, year = 1 }) {
+function defaultGeneralMeasurements(gender) {
+  return gender === "female"
+    ? { chestCm: 86, waistCm: 60, hipCm: 88 }
+    : { chestCm: 98, waistCm: 78, hipCm: 96 };
+}
+
+function normalizedMeasurements(value = {}, gender = "female") {
+  const source = value && typeof value === "object" ? value : {};
+  const fallback = defaultGeneralMeasurements(gender);
+  const bounded = (input, fallbackValue) => clamp(Math.round((Number(input) || fallbackValue) * 10) / 10, 30, 200);
+  return {
+    chestCm: bounded(source.chestCm, fallback.chestCm),
+    waistCm: bounded(source.waistCm, fallback.waistCm),
+    hipCm: bounded(source.hipCm, fallback.hipCm)
+  };
+}
+
+function ensureGeneralProfile(general) {
+  if (!general || typeof general !== "object") return general;
+  general.gender = general.gender === "male" ? "male" : "female";
+  general.heightCm = clamp(Math.round(Number(general.heightCm) || (general.gender === "female" ? 166 : 178)), 120, 230);
+  general.weightKg = clamp(Math.round((Number(general.weightKg) || (general.gender === "female" ? 55 : 72)) * 10) / 10, 30, 250);
+  general.measurements = normalizedMeasurements(general.measurements, general.gender);
+  general.appearanceSetting = String(general.appearanceSetting || (general.gender === "female"
+    ? "她保持着便于长途行军的利落装束，发式、衣甲与随身物件都收拾得井然有序；长期征战让她的姿态显得沉稳警觉，举手投足带着鲜明的军旅气质。"
+    : "他保持着便于长途行军的利落装束，发式、衣甲与随身物件都收拾得井然有序；长期征战让他的姿态显得沉稳警觉，举手投足带着鲜明的军旅气质。"
+  )).slice(0, 350);
+  general.coreSetting = String(general.coreSetting || general.setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。开局之后会根据效忠、征战与交往逐步形成更鲜明的经历和立场。" ).slice(0, 800);
+  general.setting = general.coreSetting;
+  ensurePowerProgress(general, general.power || 300);
+  return general;
+}
+
+function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, heightCm, weightKg, measurements, appearanceSetting, coreSetting, setting, power, holderAccountId, holderName, year = 1 }) {
+  const normalizedCore = String(coreSetting || setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。").slice(0, 800);
   const general = {
     id: String(id),
     name: String(name || (gender === "female" ? "无名女将" : "无名将领")).slice(0, 24),
     gender: gender === "female" ? "female" : "male",
-    setting: String(setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。").slice(0, 1000),
+    heightCm: clamp(Math.round(Number(heightCm) || (gender === "female" ? 166 : 178)), 120, 230),
+    weightKg: clamp(Math.round((Number(weightKg) || (gender === "female" ? 55 : 72)) * 10) / 10, 30, 250),
+    measurements: normalizedMeasurements(measurements, gender),
+    appearanceSetting: String(appearanceSetting || "").slice(0, 350),
+    coreSetting: normalizedCore,
+    setting: normalizedCore,
+    basePower: integer(power ?? 300, "将领基础战力", 1, 100000),
+    trainingLevel: 0,
     power: integer(power ?? 300, "将领战力", 1, 100000),
     holderAccountId: String(holderAccountId),
     loyalToAccountId: String(holderAccountId),
@@ -256,6 +355,7 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting
     memory: { entries: [], intimacy: { [String(holderAccountId)]: 5 } },
     memoryText: ""
   };
+  ensureGeneralProfile(general);
   appendGeneralMemory(general, { year, category: "deed", text: `被${String(holderName || "某位主公").slice(0, 40)}发掘并提拔为将领`, accountId: holderAccountId, intimacyDelta: 5 });
   return general;
 }
@@ -313,6 +413,25 @@ function settleWorld(inputState, nowValue = Date.now()) {
       delete state.jobs[jobId];
       continue;
     }
+    if (job.type === "power-training") {
+      const player = state.players[job.accountId];
+      const target = job.targetType === "player" ? player : state.generals[job.targetId];
+      const targetValid = player && target && (job.targetType === "player"
+        ? String(job.targetId) === String(job.accountId)
+        : String(target.holderAccountId) === String(job.accountId) && target.status !== "deployed");
+      if (!targetValid) {
+        if (player) player.gold += Math.max(0, Number(job.cost || 0));
+        effects.push({ type: "power-training-cancelled", reason: "target-unavailable", jobId, accountId: job.accountId, targetType: job.targetType, targetId: job.targetId, refundedGold: Math.max(0, Number(job.cost || 0)) });
+        delete state.jobs[jobId];
+        continue;
+      }
+      ensurePowerProgress(target, job.basePower);
+      target.trainingLevel = clamp(Number(job.toLevel), target.trainingLevel, MAX_TRAINING_LEVEL);
+      target.power = trainingPower(target.basePower, target.trainingLevel);
+      effects.push({ type: "power-training-complete", jobId, accountId: job.accountId, targetType: job.targetType, targetId: job.targetId, levels: job.levels, trainingLevel: target.trainingLevel, power: target.power });
+      delete state.jobs[jobId];
+      continue;
+    }
     if (job.type === "march") {
       resolveMarch(state, job, effects, now);
       delete state.jobs[jobId];
@@ -344,7 +463,8 @@ function resolveMarch(state, job, effects, now) {
   if ((enemy || neutral) && job.attack) {
     const defenderPower = enemy ? regionPower(state, job.to.x, job.to.y) : targetInfo.neutralPower;
     const attackerGeneralPower = job.generalIds.reduce((sum, id) => sum + generalPower(state.generals[id]), 0);
-    const attackerPower = job.soldiers + attackerGeneralPower;
+    ensurePowerProgress(player, DEFAULT_PLAYER_BASE_POWER);
+    const attackerPower = job.soldiers + player.power + attackerGeneralPower;
     if (attackerPower <= defenderPower) {
       const survivors = Math.max(0, Math.floor(job.soldiers * attackerPower / Math.max(1, defenderPower) * 0.35));
       returnArmy(state, player, job, survivors);
@@ -454,6 +574,9 @@ function applyIntent(inputState, rawIntent, context = {}) {
       accountName: String(context.actorAccountName || intent.accountName || actorAccountId).slice(0, 80),
       displayName: String(intent.displayName || actorAccountId).slice(0, 40),
       gold: 1000,
+      basePower: DEFAULT_PLAYER_BASE_POWER,
+      trainingLevel: 0,
+      power: DEFAULT_PLAYER_BASE_POWER,
       position: capital,
       fieldArmySoldiers: 0,
       carriedGeneralIds: [],
@@ -513,8 +636,28 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const id = crypto.randomUUID();
       state.jobs[id] = { id, type: "training", accountId: actorAccountId, x, y, amount, cost, startedAt: now, finishAt: now + trainDurationMs(amount) };
       result = { jobId: id, cost, finishAt: state.jobs[id].finishAt };
+    } else if (type === "power-train") {
+      const targetType = intent.targetType === "general" ? "general" : "player";
+      const targetId = targetType === "player" ? actorAccountId : String(intent.targetId || "");
+      const target = targetType === "player" ? player : state.generals[targetId];
+      if (!target || (targetType === "general" && (target.holderAccountId !== actorAccountId || target.status === "deployed"))) throw new Error("只有自己和未部署的自有将领可以修炼");
+      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === targetType && job.targetId === targetId)) throw new Error("该角色已经在修炼");
+      const march = jobFor(state, job => job.type === "march" && job.accountId === actorAccountId);
+      if (march && (targetType === "player" || march.generalIds.includes(targetId))) throw new Error("行军途中不能开始修炼");
+      const quote = powerTrainingQuote(target, intent.levels);
+      if (player.gold < quote.cost) throw new Error("金币不足");
+      player.gold -= quote.cost;
+      const id = crypto.randomUUID();
+      state.jobs[id] = {
+        id, type: "power-training", accountId: actorAccountId, targetType, targetId,
+        targetName: targetType === "player" ? player.displayName : target.name,
+        levels: quote.levels, fromLevel: quote.fromLevel, toLevel: quote.toLevel,
+        basePower: target.basePower, cost: quote.cost, startedAt: now, finishAt: now + quote.durationMs
+      };
+      result = { jobId: id, targetType, targetId, cost: quote.cost, levels: quote.levels, fromLevel: quote.fromLevel, toLevel: quote.toLevel, currentPower: quote.currentPower, nextPower: quote.nextPower, finishAt: state.jobs[id].finishAt };
     } else if (type === "march") {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("已有行军正在途中");
+      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "player")) throw new Error("自身修炼期间不能行军");
       const to = { x: coordinate(intent.to?.x, "目标横坐标"), y: coordinate(intent.to?.y, "目标纵坐标") };
       const from = {
         x: coordinate(player.position?.x, "玩家所在地横坐标"),
@@ -535,6 +678,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       player.gold -= cost;
       const generalIds = Array.isArray(intent.generalIds) ? [...new Set(intent.generalIds.map(String))] : [...player.carriedGeneralIds];
       if (generalIds.length > 2 || generalIds.some(id => !player.carriedGeneralIds.includes(id))) throw new Error("行军最多携带两名身边将领");
+      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "general" && generalIds.includes(job.targetId))) throw new Error("正在修炼的将领不能随军出征");
       const id = crypto.randomUUID();
       state.jobs[id] = { id, type: "march", accountId: actorAccountId, from, to, soldiers: requested, generalIds, attack: Boolean(intent.attack), cost, startedAt: now, finishAt: now + marchDurationMs(path.length) };
       result = { jobId: id, cost, distance: path.length, finishAt: state.jobs[id].finishAt };
@@ -545,6 +689,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const { x, y } = player.position;
       const cell = dynamicCell(state, x, y);
       if (!general || general.holderAccountId !== actorAccountId || !player.carriedGeneralIds.includes(generalId)) throw new Error("将领不在身边");
+      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "general" && job.targetId === generalId)) throw new Error("正在修炼的将领不能部署");
       if (cell.ownerAccountId !== actorAccountId) throw new Error("只能在自己的区域部署将领");
       if (cell.generalIds.length >= 2) throw new Error("每个区域最多部署两名将领");
       player.carriedGeneralIds = player.carriedGeneralIds.filter(id => id !== generalId);
@@ -636,7 +781,12 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const gender = intent.gender === "female" ? "female" : "male";
       const expected = allowedGeneralGender(state.privatePlayers[actorAccountId]?.orientation || "any", state.seed, intent.discoveryId || idempotencyKey);
       if (gender !== expected && state.privatePlayers[actorAccountId]?.orientation !== "any") throw new Error("将领性别不符合玩家开局偏好");
-      const general = createFallbackGeneral({ id: intent.generalId, name: intent.name, gender, setting: intent.setting, power: intent.power, holderAccountId: actorAccountId, holderName: player.displayName, year: gameYear(state, now) });
+      const general = createFallbackGeneral({
+        id: intent.generalId, name: intent.name, gender,
+        heightCm: intent.heightCm, weightKg: intent.weightKg, measurements: intent.measurements,
+        appearanceSetting: intent.appearanceSetting, coreSetting: intent.coreSetting, setting: intent.setting,
+        power: intent.power, holderAccountId: actorAccountId, holderName: player.displayName, year: gameYear(state, now)
+      });
       if (player.carriedGeneralIds.length >= 2) {
         general.status = "waiting";
         general.location = { x: coordinate(intent.location?.x, "将领横坐标"), y: coordinate(intent.location?.y, "将领纵坐标") };
@@ -681,8 +831,8 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
       directionTags: effect.initial ? [] : normalizedCharacterTags(effect.directionTags).slice(0, 3),
       initialWish: effect.initial ? String(effect.initialWish || "").slice(0, 500) : "",
       instruction: effect.initial
-        ? "initialWish 是最高优先级绑定要求，逐项落实用户明确特征；仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签。输入简短时围绕已有线索合理补全，setting 必须达到600～1000个汉字并包含出身、外貌、性格、志趣、军事能力、弱点、当前处境与关系倾向，禁止占位内容。"
-        : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。",
+        ? "initialWish 是最高优先级绑定要求，逐项落实用户明确特征；仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签。输入简短时围绕已有线索合理补全。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting；除这些外的出身、性格、志趣、军事能力、弱点、当前处境与关系倾向全部写入 coreSetting。appearanceSetting 80～300字，coreSetting 450～800字，禁止占位内容。"
+        : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting，其余完整人物背景全部写入 coreSetting。",
       maximumChineseCharacters: 1000
     }
   };
@@ -699,7 +849,10 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
       schema: "fyow.general-dialogue-request/2",
       interactionMode: captive ? "captive" : "ordinary",
       general: {
-        id: general.id, name: general.name, gender: general.gender, setting: general.setting,
+        id: general.id, name: general.name, gender: general.gender,
+        heightCm: general.heightCm, weightKg: general.weightKg, measurements: clone(general.measurements),
+        appearanceSetting: general.appearanceSetting, coreSetting: general.coreSetting || general.setting,
+        power: general.power, trainingLevel: general.trainingLevel,
         memory: general.memoryText, intimacy: general.memory?.intimacy?.[player.accountId] || 0,
         masterHistory: clone(general.masterHistory || []), captivityHistory: clone(general.captivityHistory || []),
         recentInteractions: clone((general.interactionHistory || []).slice(-12))
@@ -740,7 +893,12 @@ function buildGeneralMemoryUpdateRequest(state, general, player, interaction, no
       gameYear: gameYear(state, now),
       general: {
         name: general.name,
-        setting: general.setting,
+        gender: general.gender,
+        heightCm: general.heightCm,
+        weightKg: general.weightKg,
+        measurements: clone(general.measurements),
+        appearanceSetting: general.appearanceSetting,
+        coreSetting: general.coreSetting || general.setting,
         priorMemory: general.memoryText,
         masterHistory: clone(general.masterHistory || []),
         captivityHistory: clone(general.captivityHistory || []),
@@ -761,11 +919,19 @@ function buildGeneralMemoryUpdateRequest(state, general, player, interaction, no
 }
 
 function publicGeneralState(general) {
+  ensureGeneralProfile(general);
   const result = {
     id: String(general?.id || ""),
     name: String(general?.name || "无名将领").slice(0, 24),
     gender: ["male", "female"].includes(general?.gender) ? general.gender : "female",
-    setting: String(general?.setting || "").slice(0, 1000),
+    heightCm: clamp(Math.round(Number(general?.heightCm) || (general?.gender === "female" ? 166 : 178)), 120, 230),
+    weightKg: clamp(Math.round((Number(general?.weightKg) || (general?.gender === "female" ? 55 : 72)) * 10) / 10, 30, 250),
+    measurements: normalizedMeasurements(general?.measurements, general?.gender),
+    appearanceSetting: String(general?.appearanceSetting || "").slice(0, 350),
+    coreSetting: String(general?.coreSetting || general?.setting || "").slice(0, 800),
+    setting: String(general?.coreSetting || general?.setting || "").slice(0, 800),
+    basePower: Math.max(1, Math.trunc(Number(general?.basePower || general?.power || 300))),
+    trainingLevel: clamp(Math.trunc(Number(general?.trainingLevel) || 0), 0, MAX_TRAINING_LEVEL),
     power: Math.max(0, Math.trunc(Number(general?.power || 0))),
     holderAccountId: String(general?.holderAccountId || ""),
     status: "deployed",
@@ -789,12 +955,16 @@ function projectWorldState(state, viewerAccountId) {
   const viewer = String(viewerAccountId || "");
   const players = clone(state.players || {});
   for (const [accountId, player] of Object.entries(players)) {
+    ensurePowerProgress(player, DEFAULT_PLAYER_BASE_POWER);
     if (accountId === viewer) continue;
     delete player.gold;
     delete player.fieldArmySoldiers;
     delete player.carriedGeneralIds;
     delete player.position;
     delete player.joinedAt;
+    delete player.basePower;
+    delete player.trainingLevel;
+    delete player.power;
   }
   const generals = {};
   for (const [id, general] of Object.entries(state.generals || {})) {
@@ -837,6 +1007,12 @@ module.exports = {
   resourceCycleMs,
   resourceYield,
   trainDurationMs,
+  trainingPower,
+  ensurePowerProgress,
+  ensureGeneralProfile,
+  powerTrainingCost,
+  powerTrainingDurationMs,
+  powerTrainingQuote,
   marchDurationMs,
   marchCost,
   regionPower,

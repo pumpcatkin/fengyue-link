@@ -31,7 +31,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.generate:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象；gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为 600～1000 个汉字的完整人物设定，清晰包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，initialWish 是最高优先级的绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物，禁止更改要求性别。禁止输出未提供、暂无、不详、未知、待补充等占位内容。模型返回缺少 name、gender、power 或完整 setting 时视为失败。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"power\":300,\"setting\":\"人物设定\"}",
+      value: "任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息严格分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；heightCm 为 120～230 的整数；weightKg 为 30～250 的数字；measurements 必须完整给出 chestCm、waistCm、hipCm，均为 30～200 的数字；appearanceSetting 为 80～350 个汉字，只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 为 450～800 个汉字，承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向；power 为 100～5000 的整数。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"heightCm\":168,\"weightKg\":54.5,\"measurements\":{\"chestCm\":88,\"waistCm\":60,\"hipCm\":90},\"appearanceSetting\":\"外观设定\",\"coreSetting\":\"核心设定\",\"power\":300}",
       value_configs: [], value_region: 1, sort: 0, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -49,7 +49,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。\n输出 Schema：{\"reply\":\"将领回答\",\"command\":null|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
+      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属。\n输出 Schema：{\"reply\":\"将领回答\",\"command\":null|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 2, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -58,7 +58,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.captive-dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
+      value: "任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 3, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -165,7 +165,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 9,
+    version: 10,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null

@@ -32,7 +32,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(9);
+    expect(card.version).toBe(10);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -55,6 +55,8 @@ describe("online world game cards", () => {
     ]);
     expect(card.companion.configuration.world_book.every((entry: any) => entry.key_region === 2 && entry.enable === true && entry.probability === 100)).toBe(true);
     expect(card.companion.configuration.world_book[0].value).toContain("initialWish 是最高优先级");
+    expect(card.companion.configuration.world_book[0].value).toContain("appearanceSetting");
+    expect(card.companion.configuration.world_book[0].value).toContain("coreSetting");
     expect(card.companion.configuration.world_book[1].value).toContain("禁止出现未提供");
   });
 

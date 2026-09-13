@@ -29,6 +29,8 @@ const {
   buildPlayerProfileContextRequest,
   buildGeneralMemoryUpdateRequest,
   normalizedCharacterTags,
+  ensurePowerProgress,
+  ensureGeneralProfile,
   projectWorldState,
   publicGeneralState
 } = require("./grid-world-game.cjs");
@@ -241,12 +243,18 @@ function playerContextQualityIssue(value) {
 function generalGenerationQualityIssue(value, effect) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "将领设定不是 JSON 对象";
   const name = String(value.name || "").trim();
-  const setting = String(value.setting || "").trim();
+  const appearanceSetting = String(value.appearanceSetting || "").trim();
+  const coreSetting = String(value.coreSetting || "").trim();
   const gender = String(value.gender || "").toLowerCase();
   const power = Number(value.power);
   if (name.length < 2 || name.length > 6) return "将领姓名必须为 2～6 个汉字";
-  if (!setting || setting.length < 600 || setting.length > 1000) return "将领设定需要完整补全到 600～1000 字";
-  if (MODEL_PLACEHOLDER_PATTERN.test(setting)) return "将领设定仍包含未补全的占位措辞";
+  if (!Number.isInteger(Number(value.heightCm)) || Number(value.heightCm) < 120 || Number(value.heightCm) > 230) return "将领身高必须为 120～230 厘米的整数";
+  if (!Number.isFinite(Number(value.weightKg)) || Number(value.weightKg) < 30 || Number(value.weightKg) > 250) return "将领体重必须为 30～250 千克";
+  const measurements = value.measurements;
+  if (!measurements || [measurements.chestCm, measurements.waistCm, measurements.hipCm].some(item => !Number.isFinite(Number(item)) || Number(item) < 30 || Number(item) > 200)) return "将领三围必须完整填写胸围、腰围与臀围厘米数";
+  if (appearanceSetting.length < 80 || appearanceSetting.length > 350) return "将领外观设定需要完整补全到 80～350 字";
+  if (coreSetting.length < 450 || coreSetting.length > 800) return "将领核心设定需要完整补全到 450～800 字";
+  if (MODEL_PLACEHOLDER_PATTERN.test(`${appearanceSetting}\n${coreSetting}`)) return "将领设定仍包含未补全的占位措辞";
   if (!["male", "female"].includes(gender) || gender !== effect.gender) return "将领性别与玩家选择不一致";
   if (!Number.isInteger(power) || power < 100 || power > 5000) return "将领战力必须为 100～5000 的整数";
   return null;
@@ -307,6 +315,8 @@ function normalizeWorldState(value) {
   value.generals ||= {};
   value.jobs ||= {};
   value.processedIntents ||= [];
+  for (const player of Object.values(value.players)) ensurePowerProgress(player, 300);
+  for (const general of Object.values(value.generals)) ensureGeneralProfile(general);
   return value;
 }
 
@@ -477,6 +487,9 @@ class OnlineWorldService {
       privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
       players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
         ...(finiteStoredNumber(player.gold) ? { gold: Number(player.gold) } : {}),
+        ...(finiteStoredNumber(player.basePower) ? { basePower: Number(player.basePower) } : {}),
+        ...(finiteStoredNumber(player.trainingLevel) ? { trainingLevel: Number(player.trainingLevel) } : {}),
+        ...(finiteStoredNumber(player.power) ? { power: Number(player.power) } : {}),
         ...(finiteStoredNumber(player.fieldArmySoldiers) ? { fieldArmySoldiers: Number(player.fieldArmySoldiers) } : {}),
         ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {}),
         ...(validPosition(player.position) ? { position: { x: Number(player.position.x), y: Number(player.position.y) } } : {}),
@@ -503,6 +516,9 @@ class OnlineWorldService {
       delete player.fieldArmySoldiers;
       delete player.carriedGeneralIds;
       delete player.position;
+      delete player.basePower;
+      delete player.trainingLevel;
+      delete player.power;
     }
   }
 
@@ -563,7 +579,7 @@ class OnlineWorldService {
       if (!Number.isFinite(gold)) gold = 0;
       const start = joinEvent ? ownEvents.indexOf(joinEvent) + 1 : 0;
       for (const event of ownEvents.slice(start)) {
-        if (["train", "march"].includes(event?.type)) gold -= Math.max(0, Number(event?.result?.cost || 0));
+        if (["train", "power-train", "march"].includes(event?.type)) gold -= Math.max(0, Number(event?.result?.cost || 0));
         if (event?.type === "time-settle") for (const effect of event?.result?.effects || []) {
           if (effect?.type === "mining-complete" && String(effect.accountId || "") === accountId) gold += Math.max(0, Number(effect.gold || 0));
         }
@@ -571,6 +587,11 @@ class OnlineWorldService {
       player.gold = Math.max(0, gold); changed = true;
     }
     if (!finiteStoredNumber(player.fieldArmySoldiers)) { player.fieldArmySoldiers = 0; changed = true; }
+    const previousPower = player.power;
+    const previousBasePower = player.basePower;
+    const previousTrainingLevel = player.trainingLevel;
+    ensurePowerProgress(player, 300);
+    if (player.power !== previousPower || player.basePower !== previousBasePower || player.trainingLevel !== previousTrainingLevel) changed = true;
     if (!Array.isArray(player.carriedGeneralIds)) {
       player.carriedGeneralIds = Object.entries(this.world.generals || {})
         .filter(([, general]) => String(general?.holderAccountId || "") === accountId && general?.status === "carried")
@@ -886,7 +907,7 @@ class OnlineWorldService {
     for (const general of Object.values(generals)) {
       if (general == null) continue;
       if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
-      if (JSON.stringify(general).length > 30000 || String(general.setting || "").length > 1000 || String(general.memoryText || "").length > 1000) return false;
+      if (JSON.stringify(general).length > 30000 || String(general.appearanceSetting || "").length > 350 || String(general.coreSetting || general.setting || "").length > 800 || String(general.memoryText || "").length > 1000) return false;
       if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 40) return false;
       if (Array.isArray(general.masterHistory) && general.masterHistory.length > 20) return false;
       if (Array.isArray(general.captivityHistory) && general.captivityHistory.length > 20) return false;
@@ -1403,7 +1424,6 @@ class OnlineWorldService {
         validate: value => generalGenerationQualityIssue(value, effect)
       });
       const name = String(parsed?.name || "").trim();
-      const setting = String(parsed?.setting || "").trim();
       const gender = String(parsed?.gender || "").toLowerCase();
       const power = Number(parsed?.power);
       await this.applyLocalIntent({
@@ -1412,8 +1432,12 @@ class OnlineWorldService {
         discoveryId: request.idempotencyKey,
         name: name.slice(0, 24),
         gender,
+        heightCm: Number(parsed.heightCm),
+        weightKg: Number(parsed.weightKg),
+        measurements: cloneJson(parsed.measurements),
+        appearanceSetting: String(parsed.appearanceSetting).trim(),
+        coreSetting: String(parsed.coreSetting).trim(),
         location: { x: effect.x, y: effect.y },
-        setting,
         power,
         initial: Boolean(effect.initial),
         idempotencyKey: `general:${request.idempotencyKey}`

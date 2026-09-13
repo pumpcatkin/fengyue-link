@@ -74,7 +74,7 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .panel header b { margin-top: 2px; font-family: Georgia, "Noto Serif SC", serif; font-size: 15px; }
 .panel header strong { color: var(--red-dark); font-size: 13px; }
 .panel header em { color: var(--muted); font-size: 9px; font-style: normal; font-weight: 800; }
-.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 .metrics span, .cell-facts span, .general-stats span {
   border: 2px solid var(--line); border-radius: 8px; background: var(--paper-light); padding: 7px; box-shadow: 2px 2px 0 #9d7e50;
 }
@@ -84,6 +84,13 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 
 .march-cost { display: flex; align-items: center; justify-content: space-between; border: 2px dashed var(--line); border-radius: 8px; background: #f8edcc; padding: 7px; font-size: 10px; }
 .march-cost b { color: var(--red-dark); }
+.training-panel { border-color: #72562c; background: #edd19a; }
+.training-grid { display: grid; grid-template-columns: 1fr 92px; gap: 7px; }
+.training-grid label { display: grid; gap: 3px; color: var(--muted); font-size: 8px; font-weight: 900; }
+.training-grid select, .training-grid input { min-width: 0; border: 2px solid var(--line); border-radius: 7px; background: #fff6dc; color: var(--ink); padding: 7px; }
+.training-preview { grid-column: 1 / -1; border: 2px dashed var(--line); border-radius: 8px; background: #fff0c8; padding: 8px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.training-preview b { color: var(--red-dark); }
+.training-grid > button { grid-column: 1 / -1; }
 .cell-panel header b { color: var(--muted); font-size: 11px; font-weight: 700; }
 .cell-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 8px; }
 .cell-facts span { padding: 9px; }
@@ -165,7 +172,8 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .preference-orientation { margin-bottom: 10px; }
 
 .general-modal { width: min(760px, 96vw); }
-.general-stats { display: grid; grid-template-columns: 140px 1fr; gap: 8px; }
+.general-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.general-stats span:last-child { grid-column: span 2; }
 .general-modal section { margin-top: 12px; }
 .general-modal h2 { margin: 0 0 5px; color: var(--red-dark); font-size: 12px; }
 .general-modal section > p { max-height: 150px; overflow: auto; margin: 0; border: 2px solid var(--line); border-radius: 8px; background: var(--paper-light); padding: 9px; font-size: 10px; line-height: 1.6; white-space: pre-wrap; }

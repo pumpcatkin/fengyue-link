@@ -334,7 +334,13 @@ async function requestStructuredModelProbe(window, workId, request, validate) {
     }
     const result = await consumeModelEventStream(response.body);
     if (!String(result.conversationId || "").trim()) throw new Error("模型探针完成后没有新会话编号");
-    const parsed = parseJsonAnswer(result.answer);
+    let parsed;
+    try {
+      parsed = parseJsonAnswer(result.answer);
+    } catch (error) {
+      const preview = String(result.answer || "").replace(/\s+/g, " ").slice(0, 1200);
+      throw new Error(`${request.task || "模型探针"}解析失败：${error?.message || error}；返回长度 ${String(result.answer || "").length}；片段 ${JSON.stringify(preview)}`);
+    }
     const issue = validate(parsed);
     if (issue) throw new Error(`模型探针质量校验失败：${issue}`);
     return { parsed, conversationId: result.conversationId, finishEvent: result.finishEvent, answerCharacters: result.answer.length };
@@ -379,8 +385,12 @@ async function runModelProbe(window, workId) {
       name: general.parsed.name,
       gender: general.parsed.gender,
       power: general.parsed.power,
-      settingCharacters: String(general.parsed.setting || "").length,
-      settingSample: String(general.parsed.setting || "").slice(0, 180)
+      heightCm: general.parsed.heightCm,
+      weightKg: general.parsed.weightKg,
+      measurements: general.parsed.measurements,
+      appearanceCharacters: String(general.parsed.appearanceSetting || "").length,
+      coreSettingCharacters: String(general.parsed.coreSetting || "").length,
+      coreSettingSample: String(general.parsed.coreSetting || "").slice(0, 180)
     }
   };
 }

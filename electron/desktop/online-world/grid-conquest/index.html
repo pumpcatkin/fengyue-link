@@ -29,12 +29,22 @@
           <section class="panel player-panel">
             <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
             <button id="edit-preferences" class="preference-button" type="button">修改性癖偏好</button>
-            <div class="metrics"><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
+            <div class="metrics"><span><small>自身战力</small><b id="player-power">0</b></span><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
           </section>
 
           <section class="panel march-panel">
             <header><span><small>可调动兵力</small><b>行军队伍</b></span><strong id="march-available">0 人</strong></header>
             <div class="march-cost"><span>每移动 1 格</span><b id="march-cost-per-cell">10 金币</b></div>
+          </section>
+
+          <section class="panel training-panel">
+            <header><span><small>金币投入 · 永久成长</small><b>战力修炼</b></span><strong id="training-level">0 阶</strong></header>
+            <div class="training-grid">
+              <label>修炼对象<select id="training-target"></select></label>
+              <label>连续修炼<input id="training-levels" type="number" min="1" max="10" value="1"></label>
+              <div id="training-preview" class="training-preview">选择自己或未部署将领</div>
+              <button id="start-power-training" class="primary" type="button">开始修炼</button>
+            </div>
           </section>
 
           <section class="panel cell-panel">
@@ -121,8 +131,9 @@
     <section id="general-modal" class="overlay hidden" role="dialog" aria-modal="true">
       <article class="paper-modal general-modal">
         <header><span><small id="general-status">将领档案</small><h1 id="general-name">—</h1></span><button id="close-general" type="button">关闭</button></header>
-        <div class="general-stats"><span><small>战力</small><b id="general-power">0</b></span><span><small>归属账号</small><b id="general-holder">—</b></span></div>
-        <section><h2>人物设定</h2><p id="general-setting">—</p></section>
+        <div class="general-stats"><span><small>姓名</small><b id="general-profile-name">—</b></span><span><small>性别</small><b id="general-gender">—</b></span><span><small>身高</small><b id="general-height">—</b></span><span><small>体重</small><b id="general-weight">—</b></span><span><small>三围</small><b id="general-measurements">—</b></span><span><small>战力 / 修炼</small><b id="general-power">0</b></span><span><small>归属</small><b id="general-holder">—</b></span></div>
+        <section><h2>外观设定</h2><p id="general-appearance">—</p></section>
+        <section><h2>核心设定</h2><p id="general-core-setting">—</p></section>
         <section><h2>历任主公与被俘记录</h2><div id="general-service-history" class="archive-list"></div></section>
         <section><h2>互动历史</h2><div id="general-history" class="archive-list"></div></section>
         <footer><button id="general-interact" class="primary hidden" type="button">交互</button></footer>

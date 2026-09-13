@@ -16,10 +16,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 28,966 个字符，解码后 HTML 90,557 字节，gzip 压缩包 21,661 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 31,524 个字符，解码后 HTML 98,540 字节，gzip 压缩包 23,580 字节，程序 SHA-256：
 
 ```text
-4a84f3b2b639c1e7d2649978cf3070cd2a9467b3f1eb46eff8234120031a6e03
+20d8a363221ff0392b8ed5e7a4b9d6512b2bc6563ef57d173863d8d31f66eec7
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。
@@ -71,8 +71,8 @@ npm run game:bundle
 内容：
 
 ```text
-任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象；gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为 600～1000 个汉字的完整人物设定，清晰包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，initialWish 是最高优先级的绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物，禁止更改要求性别。禁止输出未提供、暂无、不详、未知、待补充等占位内容。模型返回缺少 name、gender、power 或完整 setting 时视为失败。不要替玩家决定行动，不生成游戏数值之外的新规则。
-输出 Schema：{"name":"姓名","gender":"male|female","power":300,"setting":"人物设定"}
+任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息严格分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；heightCm 为 120～230 的整数；weightKg 为 30～250 的数字；measurements 必须完整给出 chestCm、waistCm、hipCm，均为 30～200 的数字；appearanceSetting 为 80～350 个汉字，只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 为 450～800 个汉字，承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向；power 为 100～5000 的整数。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。
+输出 Schema：{"name":"姓名","gender":"male|female","heightCm":168,"weightKg":54.5,"measurements":{"chestCm":88,"waistCm":60,"hipCm":90},"appearanceSetting":"外观设定","coreSetting":"核心设定","power":300}
 ```
 
 ### 3.2 玩家角色设定整理
@@ -101,7 +101,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。
+任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属。
 输出 Schema：{"reply":"将领回答","command":null|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
 ```
 
@@ -116,7 +116,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。
+任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。
 输出 Schema：{"reply":"俘虏将领回答","command":null|{"type":"surrender"}|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
 ```
 
@@ -135,7 +135,7 @@ npm run game:bundle
 输出 Schema：{"category":"speech|deed","summary":"事件摘要","emotion":"情绪与关系感受","intimacyDelta":1,"compactMemory":"言谈：……\n经历：……"}
 ```
 
-工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；两次都必须等到平台完成事件，并通过内容长度、占位词、性别、战力和 Schema 校验后才一次性提交玩家与初始将领。任何失败重试都使用新的平台会话。对话请求同时携带玩家上下文与将领上下文；完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。部署时把将领设定、战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。
+工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；两次都必须等到平台完成事件，并通过内容长度、占位词、姓名、性别、身高、体重、三围、外观、核心设定、战力和 Schema 校验后才一次性提交玩家与初始将领。任何失败重试都使用新的平台会话。对话请求同时携带玩家上下文与分栏后的将领上下文；完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。部署时把将领七类资料、基础战力、修炼等级、当前战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。旧版单段 `setting` 存档会自动迁入“核心设定”，同时补齐兼容身体资料和外观摘要，不重置已有将领。
 
 ## 4. 宿主通讯约定
 
@@ -166,7 +166,7 @@ parent.postMessage({ source: "fyow-grid-conquest", type: "library" }, "*");
 { source: "fengyue-host", type: "error", message: "错误说明" }
 ```
 
-前端可提交：`join`、`start-mining`、`stop-mining`、`train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。授予将领、记录互动和降服属于宿主内部动作。
+前端可提交：`join`、`start-mining`、`stop-mining`、`train`、`power-train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。授予将领、记录互动和降服属于宿主内部动作。
 
 性取向、自定义性癖标签及其注释、初始良将描述、金币、行动任务、行军队伍、随行/俘虏将领及本地事件不写评论。普通发掘请求从自定义标签中稳定抽取 1～3 个方向；初始将领请求忽略标签，只使用性取向与第四问自由描述。玩家可以在游戏内“修改性癖偏好”中更新后续生成方向。
 
@@ -200,6 +200,33 @@ parent.postMessage({
 - 封禁状态与世代号进入作者签名公共快照。读取时把 `fyow.authority/1` 和地图增量按评论时间合并，因此封禁之后的目标操作即使与封禁评论位于同一页也会被过滤。
 - 在线服主每观察到 32 条新地图增量就自动写入完整公共覆盖快照；重置、封禁和解封后立即写入快照。快照所在评论时间是覆盖水位线，启动扫描组装出最新完整快照后即可停止翻阅更旧页面，只应用快照之后的少量记录。
 - 评论区旧内容不会被物理删除；它们由快照水位线和玩家世代号在逻辑上作废，既保留可审计顺序，也避免每次启动重复处理上百页废弃记录。
+
+### 4.3 玩家与将领的增量战力修炼
+
+本轮参考 Cookie Clicker 作者 Orteil 的 Idle Game Maker 手册中建筑价格默认按 115% 递增的做法，以及《The Math of Idle Games》对“产出与成本跷跷板、指数成长和升级回本时间”的分析，把同一套永久成长规则用于玩家本人和将领：
+
+- 玩家基础战力固定为 300；新将领生成的 `power` 作为其基础战力，范围 100～5000。
+- 修炼等级为 0～100，一次可连续修炼 1～10 级。第 `L` 级的单级费用为 `ceil(max(50, 基础战力 × 0.2) × 1.15^L)`，开始时立即扣除金币。
+- 当前战力为 `floor(基础战力 × (1 + 0.06 × L) × 1.25^floor(L/10))`。每一级稳定增长，每 10 级再出现一个明显里程碑增幅。
+- 每一级耗时 `1 + floor(L/10)` 分钟；批量任务总时长最低 1 分钟、最高 1 小时，继续使用宿主校准后的真实时间结算。
+- 只有玩家本人和归本机玩家持有、当前未部署的将领能修炼。本人修炼时不能行军；正在修炼的将领不能随军或部署；已部署将领必须先召回。
+- 私人的本人战力与未部署将领修炼只存本机。将领下一次部署时，其基础战力、修炼等级和当前战力随公共部署档案发布，所有玩家据此得到相同守备战力。
+- 战斗进攻方战力改为“士兵 + 玩家本人战力 + 最多两名随行将领战力”；区域守备仍是“驻军 + 最多两名已部署将领战力”。
+
+参考资料：Orteil Idle Game Maker handbook（`https://orteil.dashnet.org/igm/help.html`）；Anthony Pecorella, *The Math of Idle Games, Part I*（Game Developer）。
+
+以初始基础战力 300 的玩家为例：0 级战力 300、首次修炼费用 60；10 级战力 600；20 级战力 1031。这个曲线让早期提升直观，后期金币需求快速上升，不会被低成本无限线性堆高。
+
+### 4.4 当前获得将领的路径与时间估算
+
+代码中共有四条与“得到将领”有关的路径，其中只有前两条会新生成角色：
+
+1. **开局初始良将**：完成四问后，先整理玩家角色上下文，再调用将领生成世界书；两次请求都完成且校验通过后才创建玩家并写入初始将领。这条路线 100% 获得一名新将领。真实顺序探针通常约 1～2 分钟，平台排队时会更长。
+2. **攻占中立格后发掘**：只有成功攻占尚未被玩家占领的格子才判定。概率为 `2% + (人口 - 100) / 9900 × 23%`，即人口 100 时 2%，人口 10000 时 25%。地图人口均匀分布时平均概率约 13.5%，几何分布期望约 7.4 次成功中立占领，中位数 5 次，约 90% 的玩家会在 16 次以内触发。若每次只移动相邻一格，每格 1 分钟，再加一次模型生成，典型首名额外将领约 6～10 分钟；较保守的 90% 区间约 17～19 分钟。专挑高人口格时理论期望降到 4 次，但中立守军也会达到人口 20%，需要更高战力。
+3. **攻占其他玩家部署将领的领地**：胜利后立即把该格全部部署将领移入俘虏区，没有随机概率，也不生成新人。耗时是行军距离每格 1 分钟、最多 1 小时；战斗在到达后瞬间结算。
+4. **俘虏降服**：与俘虏互动时，俘虏世界书可返回 `surrender`，将其转为随行或留置将领。这是把已有俘虏变成可用部属，不增加全局将领总数；所需互动次数由人物关系与模型结果决定，没有固定保底时间。
+
+上述 6～19 分钟估算假设早期地图仍有相邻中立格、玩家战力足以取胜且金币足够。若必须绕过其他玩家领地、补兵或先修炼，额外时间由行军和训练任务叠加。
 
 书信没有手动发送框。普通/俘虏互动模型返回 `send-letter` 后，宿主校验目标必须存在于该将领的历任主公账号列表，先回复目标玩家根评论发布签名 `DMWAKE`，再将书信通过对应私信会话加密传输。俘虏互动还可返回 `surrender`，由宿主更新效忠与历任主公记录。
 

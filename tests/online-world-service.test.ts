@@ -14,6 +14,8 @@ const completeAppearance = "一头柔软白发衬着醒目的猫耳，浅色眼�
 const completeSpeech = "说话语速平稳，习惯先听完对方再作判断；下达命令时简洁明确，私下交流则会使用温和的玩笑缓和紧张。";
 const completeRelationship = "对愿意并肩承担风险的人逐步建立信任，重视长期陪伴、坦诚沟通与彼此尊重；会主动照顾亲近者，也希望对方保有独立意志。";
 const completeGeneralSetting = ("出身：初将生于北境关城的军户之家，自幼熟悉边地烽火与军粮转运。外貌：黑发束起，目光锐利，常穿轻便札甲并携长弓。性格：沉稳守信，遇事先观察后决断，对部下严厉却愿意承担责任。志趣：希望结束沿途百姓反复迁徙的生活，建立秩序稳定的领地。军事能力：擅长守城、斥候调度、夜间伏击和有限兵力下的物资统筹，能够根据地形迅速调整阵线。弱点：过分重视承诺，面对旧部求援时容易冒险；不善公开表达感情。当前处境：旧主战败后带着残部寻找拥有慧眼的新主公，急需粮草和可信赖的落脚处。关系倾向：对真诚且尊重部属的女性主公会逐步放下戒心，以行动表达忠诚，并愿意发展深厚而平等的羁绊。").repeat(4).slice(0, 760);
+const completeGeneralAppearance = "她有一头束成高马尾的乌黑长发，眉眼锐利而沉静，肤色是长期巡守留下的健康浅麦色。身形高挑结实，肩背线条利落，手掌留有拉弓和持枪形成的薄茧。她惯穿便于行动的深青札甲，腰间系红色旧绳作为故乡纪念，披风边缘缝着修补多次的银线，举止始终保持警觉而克制。";
+const completeGeneral = { name: "初将", gender: "female", heightCm: 172, weightKg: 61.5, measurements: { chestCm: 89, waistCm: 64, hipCm: 91 }, appearanceSetting: completeGeneralAppearance, coreSetting: completeGeneralSetting.slice(0, 700), power: 320 };
 
 function service(options: Record<string, unknown>) {
   let worldBook: any[] = [];
@@ -31,7 +33,7 @@ function service(options: Record<string, unknown>) {
           ? "{\"category\":\"speech\",\"summary\":\"与玩家谈论戏剧\",\"emotion\":\"愉快\",\"intimacyDelta\":1,\"compactMemory\":\"言谈：[1年]与玩家谈论戏剧\\n经历：暂无\"}"
           : request?.task === "general.dialogue" || request?.task === "general.captive-dialogue"
             ? "{\"reply\":\"愿与主公详谈。\",\"command\":null}"
-            : JSON.stringify({ name: "初将", gender: "female", power: 320, setting: completeGeneralSetting })
+            : JSON.stringify(completeGeneral)
     }),
     getOrigin: () => "https://aigirlfriend.baby",
     onChange: () => {},
@@ -48,8 +50,8 @@ describe("online world platform service", () => {
       relationshipApproach: completeRelationship
     })).toMatch(/占位措辞/);
     expect(playerContextQualityIssue({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })).toBeNull();
-    expect(generalGenerationQualityIssue({ name: "短将", gender: "female", power: 300, setting: "善战。" }, { gender: "female" })).toMatch(/600～1000/);
-    expect(generalGenerationQualityIssue({ name: "初将", gender: "female", power: 320, setting: completeGeneralSetting }, { gender: "female" })).toBeNull();
+    expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。" }, { gender: "female" })).toMatch(/450～800/);
+    expect(generalGenerationQualityIssue(completeGeneral, { gender: "female" })).toBeNull();
   });
 
   it("repairs a legacy player's placeholder context without resetting their game", async () => {

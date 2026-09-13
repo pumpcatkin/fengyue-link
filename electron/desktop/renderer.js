@@ -131,6 +131,7 @@ let onlineWorldState = null;
 let onlineWorldCards = [];
 let selectedOnlineWorldCardId = null;
 let onlineWorldEnteredProfileId = null;
+let onlineWorldInLibrary = true;
 let onlineWorldFrameReady = false;
 let onlineWorldProgramHash = "builtin-preview";
 let onlineWorldProgramUrl = null;
@@ -153,7 +154,6 @@ let pendingPointerMove = null;
 let pointerMoveTimer = null;
 let gameInputQueue = Promise.resolve();
 let activeModelFamily = "all";
-const ONLINE_WORLD_SHOWCASE_TITLES = ["星港商旅","雾海农庄","长夜远征","机械城邦","失落棋局","荒原驿站","月轮迷宫","群岛霸业","秘境编年","云端领主"];
 const ONLINE_WORLD_COVER_MARKS = ["征","舟","田","夜","机","棋","驿","月","岛","云"];
 let pendingModelChangeKey = null;
 let adminLogsLoaded = false;
@@ -624,14 +624,12 @@ function showPage(page){
 
 function postOnlineWorldState(){
   if(!onlineWorldFrameReady||!onlineWorldState)return;
-  onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"state",state:onlineWorldState},"*");
+  const hostedState={...onlineWorldState,characterProfiles:state?.characterProfiles||{items:[],selectedId:null}};
+  onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"state",state:hostedState},"*");
 }
 
 function onlineWorldGalleryCards(){
-  const real=onlineWorldCards.map((card,index)=>({...card,demo:false,coverIndex:index%10}));
-  const needed=Math.max(0,10-real.length);
-  const showcase=ONLINE_WORLD_SHOWCASE_TITLES.slice(0,needed).map((title,index)=>({cardId:`showcase.${index+1}`,title,demo:true,coverIndex:(real.length+index)%10}));
-  return [...real,...showcase];
+  return onlineWorldCards.map((card,index)=>({...card,demo:false,coverIndex:index%10}));
 }
 
 function selectedOnlineWorldProfile(){
@@ -643,7 +641,7 @@ function renderOnlineWorldProfileChoices(){
   const select=document.querySelector("#online-world-profile");
   if(!select)return;
   const items=state?.characterProfiles?.items||[];
-  const previous=onlineWorldEnteredProfileId||select.value||state?.characterProfiles?.selectedId;
+  const previous=onlineWorldState?.localPreferences?.characterProfileId||onlineWorldEnteredProfileId||select.value||state?.characterProfiles?.selectedId;
   select.replaceChildren();
   if(!items.length){
     const option=document.createElement("option");option.value="";option.textContent="请先填写角色设定";select.append(option);
@@ -652,9 +650,9 @@ function renderOnlineWorldProfileChoices(){
     option.value=profile.id;option.textContent=profile.label||profile.displayName||"未命名设定";
     option.selected=profile.id===previous;select.append(option);
   }
-  const entered=Boolean(onlineWorldEnteredProfileId||(onlineWorldState?.work&&onlineWorldState.status!=="closed"));
-  select.disabled=entered;
-  document.querySelector("#online-world-open").disabled=entered||!items.length||!selectedOnlineWorldCardId;
+  const ownPlayer=onlineWorldState?.world?.players?.[onlineWorldState?.account?.accountId];
+  select.disabled=Boolean(ownPlayer);
+  document.querySelector("#online-world-open").disabled=!items.length||!selectedOnlineWorldCardId;
 }
 
 function showOnlineWorldDetails(card){
@@ -714,15 +712,21 @@ function followOnlineWorldMigration(next){
 }
 
 function renderOnlineWorld(next){
+  const wasInitialized=Boolean(onlineWorldState?.initialized);
   onlineWorldState=next;
+  if(!wasInitialized&&next?.initialized)onlineWorldInLibrary=false;
   loadOnlineWorldProgram(next);
   const status=document.querySelector("#online-world-status");
   const serverOwner=Boolean(next?.isServerOwner||next?.isAuthor);
   const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":serverOwner?"已确认服主身份 · 可以开服":"等待服主开服",degraded:"使用缓存，等待重新同步",error:"读取失败"};
   status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
   const initialized=Boolean(next?.initialized);
-  document.querySelector("#online-world-setup").classList.toggle("hidden",initialized);
-  onlineWorldFrame.classList.toggle("hidden",!initialized);
+  const gameVisible=initialized&&!onlineWorldInLibrary;
+  onlineWorldPage.classList.toggle("game-active",gameVisible);
+  settingsToggle.classList.toggle("hidden",gameVisible);
+  document.querySelector("#online-world-setup").classList.toggle("hidden",gameVisible);
+  onlineWorldFrame.classList.toggle("hidden",!gameVisible);
+  document.querySelector(".online-world-toolbar").classList.toggle("hidden",gameVisible);
   const initializeButton=document.querySelector("#online-world-initialize");
   initializeButton.classList.toggle("hidden",!serverOwner||initialized);
   initializeButton.disabled=!["work-description","card-package"].includes(next?.program?.source);
@@ -730,8 +734,7 @@ function renderOnlineWorld(next){
   document.querySelector("#online-world-activate-program").classList.toggle("hidden",!serverOwner||!initialized);
   document.querySelector("#online-world-export-card").classList.toggle("hidden",!serverOwner||!next?.work);
   document.querySelector("#online-world-migrate").classList.toggle("hidden",!serverOwner||!initialized);
-  document.querySelector("#online-world-sync").disabled=!next?.work||Boolean(next?.syncing);
-  document.querySelector("#online-world-title").textContent=next?.work?(next?.card?.title||"艳猎征途"):"联机游戏";
+  document.querySelector("#online-world-title").textContent=next?.work?(next?.card?.title||"猎艳疆土"):"联机游戏";
   renderOnlineWorldProfileChoices();
   postOnlineWorldState();
   followOnlineWorldMigration(next);
@@ -1159,7 +1162,7 @@ function render(next){
 document.querySelector("#enter-multiplayer").addEventListener("click",()=>{if(!state?.loggedIn){toast("请先登录风月账号");return}showPage("multiplayer")});
 document.querySelector("#enter-online-world").addEventListener("click",async()=>{
   if(!state?.loggedIn){toast("请先登录风月账号");return}
-  showPage("online-world");
+  onlineWorldInLibrary=true;showPage("online-world");
   try{renderOnlineWorldCards(await api.listOnlineWorldCards());renderOnlineWorld(await api.getOnlineWorldState())}catch(error){toast(friendlyError(error))}
 });
 document.querySelector("#online-world-import-card").addEventListener("click",()=>invoke(async()=>{
@@ -1170,7 +1173,7 @@ document.querySelector("#online-world-import-card").addEventListener("click",()=
 document.querySelector("#online-world-detail").addEventListener("click",event=>{if(event.target===event.currentTarget)closeOnlineWorldDetails()});
 document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!document.querySelector("#online-world-detail").classList.contains("hidden"))closeOnlineWorldDetails()});
 document.querySelector("#online-world-profile").addEventListener("change",renderOnlineWorldProfileChoices);
-document.querySelector("#online-world-back").addEventListener("click",()=>invoke(async()=>{await api.closeOnlineWorld();onlineWorldEnteredProfileId=null;selectedOnlineWorldCardId=null;closeOnlineWorldDetails();showPage("home")}).catch(()=>{}));
+document.querySelector("#online-world-back").addEventListener("click",()=>{closeOnlineWorldDetails();showPage("home")});
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();
   const card=onlineWorldGalleryCards().find(item=>item.cardId===selectedOnlineWorldCardId);
@@ -1183,11 +1186,10 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
   try{
     const next=await api.openOnlineWorld({cardId:card.cardId,characterProfileId:profile.id,displayName:profile.displayName||state?.account?.username||"玩家",orientation:"any"});
     closeOnlineWorldDetails();
-    renderOnlineWorld(next);
+    onlineWorldInLibrary=!next?.initialized;renderOnlineWorld(next);
   }catch(error){onlineWorldEnteredProfileId=null;renderOnlineWorld({...onlineWorldState,status:"error",error:friendlyError(error)});toast(friendlyError(error))}
   finally{button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
 });
-document.querySelector("#online-world-sync").addEventListener("click",()=>invoke(async()=>renderOnlineWorld(await api.syncOnlineWorld(true))).catch(()=>{}));
 document.querySelector("#online-world-export-card").addEventListener("click",()=>invoke(async()=>{
   const result=await api.exportOnlineWorldCard();
   renderOnlineWorldCards(await api.listOnlineWorldCards());
@@ -1195,7 +1197,7 @@ document.querySelector("#online-world-export-card").addEventListener("click",()=
 }).catch(()=>{}));
 document.querySelector("#online-world-initialize").addEventListener("click",async()=>{
   if(!await confirmAction("这会以伴生作品作者作为服主，在评论区写入赛季控制记录和第一份地图快照。",{title:"服主开服",acceptText:"立即开服"}))return;
-  invoke(async()=>{renderOnlineWorld(await api.initializeOnlineWorld());toast("开服成功，在线赛季已经启动")}).catch(()=>{});
+  invoke(async()=>{const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);toast("开服成功，在线赛季已经启动")}).catch(()=>{});
 });
 document.querySelector("#online-world-activate-program").addEventListener("click",async()=>{
   if(!await confirmAction("这会重新读取作品详细介绍，并用作者密钥签名启用其中的游戏程序包。",{title:"启用详情程序",acceptText:"签名启用"}))return;
@@ -1212,6 +1214,9 @@ window.addEventListener("message",async event=>{
     if(!onlineWorldState)try{onlineWorldState=await api.getOnlineWorldState()}catch{}
     postOnlineWorldState();return;
   }
+  if(event.data.type==="library"){
+    onlineWorldInLibrary=true;closeOnlineWorldDetails();renderOnlineWorld(onlineWorldState);return;
+  }
   if(event.data.type==="direct"){
     try{
       const result=await api.sendOnlineWorldDirect(event.data.message||{});
@@ -1222,8 +1227,10 @@ window.addEventListener("message",async event=>{
   if(event.data.type!=="intent")return;
   const intent={...(event.data.intent||{})};
   if(intent.type==="join"){
-    const profile=selectedOnlineWorldProfile();
-    intent.orientation="any";
+    const profile=(state?.characterProfiles?.items||[]).find(item=>item.id===intent.characterProfileId)||selectedOnlineWorldProfile();
+    if(!profile){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:"请选择角色设定"},"*");return}
+    onlineWorldEnteredProfileId=profile.id;
+    intent.characterProfileId=profile.id;
     intent.displayName=profile?.displayName||state?.account?.username||"玩家";
   }
   try{

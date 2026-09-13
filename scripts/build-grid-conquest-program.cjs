@@ -10,9 +10,9 @@ const sourceDirectory = path.join(root, "electron", "desktop", "online-world", "
 const outputDirectory = path.join(root, "release-cache", "online-world");
 const originalHtml = fs.readFileSync(path.join(sourceDirectory, "index.html"), "utf8");
 const css = fs.readFileSync(path.join(sourceDirectory, "styles.css"), "utf8");
-const javascript = fs.readFileSync(path.join(sourceDirectory, "game.js"), "utf8");
+const javascript = `${fs.readFileSync(path.join(sourceDirectory, "acg-tags.js"), "utf8")}\n${fs.readFileSync(path.join(sourceDirectory, "game.js"), "utf8")}`;
 const html = composeSingleFileProgram(originalHtml, css, javascript);
-const packed = packProgram({ gameId: GRID_GAME_ID, title: "艳猎征途", html });
+const packed = packProgram({ gameId: GRID_GAME_ID, title: "猎艳疆土", html });
 
 fs.mkdirSync(outputDirectory, { recursive: true });
 fs.writeFileSync(path.join(outputDirectory, "grid-conquest-description-envelope.txt"), packed.envelope, "utf8");

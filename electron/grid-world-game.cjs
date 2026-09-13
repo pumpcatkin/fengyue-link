@@ -94,6 +94,22 @@ function allowedGeneralGender(orientation, seed, ...parts) {
   return randomUnit(seed, "general-gender", ...parts) < 0.5 ? "male" : "female";
 }
 
+function normalizedCharacterTags(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 80);
+}
+
+function selectGeneralDirectionTags(privatePlayer, seed, ...parts) {
+  const tags = normalizedCharacterTags(privatePlayer?.characterTags);
+  if (!tags.length) return [];
+  const count = Math.min(tags.length, 1 + Math.floor(randomUnit(seed, "general-tag-count", ...parts) * 3));
+  return tags
+    .map(tag => ({ tag, score: entropy(seed, "general-tag", ...parts, tag).toString("hex") }))
+    .sort((left, right) => left.score.localeCompare(right.score))
+    .slice(0, count)
+    .map(item => item.tag);
+}
+
 function generalDiscoveryChance(population) {
   return 0.02 + ((clamp(Number(population), 100, 10000) - 100) / 9900) * 0.23;
 }
@@ -182,11 +198,28 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting
     loyalToAccountId: String(holderAccountId),
     status: "carried",
     location: null,
+    masterHistory: [{ accountId: String(holderAccountId), fromYear: year, toYear: null, reason: "发掘" }],
+    captivityHistory: [],
+    interactionHistory: [],
     memory: { entries: [], intimacy: { [String(holderAccountId)]: 5 } },
     memoryText: ""
   };
   appendGeneralMemory(general, { year, category: "deed", text: `被${holderAccountId}发掘并提拔为将领`, accountId: holderAccountId, intimacyDelta: 5 });
   return general;
+}
+
+function closeCurrentMaster(general, year) {
+  const current = [...(general.masterHistory || [])].reverse().find(item => item.toYear == null);
+  if (current) current.toYear = year;
+}
+
+function canInteractWithGeneral(state, player, general) {
+  if (!general || general.holderAccountId !== player.accountId) return false;
+  if (player.carriedGeneralIds?.includes(general.id)) return true;
+  if (general.status === "captured") return true;
+  return general.status === "deployed"
+    && general.location?.x === player.position?.x
+    && general.location?.y === player.position?.y;
 }
 
 function settleWorld(inputState, nowValue = Date.now()) {
@@ -279,30 +312,32 @@ function resolveMarch(state, job, effects, now) {
     for (const generalId of capturedGeneralIds) {
       const general = state.generals[generalId];
       if (!general) continue;
+      const year = gameYear(state, now);
+      const formerMasterAccountId = String(general.loyalToAccountId || previousOwner || general.holderAccountId || "");
+      closeCurrentMaster(general, year);
       general.holderAccountId = job.accountId;
-      general.capturedFromAccountId = previousOwner || general.loyalToAccountId || null;
-      general.capturedAtYear = gameYear(state, now);
-      if (!player.carriedGeneralIds.includes(generalId) && player.carriedGeneralIds.length < 2) {
-        player.carriedGeneralIds.push(generalId);
-        general.status = "carried";
-        general.location = null;
-      } else {
-        general.status = "captured";
-        general.location = { ...job.to };
-      }
-      appendGeneralMemory(general, { year: gameYear(state, now), category: "deed", text: `战败，被${job.accountId}俘虏`, accountId: job.accountId, intimacyDelta: -5 });
+      general.capturedFromAccountId = formerMasterAccountId || null;
+      general.capturedAtYear = year;
+      general.status = "captured";
+      general.location = { ...job.to };
+      general.captivityHistory ||= [];
+      general.captivityHistory.push({ captorAccountId: job.accountId, formerMasterAccountId, year });
+      appendGeneralMemory(general, { year, category: "deed", text: `战败，被${job.accountId}俘虏`, accountId: job.accountId, intimacyDelta: -5 });
     }
     effects.push({ type: "battle-won", jobId: job.id, accountId: job.accountId, at: job.to, previousOwner, attackerPower, defenderPower, soldiers: target.soldiers, capturedGeneralIds });
     if (neutral) {
       const chance = generalDiscoveryChance(targetInfo.population);
       if (randomUnit(state.seed, "discover-general", state.seasonId, job.id, job.to.x, job.to.y) < chance) {
-        const orientation = state.privatePlayers[job.accountId]?.orientation || "any";
+        const privatePlayer = state.privatePlayers[job.accountId] || {};
+        const orientation = privatePlayer.orientation || "any";
         effects.push({
           type: "general-generation-request",
           accountId: job.accountId,
           x: job.to.x,
           y: job.to.y,
           gender: allowedGeneralGender(orientation, state.seed, job.id),
+          directionTags: selectGeneralDirectionTags(privatePlayer, state.seed, state.seasonId, job.id, job.to.x, job.to.y),
+          initial: false,
           population: targetInfo.population,
           resourceGrade: targetInfo.resourceGrade
         });
@@ -348,13 +383,31 @@ function applyIntent(inputState, rawIntent, context = {}) {
     if (state.players[actorAccountId]) throw new Error("玩家已经加入本赛季");
     const orientation = ORIENTATIONS.has(intent.orientation) ? intent.orientation : null;
     if (!orientation) throw new Error("请选择将领性别偏好");
+    const characterProfileId = String(intent.characterProfileId || "").trim().slice(0, 100);
+    if (!characterProfileId) throw new Error("请选择绑定的角色设定");
+    const characterTags = normalizedCharacterTags(intent.characterTags);
+    if (characterTags.length < 8) throw new Error("人物设定标签至少选择 8 个词条");
+    const initialGeneralWish = String(intent.initialGeneralWish || "").trim().slice(0, 500);
+    if (!initialGeneralWish) throw new Error("请描述开疆扩土前想遇到的良将");
     const capital = chooseCapital(state, actorAccountId);
     const info = staticCell(state.seed, capital.x, capital.y);
     const cell = dynamicCell(state, capital.x, capital.y);
     cell.ownerAccountId = actorAccountId;
     cell.soldiers = Math.max(1, Math.floor(info.garrisonCap * 0.5));
     state.players[actorAccountId] = { accountId: actorAccountId, displayName: String(intent.displayName || actorAccountId).slice(0, 40), gold: 1000, position: capital, fieldArmySoldiers: 0, carriedGeneralIds: [], joinedAt: now };
-    state.privatePlayers[actorAccountId] = { orientation };
+    state.privatePlayers[actorAccountId] = { orientation, characterProfileId, characterTags, initialGeneralWish, initialGeneralGranted: false };
+    effects.push({
+      type: "general-generation-request",
+      accountId: actorAccountId,
+      x: capital.x,
+      y: capital.y,
+      gender: allowedGeneralGender(orientation, state.seed, "initial", actorAccountId),
+      directionTags: [],
+      initialWish: initialGeneralWish,
+      initial: true,
+      population: info.population,
+      resourceGrade: info.resourceGrade
+    });
     result = { capital, gold: 1000, soldiers: cell.soldiers };
   } else {
     const player = ensurePlayer(state, actorAccountId);
@@ -381,8 +434,8 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const cell = dynamicCell(state, x, y);
       const info = staticCell(state.seed, x, y);
       if (cell.ownerAccountId !== actorAccountId) throw new Error("只能在自己占领的区域练兵");
-      const queued = Object.values(state.jobs).filter(job => job.type === "training" && job.x === x && job.y === y).reduce((sum, job) => sum + job.amount, 0);
-      if (cell.soldiers + queued + amount > info.garrisonCap) throw new Error(`该区域驻军上限为 ${info.garrisonCap}`);
+      if (jobFor(state, job => job.type === "training" && job.accountId === actorAccountId && job.x === x && job.y === y)) throw new Error("同一格内只能同时进行一项练兵");
+      if (cell.soldiers + amount > info.garrisonCap) throw new Error(`该区域驻军上限为 ${info.garrisonCap}`);
       const cost = amount * 2;
       if (player.gold < cost) throw new Error("金币不足");
       player.gold -= cost;
@@ -442,7 +495,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("行军途中不能带走留置将领");
       const generalId = String(intent.generalId || "");
       const general = state.generals[generalId];
-      if (!general || general.holderAccountId !== actorAccountId || !["captured", "waiting"].includes(general.status)) throw new Error("这里没有可带走的将领");
+      if (!general || general.holderAccountId !== actorAccountId || general.status !== "waiting") throw new Error("这里没有可带走的将领");
       if (general.location?.x !== player.position.x || general.location?.y !== player.position.y) throw new Error("必须到达将领所在区域才能带走");
       if (player.carriedGeneralIds.length >= 2) throw new Error("身边最多携带两名将领");
       player.carriedGeneralIds.push(generalId);
@@ -452,7 +505,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
     } else if (type === "talk-general") {
       const generalId = String(intent.generalId || "");
       const general = state.generals[generalId];
-      if (!general || !player.carriedGeneralIds.includes(generalId) || general.status === "deployed") throw new Error("只有带在身边且未部署的将领可以交谈");
+      if (!canInteractWithGeneral(state, player, general)) throw new Error("只能与身边、俘虏区或当前位置的自家部署将领交谈");
       const topic = String(intent.topic || "").trim().slice(0, 120);
       if (!topic) throw new Error("请输入谈话内容");
       const privatePlayer = state.privatePlayers[actorAccountId] ||= { orientation: "any" };
@@ -464,9 +517,37 @@ function applyIntent(inputState, rawIntent, context = {}) {
     } else if (type === "record-general-dialogue") {
       const generalId = String(intent.generalId || "");
       const general = state.generals[generalId];
-      if (!general || !player.carriedGeneralIds.includes(generalId)) throw new Error("将领不在身边");
+      if (!canInteractWithGeneral(state, player, general)) throw new Error("当前不可与这名将领交谈");
       appendGeneralMemory(general, { year: gameYear(state, now), category: "speech", text: `和${player.displayName}谈论${String(intent.topic || "日常").slice(0, 40)}`, accountId: actorAccountId, intimacyDelta: clamp(Number(intent.intimacyDelta || 1), -5, 5) });
+      general.interactionHistory ||= [];
+      general.interactionHistory.push({
+        year: gameYear(state, now),
+        accountId: actorAccountId,
+        speakerName: player.displayName,
+        kind: general.status === "captured" ? "captive" : "ordinary",
+        userText: String(intent.userText || "").slice(0, 240),
+        reply: String(intent.reply || "").slice(0, 600)
+      });
+      if (general.interactionHistory.length > 40) general.interactionHistory.splice(0, general.interactionHistory.length - 40);
       result = { generalId, memoryText: general.memoryText, intimacy: general.memory.intimacy[actorAccountId] };
+    } else if (type === "surrender-general") {
+      const generalId = String(intent.generalId || "");
+      const general = state.generals[generalId];
+      if (!general || general.holderAccountId !== actorAccountId || general.status !== "captured") throw new Error("这名将领当前不在俘虏区");
+      const year = gameYear(state, now);
+      general.loyalToAccountId = actorAccountId;
+      general.masterHistory ||= [];
+      general.masterHistory.push({ accountId: actorAccountId, fromYear: year, toYear: null, reason: "降服" });
+      appendGeneralMemory(general, { year, category: "deed", text: `向${actorAccountId}降服并奉其为主公`, accountId: actorAccountId, intimacyDelta: 8 });
+      if (player.carriedGeneralIds.length < 2) {
+        player.carriedGeneralIds.push(generalId);
+        general.status = "carried";
+        general.location = null;
+      } else {
+        general.status = "waiting";
+        general.location = { ...player.position };
+      }
+      result = { generalId, status: general.status, surrendered: true };
     } else if (type === "grant-general") {
       if (String(context.authorityAccountId || "") !== String(state.authorityAccountId || actorAccountId)) throw new Error("只有本局权威端可以登记新将领");
       const gender = intent.gender === "female" ? "female" : "male";
@@ -479,6 +560,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       }
       state.generals[general.id] = general;
       if (general.status === "carried") player.carriedGeneralIds.push(general.id);
+      if (intent.initial && state.privatePlayers[actorAccountId]) state.privatePlayers[actorAccountId].initialGeneralGranted = true;
       result = { generalId: general.id, name: general.name, status: general.status, location: general.location };
     } else throw new Error(`未知游戏行动：${type}`);
   }
@@ -488,6 +570,9 @@ function applyIntent(inputState, rawIntent, context = {}) {
   if (state.processedIntents.length > 1000) state.processedIntents.splice(0, state.processedIntents.length - 1000);
   const publicIntent = { ...intent, actorAccountId };
   delete publicIntent.orientation;
+  delete publicIntent.characterTags;
+  delete publicIntent.initialGeneralWish;
+  delete publicIntent.characterProfileId;
   const event = { schema: "fyow.event/3", eventId: String(context.eventId || crypto.randomUUID()), gameId: state.gameId, seasonId: state.seasonId, revision: state.revision, actorAccountId, type, intent: publicIntent, result, createdAt: now };
   return { state, effects, result, event, duplicate: false };
 }
@@ -498,25 +583,40 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
     keyword: "[[FYOW:TASK:general.generate:v1]]",
     idempotencyKey: String(idempotencyKey),
     input: {
-      schema: "fyow.general-generate-request/1",
+      schema: "fyow.general-generate-request/2",
       world: "这个世界战火纷飞，蛮夷遍地，但资源丰饶。各路有志之士带着自己的志趣，试图统治这片大陆。只有天生拥有慧眼的人才有统治的可能性。",
       gender: effect.gender,
       population: effect.population,
       resourceGrade: effect.resourceGrade,
       location: { x: effect.x, y: effect.y },
+      generationKind: effect.initial ? "initial-general" : "discovered-general",
+      directionTags: effect.initial ? [] : normalizedCharacterTags(effect.directionTags).slice(0, 3),
+      initialWish: effect.initial ? String(effect.initialWish || "").slice(0, 500) : "",
+      instruction: effect.initial
+        ? "仅依据性别要求与玩家自由描述生成初始良将，不使用人物设定标签。"
+        : "将 directionTags 作为本次人物生成方向，并保证人物性别严格符合 gender。",
       maximumChineseCharacters: 1000
     }
   };
 }
 
 function buildGeneralDialogueRequest(state, general, player, topic, now) {
+  const captive = general.status === "captured" && general.loyalToAccountId !== player.accountId;
+  const formerLords = [...new Set((general.masterHistory || []).map(item => String(item.accountId || "")).filter(id => id && id !== player.accountId))];
   return {
-    task: "general.dialogue",
-    keyword: `[[FYOW:TASK:general.dialogue:v1]]\n${general.name}`,
+    task: captive ? "general.captive-dialogue" : "general.dialogue",
+    keyword: `${captive ? "[[FYOW:TASK:general.captive-dialogue:v1]]" : "[[FYOW:TASK:general.dialogue:v1]]"}\n${general.name}`,
     input: {
-      schema: "fyow.general-dialogue-request/1",
-      general: { name: general.name, gender: general.gender, setting: general.setting, memory: general.memoryText, intimacy: general.memory?.intimacy?.[player.accountId] || 0 },
+      schema: "fyow.general-dialogue-request/2",
+      interactionMode: captive ? "captive" : "ordinary",
+      general: {
+        id: general.id, name: general.name, gender: general.gender, setting: general.setting,
+        memory: general.memoryText, intimacy: general.memory?.intimacy?.[player.accountId] || 0,
+        masterHistory: clone(general.masterHistory || []), captivityHistory: clone(general.captivityHistory || []),
+        recentInteractions: clone((general.interactionHistory || []).slice(-12))
+      },
       speaker: { accountId: player.accountId, name: player.displayName },
+      allowedFormerLordAccountIds: formerLords,
       topic,
       gameYear: gameYear(state, now)
     }
@@ -524,7 +624,7 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
 }
 
 function publicGeneralState(general) {
-  return {
+  const result = {
     id: String(general?.id || ""),
     name: String(general?.name || "无名将领").slice(0, 24),
     gender: ["male", "female"].includes(general?.gender) ? general.gender : "female",
@@ -535,8 +635,17 @@ function publicGeneralState(general) {
     location: {
       x: Math.trunc(Number(general?.location?.x || 0)),
       y: Math.trunc(Number(general?.location?.y || 0))
-    }
+    },
+    masterHistory: clone(general?.masterHistory || []).slice(-20),
+    captivityHistory: clone(general?.captivityHistory || []).slice(-20),
+    interactionHistory: clone(general?.interactionHistory || []).slice(-40),
+    memory: clone(general?.memory || { entries: [], intimacy: {} }),
+    memoryText: String(general?.memoryText || "").slice(0, 1000),
+    loyalToAccountId: String(general?.loyalToAccountId || ""),
+    capturedFromAccountId: general?.capturedFromAccountId ? String(general.capturedFromAccountId) : null,
+    capturedAtYear: general?.capturedAtYear == null ? null : Number(general.capturedAtYear)
   };
+  return result;
 }
 
 function projectWorldState(state, viewerAccountId) {
@@ -552,7 +661,7 @@ function projectWorldState(state, viewerAccountId) {
   }
   const generals = {};
   for (const [id, general] of Object.entries(state.generals || {})) {
-    if (general.status === "deployed") generals[id] = general.holderAccountId === viewer ? clone(general) : publicGeneralState(general);
+    if (general.status === "deployed") generals[id] = publicGeneralState(general);
     else if (general.holderAccountId === viewer) generals[id] = clone(general);
   }
   return {

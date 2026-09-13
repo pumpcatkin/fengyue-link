@@ -6,7 +6,11 @@ const game = require("../electron/grid-world-game.cjs");
 
 function joined(now = 1_000_000) {
   const base = game.createWorld({ seed: "test-seed", seasonId: "season", startedAt: now, authorityAccountId: "a" });
-  return game.applyIntent(base, { type: "join", orientation: "women", displayName: "甲", idempotencyKey: "join-a" }, { actorAccountId: "a", now }).state;
+  return game.applyIntent(base, {
+    type: "join", orientation: "women", displayName: "甲", characterProfileId: "profile-a",
+    characterTags: ["傲娇", "勇敢", "冷静", "长发", "黑发", "红瞳", "高挑", "军装"],
+    initialGeneralWish: "一名善守城、重信义的良将", idempotencyKey: "join-a"
+  }, { actorAccountId: "a", now }).state;
 }
 
 describe("grid conquest rules", () => {
@@ -64,6 +68,14 @@ describe("grid conquest rules", () => {
     const cell = state.cells[`${player.position.x},${player.position.y}`];
     const info = game.staticCell(state.seed, player.position.x, player.position.y);
     expect(() => game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: info.garrisonCap - cell.soldiers + 1, idempotencyKey: "too-many" }, { actorAccountId: "a", now })).toThrow(/驻军上限/);
+  });
+
+  it("allows only one concurrent training job in the same cell", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const player = state.players.a;
+    const first = game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-one" }, { actorAccountId: "a", now });
+    expect(() => game.applyIntent(first.state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/只能同时进行一项练兵/);
   });
 
   it("charges and times a march while ignoring caller-provided timestamps", () => {
@@ -130,7 +142,9 @@ describe("grid conquest rules", () => {
     expect(settled.state.cells[`${target.x},${target.y}`].ownerAccountId).toBe("a");
     expect(settled.state.generals.defender.holderAccountId).toBe("a");
     expect(settled.state.generals.defender.capturedFromAccountId).toBe("b");
-    expect(settled.state.players.a.carriedGeneralIds).toContain("defender");
+    expect(settled.state.players.a.carriedGeneralIds).not.toContain("defender");
+    expect(settled.state.generals.defender.status).toBe("captured");
+    expect(settled.state.generals.defender.captivityHistory).toContainEqual(expect.objectContaining({ captorAccountId: "a", formerMasterAccountId: "b" }));
     expect(settled.effects).toContainEqual(expect.objectContaining({ type: "battle-won", capturedGeneralIds: ["defender"] }));
   });
 
@@ -154,7 +168,7 @@ describe("grid conquest rules", () => {
     expect(Object.keys(ownState.jobs)).toHaveLength(1);
   });
 
-  it("keeps deployed general memory private while exposing map battle data", () => {
+  it("publishes a deployed general archive with the shared map state", () => {
     const state = joined(1_000_000);
     state.generals.deployed = game.createFallbackGeneral({ id: "deployed", name: "守城将", gender: "female", setting: "公开的守城设定。", power: 700, holderAccountId: "a", year: 1 });
     state.generals.deployed.status = "deployed";
@@ -163,8 +177,8 @@ describe("grid conquest rules", () => {
     state.generals.deployed.memory = { intimacy: { a: 9 } };
     const publicState = game.projectWorldState(state, null);
     expect(publicState.generals.deployed).toMatchObject({ name: "守城将", setting: "公开的守城设定。", power: 700, status: "deployed" });
-    expect(publicState.generals.deployed.memoryText).toBeUndefined();
-    expect(publicState.generals.deployed.memory).toBeUndefined();
+    expect(publicState.generals.deployed.memoryText).toBe("仅本人可见的交谈记忆。");
+    expect(publicState.generals.deployed.memory).toEqual({ intimacy: { a: 9 } });
     const ownState = game.projectWorldState(state, "a");
     expect(ownState.generals.deployed.memoryText).toBe("仅本人可见的交谈记忆。");
   });

@@ -153,6 +153,14 @@ function publicGenerals(state) {
     .map(([id, general]) => [id, publicGeneralState(general)]));
 }
 
+function cacheWorldWithoutDeployedArchives(state) {
+  const cached = cloneJson(state);
+  for (const [id, general] of Object.entries(cached?.generals || {})) {
+    if (general?.status === "deployed") delete cached.generals[id];
+  }
+  return cached;
+}
+
 function changedEntries(before, after) {
   const changes = {};
   for (const key of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
@@ -310,7 +318,7 @@ class OnlineWorldService {
     this.directSendTimes = [];
     this.directReceiveTimes = new Map();
     this.localEvents = [];
-    this.localPreferences = { orientation: "any" };
+    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "" };
     this.appliedMapDeltaIds = new Set();
     this.publicMapOrder = { timestamp: 0, commentId: "" };
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
@@ -350,7 +358,7 @@ class OnlineWorldService {
       directInboxCount: this.directInbox.length,
       localEventCount: this.localEvents.length,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
-      program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "艳猎征途", apiVersion: this.program.manifest?.apiVersion || 1 }
+      program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "猎艳疆土", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
   }
 
@@ -438,6 +446,9 @@ class OnlineWorldService {
     if (accountId && this.world.players[accountId]) {
       this.world.privatePlayers[accountId] ||= {};
       this.world.privatePlayers[accountId].orientation = this.localPreferences.orientation;
+      this.world.privatePlayers[accountId].characterProfileId = this.localPreferences.characterProfileId;
+      this.world.privatePlayers[accountId].characterTags = [...this.localPreferences.characterTags];
+      this.world.privatePlayers[accountId].initialGeneralWish = this.localPreferences.initialGeneralWish;
     }
     this.pruneForeignPrivateState();
   }
@@ -458,7 +469,8 @@ class OnlineWorldService {
     } catch {}
     root.worlds[this.work.id] = {
       control: this.control,
-      world: this.world,
+      world: cacheWorldWithoutDeployedArchives(this.world),
+      publicArchivesRequireRefresh: true,
       localEvents: this.localEvents.slice(-2000),
       localPreferences: { ...this.localPreferences },
       appliedMapDeltaIds: [...this.appliedMapDeltaIds].slice(-4000),
@@ -468,6 +480,7 @@ class OnlineWorldService {
       publicGeneralOrders: this.publicGeneralOrders,
       publicParticipantOrders: this.publicParticipantOrders,
       directInbox: this.directInbox.slice(-100),
+      localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
       updatedAt: this.now()
     };
@@ -538,8 +551,19 @@ class OnlineWorldService {
     this.localPreferences = {
       orientation: ["men", "women", "any"].includes(cached?.localPreferences?.orientation)
         ? cached.localPreferences.orientation
-        : (["men", "women", "any"].includes(orientation) ? orientation : "any")
+        : (["men", "women", "any"].includes(orientation) ? orientation : "any"),
+      characterProfileId: String(cached?.localPreferences?.characterProfileId || ""),
+      characterTags: Array.isArray(cached?.localPreferences?.characterTags) ? cached.localPreferences.characterTags.map(String).slice(0, 80) : [],
+      initialGeneralWish: String(cached?.localPreferences?.initialGeneralWish || "").slice(0, 500)
     };
+    if (cached?.publicArchivesRequireRefresh) {
+      this.appliedMapDeltaIds.clear();
+      this.publicMapOrder = { timestamp: 0, commentId: "" };
+      this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+      this.publicCellOrders = {};
+      this.publicGeneralOrders = {};
+      this.publicParticipantOrders = {};
+    }
     if (cached?.world?.gameId === GRID_GAME_ID) {
       this.control = cached.control || null;
       this.world = normalizeWorldState(cached.world);
@@ -719,7 +743,10 @@ class OnlineWorldService {
     for (const general of Object.values(generals)) {
       if (general == null) continue;
       if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
-      if (Object.hasOwn(general, "memoryText") || Object.hasOwn(general, "memory") || Object.hasOwn(general, "intimacy")) return false;
+      if (JSON.stringify(general).length > 30000 || String(general.setting || "").length > 1000 || String(general.memoryText || "").length > 1000) return false;
+      if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 40) return false;
+      if (Array.isArray(general.masterHistory) && general.masterHistory.length > 20) return false;
+      if (Array.isArray(general.captivityHistory) && general.captivityHistory.length > 20) return false;
       const x = Number(general.location.x);
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
@@ -730,6 +757,7 @@ class OnlineWorldService {
   applyMapDelta(item) {
     if (!this.validMapDelta(item)) return false;
     const record = item.record;
+    const actorAccountId = String(record.actorAccountId);
     const order = recordPlatformOrder(item);
     if (this.appliedMapDeltaIds.has(String(record.mapDeltaId)) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     for (const [key, cell] of Object.entries(record.changes.cells)) {
@@ -744,13 +772,15 @@ class OnlineWorldService {
     for (const [id, general] of Object.entries(record.changes.generals)) {
       if (compareOrderValue(order, this.publicGeneralOrders[id] || this.publicMapBaselineOrder) <= 0) continue;
       if (general == null) {
-        if (this.world.generals[id]?.holderAccountId !== actorAccountId) continue;
+        const existing = this.world.generals[id];
+        const locationKey = existing?.location ? `${existing.location.x},${existing.location.y}` : "";
+        const conqueredLocation = locationKey && String(record.changes.cells?.[locationKey]?.ownerAccountId || "") === actorAccountId;
+        if (existing?.holderAccountId !== actorAccountId && !conqueredLocation) continue;
         delete this.world.generals[id];
       }
-      else this.world.generals[id] = cloneJson(general);
+      else this.world.generals[id] = publicGeneralState(general);
       this.publicGeneralOrders[id] = order;
     }
-    const actorAccountId = String(record.actorAccountId);
     if (compareOrderValue(order, this.publicParticipantOrders[actorAccountId] || this.publicMapBaselineOrder) > 0) {
       const existing = this.world.players[actorAccountId] || { accountId: actorAccountId };
       this.world.players[actorAccountId] = {
@@ -848,6 +878,9 @@ class OnlineWorldService {
     if (normalized.type === "join") {
       const orientation = ["men", "women", "any"].includes(normalized.orientation) ? normalized.orientation : this.pendingJoin?.orientation;
       this.localPreferences.orientation = orientation;
+      this.localPreferences.characterProfileId = String(normalized.characterProfileId || "").slice(0, 100);
+      this.localPreferences.characterTags = Array.isArray(normalized.characterTags) ? [...new Set(normalized.characterTags.map(String).filter(Boolean))].slice(0, 80) : [];
+      this.localPreferences.initialGeneralWish = String(normalized.initialGeneralWish || "").slice(0, 500);
       normalized.orientation = orientation;
     }
     return this.applyLocalIntent(normalized, account.accountId);
@@ -964,9 +997,16 @@ class OnlineWorldService {
     for (const effect of effects || []) {
       if (effect.type !== "general-generation-request") continue;
       const request = buildGeneralGenerationRequest(this.world, effect, crypto.randomUUID());
-      const answer = await this.requestModel(request);
-      const parsed = parseJsonAnswer(answer?.answer ?? answer);
-      const setting = String(parsed.setting || "").trim().slice(0, 1000);
+      let parsed;
+      try {
+        const answer = await this.requestModel(request);
+        parsed = parseJsonAnswer(answer?.answer ?? answer);
+      } catch (error) {
+        if (!effect.initial) throw error;
+        parsed = { name: effect.gender === "female" ? "初识女将" : "初识良将", power: 300, setting: String(effect.initialWish || "乱世之中与玩家相遇的可靠良将。") };
+      }
+      let setting = String(parsed.setting || "").trim().slice(0, 1000);
+      if (!setting && effect.initial) setting = String(effect.initialWish || "乱世之中与玩家相遇的可靠良将。").slice(0, 1000);
       if (!setting) throw new Error("将领生成结果缺少设定");
       await this.applyLocalIntent({
         type: "grant-general",
@@ -977,6 +1017,7 @@ class OnlineWorldService {
         location: { x: effect.x, y: effect.y },
         setting,
         power: Math.max(100, Math.min(5000, Number(parsed.power) || 300)),
+        initial: Boolean(effect.initial),
         idempotencyKey: `general:${request.idempotencyKey}`
       }, effect.accountId);
     }
@@ -987,8 +1028,15 @@ class OnlineWorldService {
     const answer = await this.requestModelWithGeneralWorldBook(request, general);
     const parsed = parseJsonAnswer(answer?.answer ?? answer);
     const reply = String(parsed.reply || "").trim().slice(0, 2000);
-    await this.applyLocalIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId);
-    return { reply, intimacyDelta: Number(parsed.intimacyDelta || 1) };
+    await this.applyLocalIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, userText: intent.topic, reply, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId);
+    const command = parsed.command && typeof parsed.command === "object" ? parsed.command : null;
+    let commandResult = null;
+    if (command?.type === "surrender" && general?.status === "captured") {
+      commandResult = await this.applyLocalIntent({ type: "surrender-general", generalId: general.id, idempotencyKey: `surrender:${intent.idempotencyKey}` }, actorAccountId);
+    } else if (command?.type === "send-letter") {
+      commandResult = await this.sendDirect(String(command.toAccountId || ""), "general-letter", { generalId: general?.id, text: String(command.text || "") }, { fromGeneralDialogue: true });
+    }
+    return { reply, intimacyDelta: Number(parsed.intimacyDelta || 1), command: command || null, commandResult };
   }
 
   async requestModelWithGeneralWorldBook(request, general) {
@@ -1089,23 +1137,25 @@ class OnlineWorldService {
     return true;
   }
 
-  async sendDirect(toAccountId, type, payload) {
+  async sendDirect(toAccountId, type, payload, options = {}) {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
     const sender = this.account();
     const recipient = String(toAccountId || "");
     if (!recipient || recipient === sender.accountId) throw new Error("请选择另一名在线世界玩家");
     const messageType = String(type || "");
-    if (!["diplomacy", "captured-general-letter"].includes(messageType)) throw new Error("不支持的一对一消息类型");
+    if (!options.fromGeneralDialogue) throw new Error("将领书信必须由互动结果触发");
+    if (messageType !== "general-letter") throw new Error("书信只能由将领互动触发");
     const text = String(payload?.text || "").trim().slice(0, 500);
     if (!text) throw new Error("消息正文不能为空");
-    let normalizedPayload = { text };
-    if (messageType === "captured-general-letter") {
-      const general = this.world.generals?.[String(payload?.generalId || "")];
-      const player = this.world.players?.[sender.accountId];
-      if (!general || general.holderAccountId !== sender.accountId || !player?.carriedGeneralIds?.includes(general.id)) throw new Error("只有当前带在身边的被俘将领可以写信");
-      if (general.capturedFromAccountId !== recipient && general.loyalToAccountId !== recipient) throw new Error("这封将领书信只能发给其原效忠玩家");
-      normalizedPayload = { generalId: general.id, generalName: general.name, text };
-    }
+    const general = this.world.generals?.[String(payload?.generalId || "")];
+    if (!general || general.holderAccountId !== sender.accountId) throw new Error("将领当前不归本机玩家保管");
+    const player = this.world.players?.[sender.accountId];
+    const interactable = general.status === "captured" || player?.carriedGeneralIds?.includes(general.id)
+      || (general.status === "deployed" && general.location?.x === player?.position?.x && general.location?.y === player?.position?.y);
+    if (!interactable) throw new Error("将领当前不在可交互位置");
+    const formerLords = new Set((general.masterHistory || []).map(item => String(item.accountId || "")).filter(id => id && id !== sender.accountId));
+    if (!formerLords.has(recipient)) throw new Error("将领只能写信给记录中存在过的主公");
+    const normalizedPayload = { generalId: general.id, generalName: general.name, text };
     const target = this.world.players[String(toAccountId)];
     if (!target?.deviceEncryptionPublicKey || !target?.commentRootId) throw new Error("接收方尚未登记通讯密钥或评论入口");
     this.consumeDirectSendBudget();

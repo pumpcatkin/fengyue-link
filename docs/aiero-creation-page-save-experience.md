@@ -1,12 +1,12 @@
 # Aiero 创作页面填写与保存经验
 
-本文记录 2026-09-13（Asia/Shanghai）在 staging 环境对《艳猎征途》固定伴生作品完成的一次真实保存。目标页为：
+本文记录在 staging 环境对《猎艳疆土》固定伴生作品进行真实保存与回读的方法。目标页为：
 
 ```text
 https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configuration
 ```
 
-结果：保存接口与导出回读接口均返回 HTTP 200；作品名称、简介、详细介绍、前置词、提示词、后置词、两个世界书条目全部比对一致。该作品是一张游戏卡服务全体玩家的唯一伴生作品，玩家侧不填写或替换作品 ID。
+结果：保存接口与导出回读接口均返回 HTTP 200；作品名称、简介、详细介绍、前置词、提示词、后置词和三个世界书条目逐项比对。该作品是一张游戏卡服务全体玩家的唯一伴生作品，玩家侧不填写或替换作品 ID。
 
 ## 1. 页面结构
 
@@ -21,7 +21,7 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 5. 后置词。
 6. 提示词：保存共同世界观。
 
-《艳猎征途》的准确文本保存在 `docs/grid-conquest-companion-work.md`，程序信封由 `npm run game:bundle` 生成。不要把 `<script>`、`<iframe>` 或其他可执行标签直接放入详细介绍；页面会拦截。程序信封只是惰性文本，实际代码由工具下载、验摘要后放进隔离运行时。
+《猎艳疆土》的准确文本保存在 `docs/grid-conquest-companion-work.md`，程序信封由 `npm run game:bundle` 生成。不要把 `<script>`、`<iframe>` 或其他可执行标签直接放入详细介绍；页面会拦截。程序信封只是惰性文本，实际代码由工具下载、验摘要后放进隔离运行时。
 
 ## 2. 新增世界书
 
@@ -82,10 +82,10 @@ GET /console/api/apps/{workId}/model-config/export
 本次结果：
 
 ```text
-作品名：艳猎征途[b27218e680f94c0d]
-世界书：2 条
-详细介绍：14,656 字符
-程序 SHA-256：c41ad57299e4bea9dd58688a712ded4102cec21e5dc3836a30c9d43f26f1d009
+作品名：猎艳疆土[b27218e680f94c0d]
+世界书：3 条
+详细介绍：23,775 字符
+程序 SHA-256：5b4392a015fa5c71b49bf87a08daae8dfdb656b519ab5d914371c6102c67f1fe
 ```
 
 ## 5. 导出接口的动态别名

@@ -10,9 +10,13 @@ const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard } = require("../electron/online-world-card.cjs");
 
 function service(options: Record<string, unknown>) {
+  let worldBook: any[] = [];
   return new OnlineWorldService({
-    requestGo: async () => ({ data: { world_book: [] } }),
-    requestModel: async () => ({ answer: "{}" }),
+    requestGo: async (_endpoint: string, request: any = {}) => {
+      if (request.method === "POST" && Array.isArray(request.body?.world_book)) worldBook = request.body.world_book;
+      return { data: { world_book: worldBook } };
+    },
+    requestModel: async () => ({ answer: "{\"name\":\"初将\",\"gender\":\"female\",\"power\":320,\"setting\":\"善守城，重信义。\"}" }),
     getOrigin: () => "https://aigirlfriend.baby",
     onChange: () => {},
     ...options
@@ -77,7 +81,7 @@ describe("online world platform service", () => {
     const state = await instance.open({ card, displayName: "玩家", orientation: "any" });
     instance.close();
     expect(state.program.source).toBe("card-package");
-    expect(state.program.title).toBe("艳猎征途");
+    expect(state.program.title).toBe("猎艳疆土");
     expect(state.work.name).toBe(card.companion.name);
   });
 
@@ -134,7 +138,11 @@ describe("online world platform service", () => {
     instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
 
-    const result = await instance.submitIntent({ type: "join", displayName: "服主", orientation: "women", idempotencyKey: "join-author" });
+    const result = await instance.submitIntent({
+      type: "join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
+      characterTags: ["傲娇", "勇敢", "冷静", "长发", "黑发", "红瞳", "高挑", "军装"],
+      initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "join-author"
+    });
     const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
     const mapDelta = records.find((record: any) => record.schema === "fyow.map-delta/1");
     expect(result.mapDelta.schema).toBe("fyow.map-delta/1");
@@ -145,8 +153,9 @@ describe("online world platform service", () => {
     expect(Object.values(mapDelta.changes.cells)).toHaveLength(1);
     expect(records.some((record: any) => ["fyow.intent/3", "fyow.event/3", "fyow.private-vault/3"].includes(record.schema))).toBe(false);
     expect(instance.world.privatePlayers.author.orientation).toBe("women");
-    expect(instance.localEvents).toHaveLength(1);
+    expect(instance.localEvents).toHaveLength(2);
     expect(instance.localEvents[0].type).toBe("join");
+    expect(instance.localEvents[1].type).toBe("grant-general");
   });
 
   it("merges territory changes by platform comment timestamp and never publishes other players positions", () => {
@@ -186,7 +195,7 @@ describe("online world platform service", () => {
     world.players.sender = { accountId: "sender", displayName: "甲", position: { x: 1, y: 1 }, deviceSigningPublicKey: senderIdentity.signingPublicKey, deviceEncryptionPublicKey: senderIdentity.encryptionPublicKey, commentRootId: "sender-root" };
     world.players.receiver = { accountId: "receiver", displayName: "乙", position: { x: 2, y: 2 }, deviceSigningPublicKey: receiverIdentity.signingPublicKey, deviceEncryptionPublicKey: receiverIdentity.encryptionPublicKey, commentRootId: "receiver-root" };
     world.players.sender.carriedGeneralIds = ["g1"];
-    world.generals.g1 = { id: "g1", name: "青禾", holderAccountId: "sender", loyalToAccountId: "receiver", capturedFromAccountId: "receiver", status: "carried" };
+    world.generals.g1 = { id: "g1", name: "青禾", holderAccountId: "sender", loyalToAccountId: "receiver", capturedFromAccountId: "receiver", status: "carried", masterHistory: [{ accountId: "receiver", fromYear: 1, toYear: 2 }] };
     const control = { seasonId: world.seasonId, authorityAccountId: "authority" };
     const sender = service({
       getAccount: () => ({ accountId: "sender", username: "甲" }),
@@ -208,7 +217,7 @@ describe("online world platform service", () => {
     sender.work = { id: "work", authorAccountId: "authority" };
     sender.control = control;
     sender.world = world;
-    const sent = await sender.sendDirect("receiver", "captured-general-letter", { generalId: "g1", text: "请转告旧主，我仍记得故国。" });
+    const sent = await sender.sendDirect("receiver", "general-letter", { generalId: "g1", text: "请转告旧主，我仍记得故国。" }, { fromGeneralDialogue: true });
     expect(sent.chunks).toBeGreaterThan(0);
     expect(directMessages.every(item => item.content.length <= 1000)).toBe(true);
 
@@ -227,7 +236,7 @@ describe("online world platform service", () => {
     receiver.world = world;
     const received = await receiver.receiveDirectWakes();
     expect(received).toHaveLength(1);
-    expect(received[0].type).toBe("captured-general-letter");
+    expect(received[0].type).toBe("general-letter");
     expect(received[0].payload.generalId).toBe("g1");
     expect(await receiver.receiveDirectWakes()).toHaveLength(0);
   });
@@ -238,16 +247,18 @@ describe("online world platform service", () => {
     const world = createWorld({ authorityAccountId: "authority" });
     world.players.sender = { accountId: "sender", displayName: "甲", position: { x: 1, y: 1 }, carriedGeneralIds: [], deviceSigningPublicKey: identity.signingPublicKey, deviceEncryptionPublicKey: identity.encryptionPublicKey, commentRootId: "sender-root" };
     world.players.receiver = { accountId: "receiver", displayName: "乙", position: { x: 2, y: 2 }, deviceSigningPublicKey: receiverIdentity.signingPublicKey, deviceEncryptionPublicKey: receiverIdentity.encryptionPublicKey, commentRootId: "receiver-root" };
-    world.generals.g1 = { id: "g1", name: "青禾", holderAccountId: "sender", loyalToAccountId: "receiver", capturedFromAccountId: "receiver", status: "deployed" };
+    world.generals.g1 = { id: "g1", name: "青禾", holderAccountId: "sender", loyalToAccountId: "receiver", capturedFromAccountId: "receiver", status: "deployed", location: { x: 4, y: 4 }, masterHistory: [{ accountId: "receiver", fromYear: 1, toYear: 2 }] };
     const instance = service({ getAccount: () => ({ accountId: "sender", username: "甲" }), getIdentity: async () => identity, requestConsole: async () => { throw new Error("validation should stop before network"); } });
     instance.work = { id: "work", authorAccountId: "authority" };
     instance.control = { seasonId: world.seasonId, authorityAccountId: "authority" };
     instance.world = world;
     await expect(instance.sendDirect("sender", "diplomacy", { text: "test" })).rejects.toThrow(/另一名/);
-    await expect(instance.sendDirect("receiver", "arbitrary-command", { text: "test" })).rejects.toThrow(/不支持/);
-    await expect(instance.sendDirect("receiver", "captured-general-letter", { generalId: "g1", text: "伪造书信" })).rejects.toThrow(/带在身边/);
+    await expect(instance.sendDirect("receiver", "arbitrary-command", { text: "test" }, { fromGeneralDialogue: true })).rejects.toThrow(/书信/);
+    await expect(instance.sendDirect("receiver", "general-letter", { generalId: "g1", text: "伪造书信" }, { fromGeneralDialogue: true })).rejects.toThrow(/可交互位置/);
+    world.generals.g1.status = "carried";
+    world.players.sender.carriedGeneralIds = ["g1"];
     instance.directSendTimes = Array(12).fill(instance.now());
-    await expect(instance.sendDirect("receiver", "diplomacy", { text: "频率测试" })).rejects.toThrow(/过于频繁/);
+    await expect(instance.sendDirect("receiver", "general-letter", { generalId: "g1", text: "频率测试" }, { fromGeneralDialogue: true })).rejects.toThrow(/过于频繁/);
   });
 
   it("ignores territory changes bound to another work or game", () => {

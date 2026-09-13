@@ -1,4 +1,5 @@
 .online-world-page{position:fixed;inset:0;z-index:45;display:grid;grid-template-rows:62px minmax(0,1fr);background:#101820;color:var(--text-flat,#eef2f4)}
+.online-world-page.game-active{grid-template-rows:minmax(0,1fr)}
 .online-world-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;border-bottom:1px solid var(--line-flat,#34404c);background:var(--panel-flat,#18212b);padding:8px 15px}
 .online-world-toolbar span{display:flex;align-items:baseline;gap:9px}.online-world-toolbar small{color:var(--text-muted,#98a7b5);font-size:9px}.online-world-toolbar b{font-family:Georgia,"Noto Serif SC",serif;font-size:19px;font-style:italic}.online-world-toolbar em{color:var(--text-muted,#98a7b5);font-size:10px;font-style:normal}.online-world-toolbar>div{display:flex;gap:7px}
 .online-world-library{position:relative;min-width:760px;overflow:auto;padding:24px 28px 34px;background:radial-gradient(circle at 14% -10%,rgba(76,119,157,.28),transparent 38%),linear-gradient(150deg,#121c27 0%,#0b1118 100%)}

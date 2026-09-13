@@ -31,19 +31,19 @@ describe("online world game cards", () => {
     expect(card.cardId).toBe(GRID_CARD_ID);
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
-    expect(card.title).toBe("艳猎征途");
-    expect(card.version).toBe(4);
-    expect(card.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
+    expect(card.title).toBe("猎艳疆土");
+    expect(card.version).toBe(5);
+    expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
     expect(card.companion.configuration.app.summary).toContain("64×64");
     expect(card.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
     const embeddedProgram = parseProgram(card.companion.configuration.app.description, card.gameId);
     expect(embeddedProgram.html).not.toMatch(/<(?:script|link)\b[^>]+(?:src|href)=/i);
-    expect(embeddedProgram.html).toContain("#f7e6bd");
+    expect(embeddedProgram.html).toContain("#f4dfad");
     expect(card.companion.configuration.pre_text).toContain("结构化任务引擎");
     expect(card.companion.configuration.pre_prompt).toContain("只有天生拥有“慧眼”");
     expect(card.companion.configuration.post_text).toContain("单个 JSON 对象");
-    expect(card.companion.configuration.world_book).toHaveLength(2);
+    expect(card.companion.configuration.world_book).toHaveLength(3);
     expect(card.companion.configuration.world_book.every((entry: any) => entry.key_region === 2 && entry.enable === true && entry.probability === 100)).toBe(true);
   });
 
@@ -101,7 +101,7 @@ describe("online world game cards", () => {
     expect(exported.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(exported.companion.configuration.app.summary).toContain("64×64");
     expect(exported.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
-    expect(exported.companion.configuration.world_book).toHaveLength(2);
+    expect(exported.companion.configuration.world_book).toHaveLength(3);
   });
 
   it("updates the card-level binding after an author-signed migration", () => {

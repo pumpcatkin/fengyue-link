@@ -4,33 +4,41 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'">
-    <title>艳猎征途 · 在线游戏世界</title>
+    <title>猎艳疆土 · 在线游戏世界</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <main>
-      <header class="game-header">
-        <div><small>在线游戏世界 · 首款游戏</small><h1>艳猎征途</h1><p>64 × 64 大陆争夺</p></div>
-        <div class="clock"><small>宿主校准时间</small><b id="clock">--:--:--</b><span id="year">第 1 年</span></div>
+      <header class="time-strip" aria-label="游戏时间">
+        <span id="clock">--:--:--</span><i></i><b id="year">第 1 年</b>
       </header>
       <section class="layout">
         <div class="map-card">
-          <div class="map-toolbar">
-            <span id="world-status">等待工具宿主…</span>
-            <div><button id="zoom-out" type="button">−</button><b id="zoom-label">1×</b><button id="zoom-in" type="button">＋</button><button id="center-map" type="button">定位</button></div>
+          <div id="map-viewport" class="map-viewport">
+            <canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas>
+            <span id="zoom-label" class="zoom-label">1×</span>
           </div>
-          <div id="map-viewport" class="map-viewport"><canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas></div>
-          <div class="legend"><span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span><span>颜色深浅代表资源等级</span><span>鼠标右键拖动地图</span></div>
+          <div class="legend">
+            <span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span>
+            <span class="legend-tip">滚轮缩放 · 右键拖动</span>
+            <button id="return-library" type="button">返回游戏库</button>
+          </div>
         </div>
         <aside>
           <section class="panel player-panel">
             <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
             <div class="metrics"><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
-            <button id="join-world" class="primary hidden" type="button">加入本赛季</button>
           </section>
+
+          <section class="panel march-panel">
+            <header><span><small>可调动兵力</small><b>行军队伍</b></span><strong id="march-available">0 人</strong></header>
+            <div class="march-cost"><span>每移动 1 格</span><b id="march-cost-per-cell">10 金币</b></div>
+          </section>
+
           <section class="panel cell-panel">
             <header><span><small>当前格子</small><b id="cell-coordinate">请选择地图格子</b></span><em id="cell-owner">—</em></header>
-            <div class="cell-facts"><span>人口 <b id="cell-population">—</b></span><span>资源 <b id="cell-resource">—</b></span><span>驻军 <b id="cell-garrison">—</b></span><span>守备战力 <b id="cell-power">—</b></span></div>
+            <div class="cell-facts"><span><small>人口上限</small><b id="cell-population">—</b></span><span><small>资源等级</small><b id="cell-resource">—</b></span><span><small>驻军</small><b id="cell-garrison">—</b></span><span><small>守备战力</small><b id="cell-power">—</b></span></div>
+            <div id="deployed-generals" class="deployed-generals empty">此地没有部署将领</div>
             <div class="action-grid">
               <button id="start-mining" type="button">挂机开采</button>
               <label>练兵数量<input id="train-amount" type="number" min="1" max="10000" value="10"></label>
@@ -41,34 +49,75 @@
               <button id="march" class="primary" type="button">向这里行军</button>
             </div>
           </section>
+
           <section class="panel">
             <header><span><small>现实时间队列</small><b>进行中的行动</b></span></header>
             <div id="jobs" class="stack empty">暂无任务</div>
           </section>
+
           <section class="panel">
-            <header><span><small>身边与部署</small><b>将领</b></span></header>
-            <div id="generals" class="stack empty">尚无将领</div>
+            <header><span><small>已收服 · 随行</small><b>身边的将领</b></span></header>
+            <div id="carried-generals" class="stack empty">尚无随行将领</div>
           </section>
-          <section id="direct-panel" class="panel direct-panel">
-            <header><span><small>评论唤醒 · 定向私信</small><b>密谈与将领书信</b></span><em id="direct-count">0 封来信</em></header>
+
+          <section class="panel captive-panel">
+            <header><span><small>等待处置</small><b>俘虏区</b></span><strong id="captive-count">0</strong></header>
+            <div id="captives" class="stack empty">暂无俘虏</div>
+          </section>
+
+          <section class="panel letter-panel">
+            <header><span><small>将领书信</small><b>收到的信件</b></span><strong id="direct-count">0</strong></header>
             <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
-            <form id="direct-form">
-              <label>收信玩家<select id="direct-recipient"></select></label>
-              <label>消息类型<select id="direct-type"><option value="diplomacy">私人密谈</option><option value="captured-general-letter">被俘将领书信</option></select></label>
-              <label id="direct-general-row" class="hidden">写信将领<select id="direct-general"></select></label>
-              <textarea id="direct-text" maxlength="500" placeholder="输入只发送给指定玩家的内容"></textarea>
-              <button type="submit">发送定向消息</button>
-            </form>
           </section>
-          <section class="panel dialogue hidden" id="dialogue-panel">
-            <header><span><small id="dialogue-general">将领对话</small><b>交谈</b></span><button id="close-dialogue" type="button">关闭</button></header>
-            <div id="dialogue-history" class="dialogue-history"></div>
-            <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button class="primary" type="submit">发送</button></form>
-          </section>
-          <div id="message" class="message">私人进度与行动记录保存在本地，只有领地变化会同步到公共地图。</div>
         </aside>
       </section>
     </main>
+
+    <section id="join-wizard" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="join-title">
+      <form id="join-form" class="paper-modal join-modal">
+        <header><span><small id="join-progress">第一问 · 1 / 4</small><h1 id="join-title">选择角色设定作为游戏角色？</h1><p id="join-hint">绑定后无法修改。</p></span></header>
+        <div class="join-step" data-step="0"><div id="profile-options" class="choice-grid"></div></div>
+        <div class="join-step hidden" data-step="1">
+          <div class="choice-grid orientation-grid">
+            <label><input type="radio" name="orientation" value="women"><span><b>只会遇到女性将领</b><small>影响初始与后续发掘</small></span></label>
+            <label><input type="radio" name="orientation" value="men"><span><b>只会遇到男性将领</b><small>影响初始与后续发掘</small></span></label>
+            <label><input type="radio" name="orientation" value="any" checked><span><b>不限性别</b><small>男女将领均可能出现</small></span></label>
+          </div>
+        </div>
+        <div class="join-step hidden" data-step="2">
+          <div class="tag-tools"><input id="tag-search" type="search" placeholder="搜索 ACG 词条"><select id="tag-category"><option value="">全部分类</option></select><b id="tag-count">已选 0 / 至少 8</b></div>
+          <div id="selected-tags" class="selected-tags"></div>
+          <div id="tag-options" class="tag-options"></div>
+        </div>
+        <div class="join-step hidden" data-step="3">
+          <label class="wish-field">在开疆扩土前，你会想要遇到一名怎样的良将？
+            <textarea id="initial-general-wish" maxlength="500" placeholder="自由描述性格、经历、能力、与你相遇的方式……此题不受词条影响。"></textarea>
+          </label>
+        </div>
+        <footer><button id="join-prev" class="hidden" type="button">上一问</button><span></span><button id="join-next" class="primary" type="button">下一问</button></footer>
+      </form>
+    </section>
+
+    <section id="general-modal" class="overlay hidden" role="dialog" aria-modal="true">
+      <article class="paper-modal general-modal">
+        <header><span><small id="general-status">将领档案</small><h1 id="general-name">—</h1></span><button id="close-general" type="button">关闭</button></header>
+        <div class="general-stats"><span><small>战力</small><b id="general-power">0</b></span><span><small>归属账号</small><b id="general-holder">—</b></span></div>
+        <section><h2>人物设定</h2><p id="general-setting">—</p></section>
+        <section><h2>历任主公与被俘记录</h2><div id="general-service-history" class="archive-list"></div></section>
+        <section><h2>互动历史</h2><div id="general-history" class="archive-list"></div></section>
+        <footer><button id="general-interact" class="primary hidden" type="button">交互</button></footer>
+      </article>
+    </section>
+
+    <section id="dialogue-modal" class="overlay hidden" role="dialog" aria-modal="true">
+      <article class="paper-modal dialogue-modal">
+        <header><span><small id="dialogue-mode">将领互动</small><h1 id="dialogue-general">—</h1></span><button id="close-dialogue" type="button">关闭</button></header>
+        <div id="dialogue-history" class="dialogue-history"></div>
+        <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button class="primary" type="submit">发送</button></form>
+      </article>
+    </section>
+
+    <div id="toast" class="toast hidden" role="status"></div>
     <script src="game.js"></script>
   </body>
 </html>

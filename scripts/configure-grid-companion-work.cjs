@@ -438,7 +438,7 @@ async function main() {
     }
     if (process.env.FYOW_VERIFY_ONLY === "1") {
       const checks = readbackChecks(before, desired);
-      if (!Object.values(checks).every(value => value === true || value === 2)) throw new Error(`创作配置回读不一致：${JSON.stringify(checks)}`);
+      if (!Object.values(checks).every(value => value === true || value === desired.world_book.length)) throw new Error(`创作配置回读不一致：${JSON.stringify(checks)}`);
       process.stdout.write(`${JSON.stringify({ ok:true, workId, page:`${ORIGIN}/zh/app/${workId}/configuration`, verifiedStatus:beforeResponse.status, checks, descriptionCharacters:desired.app.description.length, programDigest:card.program.digest, configurationSha256:configurationDigest(before) }, null, 2)}\n`);
       return;
     }
@@ -463,7 +463,7 @@ async function main() {
     if (!verifyResponse.ok) throw new Error(`回读创作配置失败：HTTP ${verifyResponse.status}`);
     const verified = findConfig(unwrap(verifyResponse));
     const checks = readbackChecks(verified, desired);
-    if (!Object.values(checks).every(value => value === true || value === 2)) {
+    if (!Object.values(checks).every(value => value === true || value === desired.world_book.length)) {
       throw new Error(`保存后回读不一致：${JSON.stringify({ checks, exported: shapeOf(verified), app: shapeOf(verified?.app) })}`);
     }
     const activation = process.env.FYOW_ACTIVATE_PROGRAM === "1" ? await activateSavedProgram(window, card, workId) : null;

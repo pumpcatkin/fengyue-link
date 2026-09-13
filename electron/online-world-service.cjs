@@ -42,6 +42,9 @@ const DIRECT_RATE_WINDOW_MS = 60 * 1000;
 const DIRECT_SEND_LIMIT = 12;
 const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
 const PUBLIC_LEDGER_COMPACTION_DELTAS = 32;
+const COMMENT_POST_ATTEMPTS = 3;
+const PENDING_EFFECT_RETRY_BASE_MS = 30 * 1000;
+const PENDING_EFFECT_RETRY_MAX_MS = 15 * 60 * 1000;
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -401,6 +404,9 @@ class OnlineWorldService {
     this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
     this.joinInFlight = null;
+    this.intentInFlight = null;
+    this.intentInFlightKey = "";
+    this.pendingModelEffects = [];
     this.pollTimer = null;
     this.mapFactsCache = null;
   }
@@ -432,6 +438,7 @@ class OnlineWorldService {
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
       localEventCount: this.localEvents.length,
+      pendingModelEffectCount: this.pendingModelEffects.length,
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
       program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "猎艳疆土", apiVersion: this.program.manifest?.apiVersion || 1 }
@@ -633,6 +640,7 @@ class OnlineWorldService {
       directInbox: this.directInbox.slice(-100),
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
+      pendingModelEffects: cloneJson(this.pendingModelEffects.slice(-50)),
       updatedAt: this.now()
     };
     atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
@@ -688,6 +696,7 @@ class OnlineWorldService {
     this.mapFactsCache = null;
     const cached = this.loadCache(this.work.id);
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
+    this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
     this.appliedAuthorityIds = new Set(Array.isArray(cached?.appliedAuthorityIds) ? cached.appliedAuthorityIds.slice(-1000) : []);
     this.publicDeltaCountSinceSnapshot = Math.max(0, Number(cached?.publicDeltaCountSinceSnapshot || 0));
@@ -834,7 +843,7 @@ class OnlineWorldService {
   async postRecord(record, options = {}) {
     const responses = [];
     for (const content of encodeCommentRecord(record)) {
-      const response = await this.postComment(content, options);
+      const response = await this.retryPlatformWrite(() => this.postComment(content, options));
       const source = firstObject(response, item => Boolean(commentId(item))) || response || {};
       responses.push({
         ...(source && typeof source === "object" ? source : {}),
@@ -844,6 +853,19 @@ class OnlineWorldService {
       });
     }
     return responses;
+  }
+
+  async retryPlatformWrite(write, attempts = COMMENT_POST_ATTEMPTS) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+      try {
+        return await write();
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+      }
+    }
+    throw lastError;
   }
 
   async readHistory(fullScan) {
@@ -1036,7 +1058,7 @@ class OnlineWorldService {
   }
 
   async sync(fullScan = false) {
-    if (!this.work || this.syncing) return this.state();
+    if (!this.work || this.syncing || this.intentInFlight) return this.state();
     this.syncing = true;
     this.error = null;
     this.notify();
@@ -1078,6 +1100,7 @@ class OnlineWorldService {
         if (this.world) this.applyPublicLedger(history.assembled.records);
         if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
+        if (this.world) await this.retryPendingModelEffects(1);
         if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
         await this.receiveDirectWakes().catch(() => []);
         const resets = history.assembled.records
@@ -1103,14 +1126,24 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
-    if (String(intent?.type || "") !== "join") return this.submitIntentNow(intent);
-    if (this.joinInFlight) return this.joinInFlight;
-    const joining = this.submitIntentNow(intent);
-    this.joinInFlight = joining;
+    const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
+    const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
+    if (this.intentInFlight) {
+      if (String(normalized.type || "") === "join" || key === this.intentInFlightKey) return this.intentInFlight;
+      throw new Error("上一项行动仍在处理中，请等待完成");
+    }
+    const running = this.submitIntentNow(normalized);
+    this.intentInFlight = running;
+    this.intentInFlightKey = key;
+    if (String(normalized.type || "") === "join") this.joinInFlight = running;
     try {
-      return await joining;
+      return await running;
     } finally {
-      if (this.joinInFlight === joining) this.joinInFlight = null;
+      if (this.joinInFlight === running) this.joinInFlight = null;
+      if (this.intentInFlight === running) {
+        this.intentInFlight = null;
+        this.intentInFlightKey = "";
+      }
     }
   }
 
@@ -1219,21 +1252,29 @@ class OnlineWorldService {
     const localEvent = this.sanitizedEvent(outcome.event);
     const localEventStart = this.localEvents.length;
     this.recordLocalEvent(localEvent);
+    let mapDelta = null;
     try {
       let dialogue = null;
+      let deferredEffects = [];
       if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
       // A join is committed only after its initial general has been returned
       // and validated by the companion model.
       if (intent.type === "join") await this.handleEffects(outcome.effects, identity);
       const changes = createPublicMapChanges(beforeWorld, this.world);
-      const mapDelta = await this.publishMapChanges(changes, identity);
-      if (intent.type !== "join") await this.handleEffects(outcome.effects, identity);
-      if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
+      mapDelta = await this.publishMapChanges(changes, identity);
+      if (intent.type !== "join") {
+        const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: Boolean(mapDelta) });
+        deferredEffects = handled.deferred;
+      }
+      let snapshotWarning = null;
+      if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) {
+        try { await this.publishSnapshot(); } catch (error) { snapshotWarning = String(error?.message || error || "公共地图快照整理失败"); }
+      }
       this.saveCache();
       this.notify();
-      return { event: localEvent, mapDelta, effects: outcome.effects, dialogue, state: this.state() };
+      return { event: localEvent, mapDelta, effects: outcome.effects, deferredEffects, snapshotWarning, dialogue, state: this.state() };
     } catch (error) {
-      if (intent.type === "join") {
+      if (!mapDelta) {
         this.world = beforeWorld;
         if (options.rollbackPreferences) this.localPreferences = cloneJson(options.rollbackPreferences);
         this.localEvents.splice(localEventStart);
@@ -1263,12 +1304,23 @@ class OnlineWorldService {
       result: { effects: settled.effects },
       createdAt: settled.now
     };
+    const localEventStart = this.localEvents.length;
     this.recordLocalEvent(event);
     const identity = await this.getIdentity();
-    await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world), identity);
-    await this.handleEffects(settled.effects, identity);
-    this.saveCache();
-    return settled.effects;
+    let mapDelta = null;
+    try {
+      mapDelta = await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world), identity);
+      await this.handleEffects(settled.effects, identity, { deferOnFailure: Boolean(mapDelta) });
+      this.saveCache();
+      return settled.effects;
+    } catch (error) {
+      if (!mapDelta) {
+        this.world = beforeWorld;
+        this.localEvents.splice(localEventStart);
+        this.saveCache();
+      }
+      throw error;
+    }
   }
 
   async updateLocalPreferences(value = {}) {
@@ -1414,35 +1466,96 @@ class OnlineWorldService {
     return snapshot;
   }
 
-  async handleEffects(effects, identity) {
+  effectKey(effect) {
+    const accountId = String(effect?.accountId || "");
+    const playerEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[accountId] || 0)));
+    return sha256(Buffer.from(canonicalJson({ seasonId: this.control?.seasonId || "", playerEpoch, effect })));
+  }
+
+  deferModelEffect(effect, error) {
+    const key = this.effectKey(effect);
+    const existing = this.pendingModelEffects.find(item => item.key === key);
+    const attempts = Math.max(1, Number(existing?.attempts || 0) + 1);
+    const delay = Math.min(PENDING_EFFECT_RETRY_MAX_MS, PENDING_EFFECT_RETRY_BASE_MS * (2 ** Math.min(5, attempts - 1)));
+    const next = {
+      key,
+      effect: cloneJson(effect),
+      playerEpoch: Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[String(effect?.accountId || "")] || 0))),
+      attempts,
+      lastError: String(error?.message || error || "模型任务失败").slice(0, 300),
+      nextAttemptAt: this.now() + delay
+    };
+    if (existing) Object.assign(existing, next);
+    else this.pendingModelEffects.push(next);
+    if (this.pendingModelEffects.length > 50) this.pendingModelEffects.splice(0, this.pendingModelEffects.length - 50);
+    return next;
+  }
+
+  async retryPendingModelEffects(limit = 1) {
+    if (!this.pendingModelEffects.length || !this.world || !this.control) return [];
+    const pendingBeforePrune = this.pendingModelEffects.length;
+    this.pendingModelEffects = this.pendingModelEffects.filter(item => {
+      const accountId = String(item?.effect?.accountId || "");
+      const playerEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[accountId] || 0)));
+      return Boolean(this.world.players?.[accountId]) && !this.world.bans?.[accountId]?.banned && playerEpoch === Math.max(0, Math.trunc(Number(item.playerEpoch || 0)));
+    });
+    if (this.pendingModelEffects.length !== pendingBeforePrune) this.saveCache();
+    const due = this.pendingModelEffects.filter(item => Number(item.nextAttemptAt || 0) <= this.now()).slice(0, Math.max(1, limit));
+    if (!due.length) return [];
+    const identity = await this.getIdentity();
+    const completed = [];
+    for (const item of due) {
+      try {
+        await this.handleEffects([item.effect], identity);
+        this.pendingModelEffects = this.pendingModelEffects.filter(candidate => candidate.key !== item.key);
+        completed.push(item.key);
+      } catch (error) {
+        this.deferModelEffect(item.effect, error);
+      }
+    }
+    this.saveCache();
+    return completed;
+  }
+
+  async handleEffects(effects, identity, options = {}) {
+    const completed = [];
+    const deferred = [];
     for (const effect of effects || []) {
       if (effect.type !== "general-generation-request") continue;
-      const request = buildGeneralGenerationRequest(this.world, effect, crypto.randomUUID());
-      const parsed = await this.requestStructuredModel(request, {
-        attempts: effect.initial ? 3 : 2,
-        label: effect.initial ? "初始将领生成" : "将领生成",
-        validate: value => generalGenerationQualityIssue(value, effect)
-      });
-      const name = String(parsed?.name || "").trim();
-      const gender = String(parsed?.gender || "").toLowerCase();
-      const power = Number(parsed?.power);
-      await this.applyLocalIntent({
-        type: "grant-general",
-        generalId: crypto.randomUUID(),
-        discoveryId: request.idempotencyKey,
-        name: name.slice(0, 24),
-        gender,
-        heightCm: Number(parsed.heightCm),
-        weightKg: Number(parsed.weightKg),
-        measurements: cloneJson(parsed.measurements),
-        appearanceSetting: String(parsed.appearanceSetting).trim(),
-        coreSetting: String(parsed.coreSetting).trim(),
-        location: { x: effect.x, y: effect.y },
-        power,
-        initial: Boolean(effect.initial),
-        idempotencyKey: `general:${request.idempotencyKey}`
-      }, effect.accountId);
+      try {
+        const effectKey = this.effectKey(effect);
+        const request = buildGeneralGenerationRequest(this.world, effect, effectKey);
+        const parsed = await this.requestStructuredModel(request, {
+          attempts: effect.initial ? 3 : 2,
+          label: effect.initial ? "初始将领生成" : "将领生成",
+          validate: value => generalGenerationQualityIssue(value, effect)
+        });
+        const name = String(parsed?.name || "").trim();
+        const gender = String(parsed?.gender || "").toLowerCase();
+        const power = Number(parsed?.power);
+        await this.applyLocalIntent({
+          type: "grant-general",
+          generalId: crypto.randomUUID(),
+          discoveryId: request.idempotencyKey,
+          name: name.slice(0, 24),
+          gender,
+          heightCm: Number(parsed.heightCm),
+          weightKg: Number(parsed.weightKg),
+          measurements: cloneJson(parsed.measurements),
+          appearanceSetting: String(parsed.appearanceSetting).trim(),
+          coreSetting: String(parsed.coreSetting).trim(),
+          location: { x: effect.x, y: effect.y },
+          power,
+          initial: Boolean(effect.initial),
+          idempotencyKey: `general:${request.idempotencyKey}`
+        }, effect.accountId);
+        completed.push(effectKey);
+      } catch (error) {
+        if (!options.deferOnFailure) throw error;
+        deferred.push(this.deferModelEffect(effect, error));
+      }
     }
+    return { completed, deferred };
   }
 
   async completeDialogue(request, actorAccountId, intent) {
@@ -1547,7 +1660,7 @@ class OnlineWorldService {
     await this.postRecord(wake, { parentId: target.commentRootId, toAccountId: String(toAccountId) });
     const chat = await this.ensurePrivateChat(toAccountId);
     const chunks = encodeCommentRecord(direct);
-    for (const content of chunks) await this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: chat.id, content }, timeout: 20000 });
+    for (const content of chunks) await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: chat.id, content }, timeout: 20000 }));
     return { messageId, announced: true, sent: true, chunks: chunks.length };
   }
 
@@ -1571,7 +1684,6 @@ class OnlineWorldService {
     const identity = wakes.length ? await this.getIdentity() : null;
     for (const wake of wakes) {
       if (!this.consumeDirectReceiveBudget(wake.fromAccountId)) {
-        this.seenDirectMessageIds.add(wake.messageId);
         continue;
       }
       const chat = await this.findPrivateChat(wake.fromAccountId);

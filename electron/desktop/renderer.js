@@ -155,6 +155,8 @@ let pointerMoveTimer = null;
 let gameInputQueue = Promise.resolve();
 let activeModelFamily = "all";
 const ONLINE_WORLD_COVER_MARKS = ["征","舟","田","夜","机","棋","驿","月","岛","云"];
+const ONLINE_WORLD_HOST_PROTOCOL = "fyow-host/1";
+const ONLINE_WORLD_HOST_MESSAGE_LIMIT = 128 * 1024;
 let pendingModelChangeKey = null;
 let adminLogsLoaded = false;
 let renderedRoomChatRevision = -1;
@@ -622,10 +624,22 @@ function showPage(page){
   if(page==="multiplayer")syncSurfaceBounds();
 }
 
+function postOnlineWorldFrame(type,payload={},requestId=""){
+  if(!onlineWorldFrame.contentWindow)return;
+  const message={source:"fengyue-host",protocol:ONLINE_WORLD_HOST_PROTOCOL,type,...payload};
+  if(requestId)message.requestId=requestId;
+  onlineWorldFrame.contentWindow.postMessage(message,"*");
+}
+
+function onlineWorldRequestId(data){
+  const value=String(data?.requestId||"");
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)?value:"";
+}
+
 function postOnlineWorldState(){
   if(!onlineWorldFrameReady||!onlineWorldState)return;
   const hostedState={...onlineWorldState,characterProfiles:state?.characterProfiles||{items:[],selectedId:null}};
-  onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"state",state:hostedState},"*");
+  postOnlineWorldFrame("state",{state:hostedState});
 }
 
 function onlineWorldGalleryCards(){
@@ -1208,7 +1222,17 @@ document.querySelector("#online-world-migrate").addEventListener("click",async()
   invoke(async()=>{const result=await api.migrateOnlineWorld();await api.copyText(result.url);toast(result.redirectPublished?"迁移配置已回读验证，地址已复制；发布新作品后即可完成切换":`迁移草稿地址已复制；${result.importError||"请在创作页补全配置"}`)}).catch(()=>{});
 });
 window.addEventListener("message",async event=>{
-  if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest")return;
+  if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest"||event.data?.protocol!==ONLINE_WORLD_HOST_PROTOCOL)return;
+  let messageSize=0;
+  try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
+  const requestId=onlineWorldRequestId(event.data);
+  const supportedTypes=["ready","library","admin","preferences","direct","intent"];
+  if(!supportedTypes.includes(event.data.type)){if(requestId)postOnlineWorldFrame("error",{message:"未知游戏通讯请求"},requestId);return}
+  const expectsResult=["admin","preferences","direct","intent"].includes(event.data.type);
+  if(messageSize>ONLINE_WORLD_HOST_MESSAGE_LIMIT){if(requestId)postOnlineWorldFrame("error",{message:"游戏请求内容过长"},requestId);return}
+  if(expectsResult&&!requestId)return;
+  const replyResult=result=>postOnlineWorldFrame("result",{result},requestId);
+  const replyError=error=>postOnlineWorldFrame("error",{message:friendlyError(error)},requestId);
   if(event.data.type==="ready"){
     onlineWorldFrameReady=true;
     if(!onlineWorldState)try{onlineWorldState=await api.getOnlineWorldState()}catch{}
@@ -1221,14 +1245,14 @@ window.addEventListener("message",async event=>{
     const command={...(event.data.command||{})};
     try{
       if(command.type==="open-server"){
-        if(!await confirmAction("这会以伴生作品作者账号作为服主，在评论区发布赛季控制记录与第一份覆盖快照。",{title:"服主开服",acceptText:"立即开服"}))return;
+        if(!await confirmAction("这会以伴生作品作者账号作为服主，在评论区发布赛季控制记录与第一份覆盖快照。",{title:"服主开服",acceptText:"立即开服"})){replyResult({cancelled:true});return}
         const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);
-        onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{admin:true,state:next}} ,"*");toast("开服成功");return;
+        replyResult({admin:true,state:next});toast("开服成功");return;
       }
       if(command.type==="migrate-server"){
-        if(!await confirmAction("这会复制伴生作品配置与公共地图，建立新作品，并在旧评论区发布作者签名的搬迁指令。",{title:"搬迁并重置服务器",acceptText:"开始搬迁"}))return;
+        if(!await confirmAction("这会复制伴生作品配置与公共地图，建立新作品，并在旧评论区发布作者签名的搬迁指令。",{title:"搬迁并重置服务器",acceptText:"开始搬迁"})){replyResult({cancelled:true});return}
         const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
-        onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{admin:true,migration:result}},"*");
+        replyResult({admin:true,migration:result});
         toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
       }
       const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
@@ -1239,35 +1263,35 @@ window.addEventListener("message",async event=>{
         : command.type==="player-ban"
           ? {text:`封禁 ${label}？封禁记录会上传评论区，其所有游戏操作将被其他客户端忽略。`,title:"封禁玩家",acceptText:"确认封禁"}
           : {text:`解除 ${label} 的封禁？解除记录同样会由作者签名并上传评论区。`,title:"解除封禁",acceptText:"确认解封"};
-      if(!await confirmAction(copy.text,{title:copy.title,acceptText:copy.acceptText}))return;
+      if(!await confirmAction(copy.text,{title:copy.title,acceptText:copy.acceptText})){replyResult({cancelled:true});return}
       const result=await api.administerOnlineWorld(command);
       if(result?.state)renderOnlineWorld(result.state);
-      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{...result,admin:true}},"*");
+      replyResult({...result,admin:true});
       toast(command.type==="player-reset"?"玩家数据已重置":command.type==="player-ban"?"玩家已封禁":"玩家已解除封禁");
-    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+    }catch(error){replyError(error)}
     return;
   }
   if(event.data.type==="preferences"){
     try{
       const next=await api.updateOnlineWorldPreferences(event.data.preferences||{});
       renderOnlineWorld(next);
-      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{preferences:true,state:next}} ,"*");
+      replyResult({preferences:true,state:next});
       toast("性癖偏好已保存在本机");
-    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)} ,"*")}
+    }catch(error){replyError(error)}
     return;
   }
   if(event.data.type==="direct"){
     try{
       const result=await api.sendOnlineWorldDirect(event.data.message||{});
-      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{...result,direct:true}},"*");
-    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+      replyResult({...result,direct:true});
+    }catch(error){replyError(error)}
     return;
   }
   if(event.data.type!=="intent")return;
   const intent={...(event.data.intent||{})};
   if(intent.type==="join"){
     const profile=(state?.characterProfiles?.items||[]).find(item=>item.id===intent.characterProfileId)||selectedOnlineWorldProfile();
-    if(!profile){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:"请选择角色设定"},"*");return}
+    if(!profile){replyError("请选择角色设定");return}
     onlineWorldEnteredProfileId=profile.id;
     intent.characterProfileId=profile.id;
     intent.displayName=profile?.displayName||state?.account?.username||"玩家";
@@ -1283,8 +1307,8 @@ window.addEventListener("message",async event=>{
   try{
     const result=await api.submitOnlineWorldIntent(intent);
     if(result?.state)renderOnlineWorld(result.state);
-    onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result},"*");
-  }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+    replyResult(result);
+  }catch(error){replyError(error)}
 });
 settingsToggle.addEventListener("click",()=>invoke(()=>setSettingsOpen(!settingsOpen)).catch(()=>{}));
 document.querySelector("#settings-close").addEventListener("click",()=>invoke(()=>setSettingsOpen(false)).catch(()=>{}));

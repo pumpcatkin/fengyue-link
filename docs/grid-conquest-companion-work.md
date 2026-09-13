@@ -16,10 +16,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 31,524 个字符，解码后 HTML 98,540 字节，gzip 压缩包 23,580 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 34,542 个字符，解码后 HTML 106,561 字节，gzip 压缩包 25,843 字节，程序 SHA-256：
 
 ```text
-20d8a363221ff0392b8ed5e7a4b9d6512b2bc6563ef57d173863d8d31f66eec7
+7bb8a7b2e53d154175d8da29ef884fd3127450e1716f0708bb01118c947bde72
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。

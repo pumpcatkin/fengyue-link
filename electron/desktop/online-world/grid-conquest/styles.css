@@ -18,6 +18,8 @@ button {
 button:hover { background: #fff9e8; transform: translate(-1px, -2px); box-shadow: 3px 4px 0 var(--shadow); filter: saturate(1.08); }
 button:active { transform: translate(1px, 1px); box-shadow: 1px 1px 0 var(--shadow); }
 button:disabled { cursor: not-allowed; opacity: .42; transform: none; box-shadow: 1px 1px 0 #806b4c; }
+button.host-pending { position: relative; cursor: wait; filter: saturate(.65); }
+button.host-pending::after { content: ""; display: inline-block; width: 8px; height: 8px; margin-left: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -1px; animation: request-spin .7s linear infinite; }
 .primary { border-color: var(--red-dark); background: var(--red); color: #fff8e1; }
 .primary:hover { background: #d9624e; }
 .hidden { display: none !important; }
@@ -30,6 +32,9 @@ main { display: grid; width: min(1700px, 100%); height: 100%; grid-template-rows
 }
 .owner-command-toggle { position: absolute; left: 5px; top: 3px; padding: 2px 9px; border-width: 1px; background: #713f37; color: #fff4d6; font-size: 9px; box-shadow: 1px 1px 0 var(--shadow); }
 .owner-command-toggle:hover { background: #8f4c3f; box-shadow: 2px 2px 0 var(--shadow); }
+.sound-toggle { position: absolute; right: 5px; top: 3px; min-width: 58px; padding: 2px 7px; border-width: 1px; background: #e8cd95; color: var(--muted); font-size: 8px; box-shadow: 1px 1px 0 var(--shadow); }
+.sound-toggle:hover { background: #fff0c6; box-shadow: 2px 2px 0 var(--shadow); }
+.sound-toggle.muted { background: #c9b990; color: #695f4e; }
 .time-strip span { color: var(--red-dark); font-size: 14px; font-weight: 900; }
 .time-strip b { font-family: Georgia, "Noto Serif SC", serif; font-size: 12px; }
 .time-strip i { width: 4px; height: 4px; border-radius: 50%; background: var(--gold); }
@@ -224,3 +229,4 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 @media (prefers-reduced-motion: reduce) {
   button, .panel { transition: none; }
 }
+@keyframes request-spin { to { transform: rotate(360deg); } }

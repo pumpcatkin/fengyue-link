@@ -278,7 +278,16 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toMatch(/if \(event\.button !== 2\) return/);
     expect(gridGame).toContain('viewport.addEventListener("contextmenu"');
     expect(gridGame).toContain("if (ownPlayer()) joinSubmitting = false");
-    expect(gridGame).toContain("payload = event.data.result.state");
+    expect(gridGame).toContain("applyHostedState(event.data.result.state, false)");
+    expect(gridGame).toContain('const HOST_PROTOCOL = "fyow-host/1"');
+    expect(gridGame).toContain("event.source !== parent");
+    expect(gridGame).toContain("pendingHostKeys.has(key)");
+    expect(gridGame).toContain('playSound("victory")');
+    expect(gridGame).toContain('playSound("letter")');
+    expect(gridHtml).toContain('id="sound-toggle"');
+    expect(renderer).toContain('const ONLINE_WORLD_HOST_PROTOCOL = "fyow-host/1"');
+    expect(renderer).toContain("ONLINE_WORLD_HOST_MESSAGE_LIMIT");
+    expect(renderer).toContain("replyResult({cancelled:true})");
     expect(gridHtml).toContain('id="training-target"');
     expect(gridHtml).toContain('id="general-measurements"');
     expect(gridGame).toContain('type: "power-train"');

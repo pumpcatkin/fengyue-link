@@ -5,7 +5,7 @@ const require = createRequire(import.meta.url);
 const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, signRecord } = require("../electron/online-world-protocol.cjs");
-const { createWorld } = require("../electron/grid-world-game.cjs");
+const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard } = require("../electron/online-world-card.cjs");
 
@@ -99,6 +99,40 @@ describe("online world platform service", () => {
     });
     await expect(instance.requestStructuredModel({ task: "first" }, { attempts: 1 })).resolves.toEqual({ task: "first" });
     await expect(instance.requestStructuredModel({ task: "second" }, { attempts: 1 })).rejects.toThrow(/复用了已经使用过的模型会话/);
+  });
+
+  it("retries transient comment writes without changing the encoded record", async () => {
+    let attempts = 0;
+    const posted: string[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        attempts += 1;
+        posted.push(options.body.content);
+        if (attempts < 3) throw new Error("temporary comment failure");
+        return { id: "comment-ok", account_id: "author" };
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    const result = await instance.postRecord({ schema: "fyow.event/3", eventId: "retry-event", gameId: "game", workId: "work", seasonId: "season" });
+    expect(attempts).toBe(3);
+    expect(new Set(posted).size).toBe(1);
+    expect(result[0].id).toBe("comment-ok");
+  });
+
+  it("serializes player actions so two different clicks cannot mutate the world concurrently", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }) });
+    instance.submitIntentNow = async (intent: any) => {
+      if (intent.type === "first") await gate;
+      return { type: intent.type };
+    };
+    const first = instance.submitIntent({ type: "first", idempotencyKey: "first" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await expect(instance.submitIntent({ type: "second", idempotencyKey: "second" })).rejects.toThrow(/上一项行动/);
+    release();
+    await expect(first).resolves.toEqual({ type: "first" });
   });
 
   it("calibrates rule time from the platform response clock", async () => {
@@ -409,6 +443,10 @@ describe("online world platform service", () => {
     receiver.work = { id: "work", authorAccountId: "authority" };
     receiver.control = control;
     receiver.world = world;
+    receiver.directReceiveTimes.set("sender", Array(20).fill(receiver.now()));
+    expect(await receiver.receiveDirectWakes()).toHaveLength(0);
+    expect(receiver.seenDirectMessageIds.has(sent.messageId)).toBe(false);
+    receiver.directReceiveTimes.clear();
     const received = await receiver.receiveDirectWakes();
     expect(received).toHaveLength(1);
     expect(received[0].type).toBe("general-letter");
@@ -466,6 +504,79 @@ describe("online world platform service", () => {
     expect(result.mapDelta).toBeNull();
     expect(posted).toBe(false);
     expect(instance.localEvents.at(-1).type).toBe("start-mining");
+  });
+
+  it("rolls back a public action when its map record was not fully posted", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
+    world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"], position: { x: 1, y: 1 } };
+    world.privatePlayers.player = { orientation: "any" };
+    world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    world.generals.g1 = createFallbackGeneral({ id: "g1", name: "试将", gender: "female", holderAccountId: "player", holderName: "玩家", power: 300 });
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestConsole: async () => { throw new Error("comment write failed"); }
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+    await expect(instance.submitIntent({ type: "deploy-general", generalId: "g1", idempotencyKey: "deploy" })).rejects.toThrow(/comment write failed/);
+    expect(instance.world.generals.g1.status).toBe("carried");
+    expect(instance.world.players.player.carriedGeneralIds).toEqual(["g1"]);
+    expect(instance.world.cells["1,1"].generalIds).toEqual([]);
+    expect(instance.localEvents).toHaveLength(0);
+  });
+
+  it("defers a failed post-commit general generation and retries it with the same discovery identity", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
+    world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: [], position: { x: 1, y: 1 } };
+    world.privatePlayers.player = { orientation: "any", characterTags: ["冷静"] };
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestModel: async () => { throw new Error("model temporarily unavailable"); }
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+    const effect = { type: "general-generation-request", sourceId: "march-job", accountId: "player", x: 2, y: 2, gender: "female", directionTags: ["冷静"], initial: false, population: 5000, resourceGrade: "A" };
+    const deferred = await instance.handleEffects([effect], identity, { deferOnFailure: true });
+    expect(deferred.deferred).toHaveLength(1);
+    expect(instance.pendingModelEffects).toHaveLength(1);
+    const discoveryKey = instance.pendingModelEffects[0].key;
+    let sequence = 0;
+    instance.requestModel = async () => ({ conversationId: `retry-conversation-${++sequence}`, answer: JSON.stringify(completeGeneral) });
+    instance.pendingModelEffects[0].nextAttemptAt = 0;
+    await expect(instance.retryPendingModelEffects()).resolves.toEqual([discoveryKey]);
+    expect(instance.pendingModelEffects).toHaveLength(0);
+    expect(Object.values(instance.world.generals)).toHaveLength(1);
+    expect(instance.world.processedIntents).toContain(`general:${discoveryKey}`);
+  });
+
+  it("drops deferred model rewards after the player generation has been reset", async () => {
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
+    world.players.player = { accountId: "player", displayName: "玩家", position: { x: 1, y: 1 }, carriedGeneralIds: [] };
+    world.playerEpochs.player = 1;
+    let requested = false;
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      requestModel: async () => { requested = true; return { conversationId: "should-not-run", answer: JSON.stringify(completeGeneral) }; }
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+    instance.pendingModelEffects = [{
+      key: "old-generation",
+      playerEpoch: 0,
+      attempts: 1,
+      nextAttemptAt: 0,
+      effect: { type: "general-generation-request", sourceId: "old-job", accountId: "player", x: 2, y: 2, gender: "female", initial: false }
+    }];
+    await expect(instance.retryPendingModelEffects()).resolves.toEqual([]);
+    expect(requested).toBe(false);
+    expect(instance.pendingModelEffects).toHaveLength(0);
   });
 
   it("lets only the companion author publish signed ban and reset directives", async () => {

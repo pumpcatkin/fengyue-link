@@ -89,8 +89,8 @@ GET /console/api/apps/{workId}/model-config/export
 ```text
 作品名：猎艳疆土[b27218e680f94c0d]
 世界书：5 条
-详细介绍：31,524 字符
-程序 SHA-256：20d8a363221ff0392b8ed5e7a4b9d6512b2bc6563ef57d173863d8d31f66eec7
+详细介绍：34,542 字符
+程序 SHA-256：7bb8a7b2e53d154175d8da29ef884fd3127450e1716f0708bb01118c947bde72
 ```
 
 ## 5. 导出接口的动态别名

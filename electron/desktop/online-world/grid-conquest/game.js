@@ -8,6 +8,7 @@ const ZOOM_LEVELS = [.25, .375, .5, .75, 1, 1.25, 1.5, 2, 3];
 const DEFAULT_VISIBLE_CELLS = 12;
 const TRAINING_COST_GROWTH = 1.15;
 const MAX_TRAINING_LEVEL = 100;
+const HOST_PROTOCOL = "fyow-host/1";
 let payload = null;
 let selected = null;
 let zoom = 1;
@@ -24,8 +25,45 @@ let joinStep = 0;
 let joinSubmitting = false;
 const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: "" };
 const preferenceDraft = { orientation: "any", tags: new Map() };
+const pendingHostRequests = new Map();
+const pendingHostKeys = new Map();
 
-function host(type, data = {}) { parent.postMessage({ source: "fyow-grid-conquest", type, ...data }, "*"); }
+function host(type, data = {}, options = {}) {
+  const key = String(options.key || "");
+  if (key && pendingHostKeys.has(key)) {
+    showToast("这项操作正在处理中，请等待返回");
+    playSound("notice");
+    return null;
+  }
+  const requestId = options.expectResult ? crypto.randomUUID() : "";
+  const message = { source: "fyow-grid-conquest", protocol: HOST_PROTOCOL, type, ...data };
+  if (requestId) message.requestId = requestId;
+  if (requestId) {
+    const control = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    if (control && !control.disabled) {
+      control.disabled = true;
+      control.classList.add("host-pending");
+    }
+    pendingHostRequests.set(requestId, { key, control });
+    if (key) pendingHostKeys.set(key, requestId);
+  }
+  parent.postMessage(message, "*");
+  return requestId || true;
+}
+
+function finishHostRequest(requestId) {
+  const id = String(requestId || "");
+  if (!id) return null;
+  const pending = pendingHostRequests.get(id);
+  if (!pending) return false;
+  pendingHostRequests.delete(id);
+  if (pending.key && pendingHostKeys.get(pending.key) === id) pendingHostKeys.delete(pending.key);
+  if (pending.control) {
+    pending.control.disabled = false;
+    pending.control.classList.remove("host-pending");
+  }
+  return pending;
+}
 function ownAccountId() { return String(payload?.account?.accountId || ""); }
 function ownPlayer() { return payload?.world?.players?.[ownAccountId()] || null; }
 function allGenerals() { return payload?.world?.generals || {}; }
@@ -69,25 +107,87 @@ function showToast(text) {
 }
 
 let audioContext = null;
-function clickSound() {
+const SOUND_LEVELS = [.6, .3, 0];
+let soundLevelIndex = 0;
+try { soundLevelIndex = Math.max(0, Math.min(SOUND_LEVELS.length - 1, Number(localStorage.getItem("fyow:sound-level") || 0))); } catch {}
+function soundVolume() { return SOUND_LEVELS[soundLevelIndex]; }
+function updateSoundToggle() {
+  const button = document.querySelector("#sound-toggle");
+  if (!button) return;
+  const percent = Math.round(soundVolume() * 100);
+  button.textContent = percent ? `音效 ${percent}%` : "音效 关";
+  button.classList.toggle("muted", !percent);
+}
+function audioTone(frequency, duration, { delay = 0, endFrequency = frequency, gain = .04, type = "sine" } = {}) {
+  const volume = soundVolume();
+  if (!volume) return;
+  audioContext ||= new (window.AudioContext || window.webkitAudioContext)();
+  void audioContext.resume?.();
+  const start = audioContext.currentTime + delay;
+  const oscillator = audioContext.createOscillator();
+  const envelope = audioContext.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(Math.max(40, frequency), start);
+  if (endFrequency !== frequency) oscillator.frequency.exponentialRampToValueAtTime(Math.max(40, endFrequency), start + duration);
+  envelope.gain.setValueAtTime(.0001, start);
+  envelope.gain.exponentialRampToValueAtTime(Math.max(.0002, gain * volume), start + Math.min(.018, duration / 3));
+  envelope.gain.exponentialRampToValueAtTime(.0001, start + duration);
+  oscillator.connect(envelope).connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + .02);
+}
+function playSound(kind = "click") {
   try {
-    audioContext ||= new AudioContext();
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.type = "triangle";
-    oscillator.frequency.setValueAtTime(420, audioContext.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(240, audioContext.currentTime + .045);
-    gain.gain.setValueAtTime(.035, audioContext.currentTime);
-    gain.gain.exponentialRampToValueAtTime(.001, audioContext.currentTime + .06);
-    oscillator.connect(gain).connect(audioContext.destination);
-    oscillator.start();
-    oscillator.stop(audioContext.currentTime + .065);
+    if (kind === "click") audioTone(390, .055, { endFrequency: 240, gain: .026, type: "triangle" });
+    else if (kind === "notice") audioTone(520, .08, { endFrequency: 430, gain: .028, type: "triangle" });
+    else if (kind === "success") { audioTone(520, .12, { gain: .032, type: "triangle" }); audioTone(720, .16, { delay: .08, gain: .038, type: "triangle" }); }
+    else if (kind === "error") { audioTone(220, .15, { endFrequency: 145, gain: .045, type: "sawtooth" }); audioTone(165, .18, { delay: .07, endFrequency: 120, gain: .028, type: "square" }); }
+    else if (kind === "complete") { audioTone(660, .18, { gain: .035, type: "sine" }); audioTone(990, .24, { delay: .1, gain: .035, type: "sine" }); }
+    else if (kind === "victory") { audioTone(392, .13, { gain: .036, type: "triangle" }); audioTone(523, .15, { delay: .09, gain: .04, type: "triangle" }); audioTone(784, .28, { delay: .19, gain: .044, type: "triangle" }); }
+    else if (kind === "defeat") { audioTone(330, .16, { endFrequency: 260, gain: .035, type: "triangle" }); audioTone(196, .3, { delay: .1, endFrequency: 130, gain: .04, type: "sawtooth" }); }
+    else if (kind === "general") { audioTone(587, .16, { gain: .033, type: "sine" }); audioTone(740, .18, { delay: .1, gain: .038, type: "sine" }); audioTone(988, .34, { delay: .2, gain: .04, type: "sine" }); }
+    else if (kind === "letter") { audioTone(880, .11, { gain: .03, type: "sine" }); audioTone(1175, .22, { delay: .09, gain: .034, type: "sine" }); }
+    else if (kind === "dialogue") { audioTone(440, .09, { gain: .025, type: "triangle" }); audioTone(554, .14, { delay: .07, gain: .03, type: "triangle" }); }
   } catch {}
 }
 document.addEventListener("click", event => {
   const button = event.target.closest("button");
-  if (button && !button.disabled) clickSound();
+  if (button && !button.disabled && button.id !== "sound-toggle") playSound("click");
 }, true);
+document.querySelector("#sound-toggle").addEventListener("click", () => {
+  soundLevelIndex = (soundLevelIndex + 1) % SOUND_LEVELS.length;
+  try { localStorage.setItem("fyow:sound-level", String(soundLevelIndex)); } catch {}
+  updateSoundToggle();
+  if (soundVolume()) playSound("success");
+});
+updateSoundToggle();
+
+let stateSoundSnapshot = null;
+function captureSoundState(next) {
+  const accountId = String(next?.account?.accountId || "");
+  const world = next?.world || {};
+  return {
+    inbox: new Set((next?.directInbox || []).map(item => String(item.messageId || ""))),
+    generals: new Set(Object.values(world.generals || {}).filter(general => general?.holderAccountId === accountId).map(general => String(general.id || ""))),
+    jobs: new Set(Object.values(world.jobs || {}).filter(job => job?.accountId === accountId).map(job => String(job.id || ""))),
+    territories: Object.values(world.cells || {}).filter(cell => cell?.ownerAccountId === accountId).length
+  };
+}
+function applyHostedState(next, background = false) {
+  const previous = stateSoundSnapshot;
+  const current = captureSoundState(next);
+  payload = next;
+  serverNow = Number(payload?.serverNow || Date.now());
+  receivedAt = Date.now();
+  stateSoundSnapshot = current;
+  if (background && previous && !pendingHostRequests.size) {
+    if ([...current.inbox].some(id => id && !previous.inbox.has(id))) playSound("letter");
+    else if ([...current.generals].some(id => id && !previous.generals.has(id))) playSound("general");
+    else if (current.territories > previous.territories) playSound("victory");
+    else if (current.territories < previous.territories) playSound("defeat");
+    else if ([...previous.jobs].some(id => id && !current.jobs.has(id))) playSound("complete");
+  }
+}
 
 function ownerColor(owner, rank) {
   const neutral = ["#bacb91", "#aec486", "#a3bc7d", "#98b273", "#8da769"];
@@ -655,7 +755,7 @@ function validateJoinStep() {
 }
 
 async function sendIntent(intent) {
-  host("intent", { intent: { ...intent, idempotencyKey: crypto.randomUUID() } });
+  return host("intent", { intent: { ...intent, idempotencyKey: crypto.randomUUID() } }, { expectResult: true, key: `intent:${intent.type}` });
 }
 document.querySelector("#join-next").addEventListener("click", () => {
   const error = validateJoinStep();
@@ -691,7 +791,7 @@ document.querySelector("#add-preference-tag").addEventListener("click", () => {
 document.querySelector("#preferences-form").addEventListener("submit", event => {
   event.preventDefault();
   if (!preferenceDraft.tags.size) { showToast("请至少添加一个性癖标签"); return; }
-  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } });
+  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, { expectResult: true, key: "preferences" });
 });
 for (const category of [...new Set(tagCatalog.map(item => item.category))]) {
   const option = document.createElement("option"); option.value = category; option.textContent = category;
@@ -730,13 +830,14 @@ document.querySelector("#return-library").addEventListener("click", () => host("
 document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
 document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
 document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
-document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }));
-document.querySelector("#owner-migrate-server").addEventListener("click", () => host("admin", { command: { type: "migrate-server" } }));
-document.querySelector("#owner-reset-player-button").addEventListener("click", () => host("admin", { command: { type: "player-reset", targetAccountId: document.querySelector("#owner-reset-player").value } }));
+document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }, { expectResult: true, key: "admin:open-server" }));
+document.querySelector("#owner-migrate-server").addEventListener("click", () => host("admin", { command: { type: "migrate-server" } }, { expectResult: true, key: "admin:migrate-server" }));
+document.querySelector("#owner-reset-player-button").addEventListener("click", () => host("admin", { command: { type: "player-reset", targetAccountId: document.querySelector("#owner-reset-player").value } }, { expectResult: true, key: "admin:player-reset" }));
 document.querySelector("#owner-ban-player-button").addEventListener("click", () => {
   const select = document.querySelector("#owner-ban-player");
   const option = select.selectedOptions[0];
-  host("admin", { command: { type: option?.dataset.banned === "true" ? "player-unban" : "player-ban", targetAccountId: select.value } });
+  const type = option?.dataset.banned === "true" ? "player-unban" : "player-ban";
+  host("admin", { command: { type, targetAccountId: select.value } }, { expectResult: true, key: `admin:${type}` });
 });
 document.querySelector("#banned-return-library").addEventListener("click", () => host("library"));
 document.querySelector("#march-soldiers").addEventListener("input", renderMarchParty);
@@ -769,28 +870,47 @@ document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListene
   overlay.classList.add("hidden");
 }));
 
+function resultSound(result) {
+  const effects = Array.isArray(result?.effects) ? result.effects : [];
+  if (result?.deferredEffects?.length) return "notice";
+  if (effects.some(effect => effect.type === "battle-lost")) return "defeat";
+  if (effects.some(effect => effect.type === "battle-won")) return "victory";
+  if (effects.some(effect => effect.type === "general-generation-request")) return "general";
+  if (result?.dialogue?.reply) return "dialogue";
+  if (result?.direct) return "letter";
+  if (result?.duplicate || result?.cancelled) return "notice";
+  return "success";
+}
+
 window.addEventListener("message", event => {
-  if (event.data?.source !== "fengyue-host") return;
+  if (event.source !== parent || event.data?.source !== "fengyue-host" || event.data?.protocol !== HOST_PROTOCOL) return;
+  const requestState = ["result", "error"].includes(event.data.type) ? finishHostRequest(event.data.requestId) : null;
+  if (requestState === false) return;
   if (event.data.type === "state") {
-    payload = event.data.state;
-    serverNow = Number(payload?.serverNow || Date.now());
-    receivedAt = Date.now();
+    applyHostedState(event.data.state, true);
     if (ownPlayer()) joinSubmitting = false;
     renderAll();
   } else if (event.data.type === "error") {
     joinSubmitting = false;
+    playSound("error");
     showToast(event.data.message || "行动失败");
     if (!ownPlayer()) renderJoinWizard();
   } else if (event.data.type === "result") {
+    if (event.data.result?.cancelled) {
+      joinSubmitting = false;
+      playSound("notice");
+      showToast("已取消操作");
+      if (!ownPlayer()) renderJoinWizard();
+      return;
+    }
     if (event.data.result?.state) {
-      payload = event.data.result.state;
-      serverNow = Number(payload?.serverNow || Date.now());
-      receivedAt = Date.now();
+      applyHostedState(event.data.result.state, false);
       joinSubmitting = false;
       renderAll();
     }
     if (event.data.result?.preferences) {
       document.querySelector("#preferences-modal").classList.add("hidden");
+      playSound("success");
       showToast("性癖偏好已保存");
       return;
     }
@@ -800,6 +920,8 @@ window.addEventListener("message", event => {
       else if (dialogue.command?.type === "send-letter") showToast("将领书信已通过评论唤醒与私信通道发送");
       renderDialogue();
     }
+    playSound(resultSound(event.data.result));
+    if (event.data.result?.deferredEffects?.length) showToast("领地变化已经生效，将领生成会在后台自动重试");
   }
 });
 

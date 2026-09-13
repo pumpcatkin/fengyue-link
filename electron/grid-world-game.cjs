@@ -504,6 +504,7 @@ function resolveMarch(state, job, effects, now) {
         const orientation = privatePlayer.orientation || "any";
         effects.push({
           type: "general-generation-request",
+          sourceId: job.id,
           accountId: job.accountId,
           x: job.to.x,
           y: job.to.y,
@@ -592,6 +593,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
     };
     effects.push({
       type: "general-generation-request",
+      sourceId: idempotencyKey,
       accountId: actorAccountId,
       x: capital.x,
       y: capital.y,

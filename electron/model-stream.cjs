@@ -16,6 +16,18 @@ function answerText(data) {
   return candidates.find(value => typeof value === "string" && value) || "";
 }
 
+function createModelRequestPayload({ workId, conversationId, query }) {
+  const normalizedConversationId = String(conversationId || "").trim();
+  return {
+    app_id: String(workId || ""),
+    inputs: {},
+    ...(normalizedConversationId ? { conversation_id: normalizedConversationId } : {}),
+    query: String(query || ""),
+    response_mode: "streaming",
+    files: []
+  };
+}
+
 async function consumeModelEventStream(body) {
   if (!body || typeof body.getReader !== "function") throw modelStreamError("模型响应缺少数据流");
   const reader = body.getReader();
@@ -84,4 +96,4 @@ async function consumeModelEventStream(body) {
   return { answer: answer.trim(), taskId, messageId, conversationId, usage, finishEvent };
 }
 
-module.exports = { consumeModelEventStream };
+module.exports = { consumeModelEventStream, createModelRequestPayload };

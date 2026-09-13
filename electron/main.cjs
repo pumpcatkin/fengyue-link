@@ -52,7 +52,7 @@ const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
 const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
-const { consumeModelEventStream } = require("./model-stream.cjs");
+const { consumeModelEventStream, createModelRequestPayload } = require("./model-stream.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -3527,11 +3527,15 @@ class AccountBackend {
         cache: "no-store",
         signal: controller.signal,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Language": "zh-Hans" },
-        body: JSON.stringify({ app_id: workId, inputs: {}, conversation_id: String(request.conversationId || ""), query, response_mode: "streaming", files: [] })
+        body: JSON.stringify(createModelRequestPayload({ workId, conversationId: request.conversationId, query }))
       });
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}));
         throw new Error(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+      }
+      if (/json/i.test(String(response.headers.get("content-type") || ""))) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure?.message || failure?.msg || "模型接口返回了业务错误");
       }
       const result = await consumeModelEventStream(response.body);
       this.appendSessionLog("online-world-model", { event: "request-completed", task: String(request.task || "unknown"), conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });

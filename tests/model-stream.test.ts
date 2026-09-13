@@ -2,10 +2,19 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { consumeModelEventStream } = require("../electron/model-stream.cjs");
+const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const encoder = new TextEncoder();
 
 describe("online world model event stream", () => {
+  it("omits an empty conversation id for the first platform request", () => {
+    expect(createModelRequestPayload({ workId: "work", conversationId: "", query: "hello" })).toEqual({
+      app_id: "work", inputs: {}, query: "hello", response_mode: "streaming", files: []
+    });
+    expect(createModelRequestPayload({ workId: "work", conversationId: "conversation-1", query: "next" })).toMatchObject({
+      conversation_id: "conversation-1"
+    });
+  });
+
   it("waits for an explicit completion event before returning the accumulated answer", async () => {
     let controller: ReadableStreamDefaultController<Uint8Array>;
     const stream = new ReadableStream<Uint8Array>({ start(value) { controller = value; } });

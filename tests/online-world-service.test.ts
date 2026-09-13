@@ -177,7 +177,7 @@ describe("online world platform service", () => {
   it("restores a player position and private resources from a pre-overlay local save", () => {
     const now = 1_000_000;
     const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
-    world.players.author = { accountId: "author", displayName: "服主" };
+    world.players.author = { accountId: "author", displayName: "服主", gold: null };
     world.cells["7,9"] = { ownerAccountId: "author", soldiers: 20, generalIds: [] };
     world.generals.g1 = {
       id: "g1", name: "青禾", status: "carried", holderAccountId: "author", loyalToAccountId: "author",
@@ -185,13 +185,16 @@ describe("online world platform service", () => {
     };
     const instance = service({ getAccount: () => ({ accountId: "author", username: "服主" }) });
     instance.world = world;
-    instance.localEvents = [{
-      type: "join", actorAccountId: "author", createdAt: now,
-      result: { capital: { x: 7, y: 9 }, gold: 1800 }
-    }];
-    instance.restoreLocalOverlay(null);
+    instance.localEvents = [
+      { type: "join", actorAccountId: "author", createdAt: now, result: { capital: { x: 7, y: 9 }, gold: 1800 } },
+      { type: "train", actorAccountId: "author", createdAt: now + 1, result: { cost: 20 } },
+      { type: "time-settle", actorAccountId: "author", createdAt: now + 2, result: { effects: [{ type: "mining-complete", accountId: "author", gold: 235 }] } }
+    ];
+    instance.restoreLocalOverlay({
+      playerEpoch: 0, privatePlayers: {}, players: { author: { gold: 0 } }, generals: {}, jobs: {}, processedIntents: []
+    });
     expect(instance.world.players.author).toMatchObject({
-      position: { x: 7, y: 9 }, gold: 1800, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"], joinedAt: now
+      position: { x: 7, y: 9 }, gold: 2015, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"], joinedAt: now
     });
   });
 

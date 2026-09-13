@@ -150,8 +150,13 @@ function normalizeCharacterProfile(value = {}) {
 }
 
 function validPosition(value) {
-  return Number.isInteger(Number(value?.x)) && Number(value.x) >= 0 && Number(value.x) < GRID_SIZE
-    && Number.isInteger(Number(value?.y)) && Number(value.y) >= 0 && Number(value.y) < GRID_SIZE;
+  return value?.x != null && value?.y != null
+    && Number.isInteger(Number(value.x)) && Number(value.x) >= 0 && Number(value.x) < GRID_SIZE
+    && Number.isInteger(Number(value.y)) && Number(value.y) >= 0 && Number(value.y) < GRID_SIZE;
+}
+
+function finiteStoredNumber(value) {
+  return value !== null && value !== "" && Number.isFinite(Number(value));
 }
 
 function compareOrderValue(left, right) {
@@ -439,11 +444,11 @@ class OnlineWorldService {
       playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0))),
       privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
       players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
-        ...(Object.hasOwn(player, "gold") ? { gold: Number(player.gold || 0) } : {}),
-        ...(Object.hasOwn(player, "fieldArmySoldiers") ? { fieldArmySoldiers: Number(player.fieldArmySoldiers || 0) } : {}),
+        ...(finiteStoredNumber(player.gold) ? { gold: Number(player.gold) } : {}),
+        ...(finiteStoredNumber(player.fieldArmySoldiers) ? { fieldArmySoldiers: Number(player.fieldArmySoldiers) } : {}),
         ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {}),
         ...(validPosition(player.position) ? { position: { x: Number(player.position.x), y: Number(player.position.y) } } : {}),
-        ...(Object.hasOwn(player, "joinedAt") ? { joinedAt: Number(player.joinedAt || 0) } : {})
+        ...(finiteStoredNumber(player.joinedAt) ? { joinedAt: Number(player.joinedAt) } : {})
       }])),
       generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
       jobs: Object.fromEntries(Object.entries(this.world.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
@@ -504,6 +509,7 @@ class OnlineWorldService {
     if (!accountId || !player) return false;
     const ownEvents = (this.localEvents || []).filter(event => String(event?.actorAccountId || event?.intent?.actorAccountId || "") === accountId);
     const joinEvent = [...ownEvents].reverse().find(event => event?.type === "join" && validPosition(event?.result?.capital));
+    const coreStateWasIncomplete = !validPosition(player.position);
     let changed = false;
     if (!validPosition(player.position)) {
       let recovered = null;
@@ -520,7 +526,7 @@ class OnlineWorldService {
       }
       if (validPosition(recovered)) { player.position = { x: Number(recovered.x), y: Number(recovered.y) }; changed = true; }
     }
-    if (!Number.isFinite(Number(player.gold))) {
+    if (!finiteStoredNumber(player.gold) || coreStateWasIncomplete) {
       let gold = Number(joinEvent?.result?.gold);
       if (!Number.isFinite(gold)) gold = 0;
       const start = joinEvent ? ownEvents.indexOf(joinEvent) + 1 : 0;
@@ -532,14 +538,14 @@ class OnlineWorldService {
       }
       player.gold = Math.max(0, gold); changed = true;
     }
-    if (!Number.isFinite(Number(player.fieldArmySoldiers))) { player.fieldArmySoldiers = 0; changed = true; }
+    if (!finiteStoredNumber(player.fieldArmySoldiers)) { player.fieldArmySoldiers = 0; changed = true; }
     if (!Array.isArray(player.carriedGeneralIds)) {
       player.carriedGeneralIds = Object.entries(this.world.generals || {})
         .filter(([, general]) => String(general?.holderAccountId || "") === accountId && general?.status === "carried")
         .map(([id]) => id).slice(0, 2);
       changed = true;
     }
-    if (!Number.isFinite(Number(player.joinedAt)) && joinEvent) { player.joinedAt = Number(joinEvent.createdAt || this.world.startedAt || this.now()); changed = true; }
+    if (!finiteStoredNumber(player.joinedAt) && joinEvent) { player.joinedAt = Number(joinEvent.createdAt || this.world.startedAt || this.now()); changed = true; }
     return changed;
   }
 
@@ -1018,6 +1024,7 @@ class OnlineWorldService {
         }
         normalizeWorldState(this.world);
         if (this.world) this.applyPublicLedger(history.assembled.records);
+        if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
         if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
         await this.reconcileOwnGeneralWorldBooks();
@@ -1048,6 +1055,7 @@ class OnlineWorldService {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
     const account = this.account();
     if (this.world?.bans?.[account.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，所有游戏操作均会被忽略");
+    if (this.recoverOwnLocalPlayerState()) this.saveCache();
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
     const previousPreferences = cloneJson(this.localPreferences);
     if (normalized.type === "join") {

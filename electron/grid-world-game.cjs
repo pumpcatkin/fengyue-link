@@ -130,7 +130,15 @@ function allowedGeneralGender(orientation, seed, ...parts) {
 
 function normalizedCharacterTags(value) {
   if (!Array.isArray(value)) return [];
-  return [...new Set(value.map(item => String(item || "").trim()).filter(Boolean))].slice(0, 80);
+  const tags = value.map(item => {
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const tag = String(item.tag ?? item.name ?? item.label ?? "").trim();
+      const note = String(item.note ?? item.annotation ?? "").trim();
+      return tag ? (note ? `${tag}｜${note}` : tag) : "";
+    }
+    return String(item || "").trim();
+  }).filter(Boolean);
+  return [...new Set(tags)].slice(0, 80);
 }
 
 function selectGeneralDirectionTags(privatePlayer, seed, ...parts) {
@@ -211,6 +219,11 @@ function formatGeneralMemory(general) {
   return `言谈：${speech || "暂无"}\n经历：${deeds || "暂无"}`;
 }
 
+function playerDisplayName(state, accountId) {
+  const id = String(accountId || "");
+  return String(state?.players?.[id]?.displayName || "某位主公").trim() || "某位主公";
+}
+
 function appendGeneralMemory(general, { year, category, text, accountId, intimacyDelta = 0 }) {
   general.memory ||= { entries: [], intimacy: {} };
   general.memory.entries ||= [];
@@ -221,7 +234,7 @@ function appendGeneralMemory(general, { year, category, text, accountId, intimac
   general.memoryText = formatGeneralMemory(general).slice(0, 1000);
 }
 
-function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting, power, holderAccountId, year = 1 }) {
+function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting, power, holderAccountId, holderName, year = 1 }) {
   const general = {
     id: String(id),
     name: String(name || (gender === "female" ? "无名女将" : "无名将领")).slice(0, 24),
@@ -238,7 +251,7 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, setting
     memory: { entries: [], intimacy: { [String(holderAccountId)]: 5 } },
     memoryText: ""
   };
-  appendGeneralMemory(general, { year, category: "deed", text: `被${holderAccountId}发掘并提拔为将领`, accountId: holderAccountId, intimacyDelta: 5 });
+  appendGeneralMemory(general, { year, category: "deed", text: `被${String(holderName || "某位主公").slice(0, 40)}发掘并提拔为将领`, accountId: holderAccountId, intimacyDelta: 5 });
   return general;
 }
 
@@ -356,7 +369,7 @@ function resolveMarch(state, job, effects, now) {
       general.location = { ...job.to };
       general.captivityHistory ||= [];
       general.captivityHistory.push({ captorAccountId: job.accountId, formerMasterAccountId, year });
-      appendGeneralMemory(general, { year, category: "deed", text: `战败，被${job.accountId}俘虏`, accountId: job.accountId, intimacyDelta: -5 });
+      appendGeneralMemory(general, { year, category: "deed", text: `战败，被${playerDisplayName(state, job.accountId)}俘虏`, accountId: job.accountId, intimacyDelta: -5 });
     }
     effects.push({ type: "battle-won", jobId: job.id, accountId: job.accountId, at: job.to, previousOwner, attackerPower, defenderPower, soldiers: target.soldiers, capturedGeneralIds });
     if (neutral) {
@@ -423,7 +436,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
     const characterProfileId = String(intent.characterProfileId || "").trim().slice(0, 100);
     if (!characterProfileId) throw new Error("请选择绑定的角色设定");
     const characterTags = normalizedCharacterTags(intent.characterTags);
-    if (characterTags.length < 8) throw new Error("人物设定标签至少选择 8 个词条");
+    if (characterTags.length < 1) throw new Error("请至少添加一个性癖标签");
     const initialGeneralWish = String(intent.initialGeneralWish || "").trim().slice(0, 500);
     if (!initialGeneralWish) throw new Error("请描述开疆扩土前想遇到的良将");
     const capital = chooseCapital(state, actorAccountId);
@@ -584,7 +597,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       general.loyalToAccountId = actorAccountId;
       general.masterHistory ||= [];
       general.masterHistory.push({ accountId: actorAccountId, fromYear: year, toYear: null, reason: "降服" });
-      appendGeneralMemory(general, { year, category: "deed", text: `向${actorAccountId}降服并奉其为主公`, accountId: actorAccountId, intimacyDelta: 8 });
+      appendGeneralMemory(general, { year, category: "deed", text: `向${player.displayName || "某位主公"}降服并奉其为主公`, accountId: actorAccountId, intimacyDelta: 8 });
       if (player.carriedGeneralIds.length < 2) {
         player.carriedGeneralIds.push(generalId);
         general.status = "carried";
@@ -599,7 +612,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const gender = intent.gender === "female" ? "female" : "male";
       const expected = allowedGeneralGender(state.privatePlayers[actorAccountId]?.orientation || "any", state.seed, intent.discoveryId || idempotencyKey);
       if (gender !== expected && state.privatePlayers[actorAccountId]?.orientation !== "any") throw new Error("将领性别不符合玩家开局偏好");
-      const general = createFallbackGeneral({ id: intent.generalId, name: intent.name, gender, setting: intent.setting, power: intent.power, holderAccountId: actorAccountId, year: gameYear(state, now) });
+      const general = createFallbackGeneral({ id: intent.generalId, name: intent.name, gender, setting: intent.setting, power: intent.power, holderAccountId: actorAccountId, holderName: player.displayName, year: gameYear(state, now) });
       if (player.carriedGeneralIds.length >= 2) {
         general.status = "waiting";
         general.location = { x: coordinate(intent.location?.x, "将领横坐标"), y: coordinate(intent.location?.y, "将领纵坐标") };
@@ -624,6 +637,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
 }
 
 function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
+  const preferences = state.privatePlayers?.[effect.accountId] || {};
   return {
     task: "general.generate",
     keyword: "[[FYOW:TASK:general.generate:v1]]",
@@ -632,6 +646,7 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
       schema: "fyow.general-generate-request/2",
       world: "这个世界战火纷飞，蛮夷遍地，但资源丰饶。各路有志之士带着自己的志趣，试图统治这片大陆。只有天生拥有慧眼的人才有统治的可能性。",
       gender: effect.gender,
+      orientation: ["men", "women", "any"].includes(preferences.orientation) ? preferences.orientation : "any",
       population: effect.population,
       resourceGrade: effect.resourceGrade,
       location: { x: effect.x, y: effect.y },
@@ -639,8 +654,8 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
       directionTags: effect.initial ? [] : normalizedCharacterTags(effect.directionTags).slice(0, 3),
       initialWish: effect.initial ? String(effect.initialWish || "").slice(0, 500) : "",
       instruction: effect.initial
-        ? "仅依据性别要求与玩家自由描述生成初始良将，不使用人物设定标签。"
-        : "将 directionTags 作为本次人物生成方向，并保证人物性别严格符合 gender。",
+        ? "仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签；必须返回完整 setting 后才允许玩家入场。"
+        : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。",
       maximumChineseCharacters: 1000
     }
   };
@@ -742,6 +757,7 @@ module.exports = {
   dynamicCell,
   publicGeneralState,
   generalDiscoveryChance,
+  normalizedCharacterTags,
   resourceCycleMs,
   resourceYield,
   trainDurationMs,

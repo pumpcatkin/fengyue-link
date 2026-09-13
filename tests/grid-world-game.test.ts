@@ -106,6 +106,19 @@ describe("grid conquest rules", () => {
     expect(remembered.state.generals.g.memoryText.length).toBeLessThanOrEqual(1000);
   });
 
+  it("stores the player's display name in general memories and accepts annotated custom tags", () => {
+    const now = 1_000_000;
+    const base = game.createWorld({ seed: "tag-seed", seasonId: "season", startedAt: now, authorityAccountId: "a" });
+    const joined = game.applyIntent(base, {
+      type: "join", orientation: "women", displayName: "甲玩家", characterProfileId: "profile-a",
+      characterTags: [{ tag: "温柔", note: "偏好成熟气质" }], initialGeneralWish: "一名可靠的良将", idempotencyKey: "annotated-join"
+    }, { actorAccountId: "a", actorAccountName: "甲昵称", now }).state;
+    expect(joined.privatePlayers.a.characterTags).toEqual(["温柔｜偏好成熟气质"]);
+    const granted = game.applyIntent(joined, { type: "grant-general", generalId: "named", name: "青禾", gender: "female", setting: "善守城。", power: 400, discoveryId: "named", idempotencyKey: "named-grant" }, { actorAccountId: "a", authorityAccountId: "a", now });
+    expect(granted.state.generals.named.memoryText).toContain("被甲玩家发掘并提拔");
+    expect(granted.state.generals.named.memoryText).not.toContain("39404f0e");
+  });
+
   it("resolves combat instantly when a timed march reaches a neutral region", () => {
     const now = 1_000_000;
     let state = joined(now);

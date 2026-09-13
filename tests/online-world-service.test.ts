@@ -158,6 +158,29 @@ describe("online world platform service", () => {
     expect(instance.localEvents[1].type).toBe("grant-general");
   });
 
+  it("does not commit a new player until the initial general model returns a complete setting", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000 });
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => identity,
+      requestModel: async () => ({ answer: "模型暂时没有返回完整设定" }),
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        if (endpoint.startsWith("/comments/") && options.method === "POST") return { id: "c1", account_id: "author", is_author: true, created_at: new Date(2_000).toISOString(), content: options.body.content };
+        throw new Error(`unexpected ${endpoint}`);
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
+    instance.world = world;
+    await expect(instance.submitIntent({
+      type: "join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
+      characterTags: [{ tag: "成熟", note: "可靠" }], initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "failed-initial"
+    })).rejects.toThrow(/初始将领生成/);
+    expect(instance.world.players.author).toBeUndefined();
+    expect(instance.localPreferences.characterTags).toEqual([]);
+  });
+
   it("merges territory changes by platform comment timestamp and never publishes other players positions", () => {
     const earlyIdentity = generateOnlineWorldIdentity();
     const lateIdentity = generateOnlineWorldIdentity();

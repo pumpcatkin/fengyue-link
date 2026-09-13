@@ -373,7 +373,7 @@ SDK 不暴露通用 `fetch`、`ipcRenderer`、文件路径、Token、Cookie、�
 固定伴生作品 `b27218e6-80f9-4c0d-91c7-4b8f87d47be8` 又在 2026-09-13 完成一次正式配置保存：
 
 - 作品名 `猎艳疆土[b27218e680f94c0d]`，其中方括号内为从固定作品 UUID 派生的 16 位实例 ID；简介、前置词、世界观提示词和后置词均为本仓库固定模板。
-- “详细介绍”保存 23,775 字符的 `FYOW-PROGRAM/1` 信封，程序 SHA-256 为 `5b4392a015fa5c71b49bf87a08daae8dfdb656b519ab5d914371c6102c67f1fe`。
+- “详细介绍”保存 28,966 字符的 `FYOW-PROGRAM/1` 信封，程序 SHA-256 为 `4a84f3b2b639c1e7d2649978cf3070cd2a9467b3f1eb46eff8234120031a6e03`；本次同步增加了自由性癖标签、注释、偏好修改和严格的初始将领模型返回校验。
 - 将领生成、普通将领互动和俘虏将领互动三个世界书均为 `key_region=2`、`enable=true`、`probability=100`。
 - 保存接口 HTTP 200，随后导出接口 HTTP 200；上述七项逐一比对全部通过。
 - 具体操作和平台字段经验见 `docs/aiero-creation-page-save-experience.md`。

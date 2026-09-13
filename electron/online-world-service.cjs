@@ -26,6 +26,7 @@ const {
   settleWorld,
   applyIntent,
   buildGeneralGenerationRequest,
+  normalizedCharacterTags,
   projectWorldState,
   publicGeneralState
 } = require("./grid-world-game.cjs");
@@ -332,6 +333,8 @@ class OnlineWorldService {
     this.publicGeneralOrders = {};
     this.publicParticipantOrders = {};
     this.worldBookFingerprint = null;
+    this.modelConversationId = "";
+    this.modelRequestQueue = Promise.resolve();
     this.pollTimer = null;
     this.mapFactsCache = null;
   }
@@ -387,6 +390,7 @@ class OnlineWorldService {
         startedAt: this.control.startedAt
       } : null,
       world: projection,
+      localPreferences: cloneJson(this.localPreferences),
       mapFacts: projection ? this.mapFactsCache : [],
       directInbox: this.directInbox.slice(-100),
       programHtml: this.program?.html || null,
@@ -494,6 +498,7 @@ class OnlineWorldService {
       publicCellOrders: this.publicCellOrders,
       publicGeneralOrders: this.publicGeneralOrders,
       publicParticipantOrders: this.publicParticipantOrders,
+      modelConversationId: this.modelConversationId,
       directInbox: this.directInbox.slice(-100),
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
@@ -566,6 +571,7 @@ class OnlineWorldService {
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
+    this.modelConversationId = String(cached?.modelConversationId || "").trim().slice(0, 200);
     this.localPreferences = {
       orientation: ["men", "women", "any"].includes(cached?.localPreferences?.orientation)
         ? cached.localPreferences.orientation
@@ -794,6 +800,7 @@ class OnlineWorldService {
     this.directInbox = [];
     this.seenDirectMessageIds.clear();
     this.worldBookFingerprint = null;
+    this.modelConversationId = "";
   }
 
   applyAuthorityDirective(item) {
@@ -967,15 +974,24 @@ class OnlineWorldService {
     const account = this.account();
     if (this.world?.bans?.[account.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，所有游戏操作均会被忽略");
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
+    const previousPreferences = cloneJson(this.localPreferences);
     if (normalized.type === "join") {
       const orientation = ["men", "women", "any"].includes(normalized.orientation) ? normalized.orientation : this.pendingJoin?.orientation;
       this.localPreferences.orientation = orientation;
       this.localPreferences.characterProfileId = String(normalized.characterProfileId || "").slice(0, 100);
-      this.localPreferences.characterTags = Array.isArray(normalized.characterTags) ? [...new Set(normalized.characterTags.map(String).filter(Boolean))].slice(0, 80) : [];
+      this.localPreferences.characterTags = normalizedCharacterTags(normalized.characterTags);
       this.localPreferences.initialGeneralWish = String(normalized.initialGeneralWish || "").slice(0, 500);
       normalized.orientation = orientation;
     }
-    return this.applyLocalIntent(normalized, account.accountId);
+    try {
+      return await this.applyLocalIntent(normalized, account.accountId, { rollbackPreferences: normalized.type === "join" ? previousPreferences : null });
+    } catch (error) {
+      if (normalized.type === "join") {
+        this.localPreferences = previousPreferences;
+        this.saveCache();
+      }
+      throw error;
+    }
   }
 
   sanitizedEvent(event) {
@@ -1018,7 +1034,7 @@ class OnlineWorldService {
     return record;
   }
 
-  async applyLocalIntent(intent, actorAccountId) {
+  async applyLocalIntent(intent, actorAccountId, options = {}) {
     if (String(actorAccountId) !== this.account().accountId) throw new Error("只能在本机执行当前玩家的行动");
     const identity = await this.getIdentity();
     const actionTime = this.now();
@@ -1033,17 +1049,33 @@ class OnlineWorldService {
       player.deviceEncryptionPublicKey = identity.encryptionPublicKey;
     }
     const localEvent = this.sanitizedEvent(outcome.event);
+    const localEventStart = this.localEvents.length;
     this.recordLocalEvent(localEvent);
-    await this.handleWorldBookTransition(intent, outcome, actorAccountId);
-    const changes = createPublicMapChanges(beforeWorld, this.world);
-    const mapDelta = await this.publishMapChanges(changes, identity);
-    let dialogue = null;
-    if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
-    await this.handleEffects(outcome.effects, identity);
-    if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
-    this.saveCache();
-    this.notify();
-    return { event: localEvent, mapDelta, effects: outcome.effects, dialogue, state: this.state() };
+    try {
+      await this.handleWorldBookTransition(intent, outcome, actorAccountId);
+      let dialogue = null;
+      if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
+      // A join is committed only after its initial general has been returned
+      // and validated by the companion model.
+      if (intent.type === "join") await this.handleEffects(outcome.effects, identity);
+      const changes = createPublicMapChanges(beforeWorld, this.world);
+      const mapDelta = await this.publishMapChanges(changes, identity);
+      if (intent.type !== "join") await this.handleEffects(outcome.effects, identity);
+      if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
+      this.saveCache();
+      this.notify();
+      return { event: localEvent, mapDelta, effects: outcome.effects, dialogue, state: this.state() };
+    } catch (error) {
+      if (intent.type === "join") {
+        this.world = beforeWorld;
+        if (options.rollbackPreferences) this.localPreferences = cloneJson(options.rollbackPreferences);
+        this.localEvents.splice(localEventStart);
+        this.worldBookFingerprint = null;
+        this.saveCache();
+        this.notify();
+      }
+      throw error;
+    }
   }
 
   async settleLocalClock() {
@@ -1071,6 +1103,41 @@ class OnlineWorldService {
     await this.handleEffects(settled.effects, identity);
     this.saveCache();
     return settled.effects;
+  }
+
+  async updateLocalPreferences(value = {}) {
+    if (!this.world || !this.control) throw new Error("请先进入在线游戏世界");
+    const accountId = this.account().accountId;
+    if (!accountId) throw new Error("请先登录风月账号");
+    if (this.world.bans?.[accountId]?.banned) throw new Error("该风月账号已被服主封禁");
+    const orientation = ["men", "women", "any"].includes(String(value.orientation || "")) ? String(value.orientation) : this.localPreferences.orientation;
+    const characterTags = normalizedCharacterTags(value.characterTags ?? this.localPreferences.characterTags);
+    if (!characterTags.length) throw new Error("请至少添加一个性癖标签");
+    this.localPreferences.orientation = orientation;
+    this.localPreferences.characterTags = characterTags;
+    if (this.world.privatePlayers?.[accountId]) {
+      this.world.privatePlayers[accountId].orientation = orientation;
+      this.world.privatePlayers[accountId].characterTags = [...characterTags];
+    }
+    this.saveCache();
+    this.notify();
+    return this.state();
+  }
+
+  async requestStructuredModel(request, { attempts = 2, label = "模型请求" } = {}) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+      try {
+        const answer = await this.requestModel(request);
+        const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
+        if (conversationId) this.modelConversationId = conversationId.slice(0, 200);
+        return parseJsonAnswer(answer?.answer ?? answer);
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
+      }
+    }
+    throw new Error(`${label}未返回有效结构化结果：${lastError?.message || String(lastError || "未知错误")}`);
   }
 
   async administer(command = {}) {
@@ -1144,26 +1211,23 @@ class OnlineWorldService {
     for (const effect of effects || []) {
       if (effect.type !== "general-generation-request") continue;
       const request = buildGeneralGenerationRequest(this.world, effect, crypto.randomUUID());
-      let parsed;
-      try {
-        const answer = await this.requestModel(request);
-        parsed = parseJsonAnswer(answer?.answer ?? answer);
-      } catch (error) {
-        if (!effect.initial) throw error;
-        parsed = { name: effect.gender === "female" ? "初识女将" : "初识良将", power: 300, setting: String(effect.initialWish || "乱世之中与玩家相遇的可靠良将。") };
+      const parsed = await this.requestStructuredModel(request, { attempts: effect.initial ? 3 : 2, label: effect.initial ? "初始将领生成" : "将领生成" });
+      const name = String(parsed?.name || "").trim();
+      const setting = String(parsed?.setting || "").trim();
+      const gender = String(parsed?.gender || "").toLowerCase();
+      const power = Number(parsed?.power);
+      if (!name || name.length > 24 || !setting || setting.length > 1000 || !["male", "female"].includes(gender) || gender !== effect.gender || !Number.isInteger(power) || power < 100 || power > 5000) {
+        throw new Error("模型返回的将领设定不完整或不符合性别、战力格式");
       }
-      let setting = String(parsed.setting || "").trim().slice(0, 1000);
-      if (!setting && effect.initial) setting = String(effect.initialWish || "乱世之中与玩家相遇的可靠良将。").slice(0, 1000);
-      if (!setting) throw new Error("将领生成结果缺少设定");
       await this.applyLocalIntent({
         type: "grant-general",
         generalId: crypto.randomUUID(),
         discoveryId: request.idempotencyKey,
-        name: String(parsed.name || "无名将领").slice(0, 24),
-        gender: effect.gender,
+        name: name.slice(0, 24),
+        gender,
         location: { x: effect.x, y: effect.y },
         setting,
-        power: Math.max(100, Math.min(5000, Number(parsed.power) || 300)),
+        power,
         initial: Boolean(effect.initial),
         idempotencyKey: `general:${request.idempotencyKey}`
       }, effect.accountId);
@@ -1172,9 +1236,9 @@ class OnlineWorldService {
 
   async completeDialogue(request, actorAccountId, intent) {
     const general = this.world.generals?.[intent.generalId];
-    const answer = await this.requestModelWithGeneralWorldBook(request, general);
-    const parsed = parseJsonAnswer(answer?.answer ?? answer);
+    const parsed = await this.requestModelWithGeneralWorldBook(request, general);
     const reply = String(parsed.reply || "").trim().slice(0, 2000);
+    if (!reply) throw new Error("将领互动未返回有效回答");
     await this.applyLocalIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, userText: intent.topic, reply, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId);
     const command = parsed.command && typeof parsed.command === "object" ? parsed.command : null;
     let commandResult = null;
@@ -1187,17 +1251,33 @@ class OnlineWorldService {
   }
 
   async requestModelWithGeneralWorldBook(request, general) {
-    if (!general) return this.requestModel(request);
-    const payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}`, { timeout: 15000 });
+    if (!general) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    // Per-player world books belong to the current platform conversation. If
+    // the first request has not created one yet, the structured input still
+    // carries the complete general context and establishes that conversation.
+    const conversationId = String(this.modelConversationId || "").trim();
+    if (!conversationId) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    let payload;
+    try {
+      payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
+    } catch {
+      return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    }
     const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
     const original = Array.isArray(config.world_book) ? config.world_book : [];
     const marker = `FYOW_GENERAL:${general.id}`;
-    if (original.some(entry => String(entry?.value || "").includes(marker))) return this.requestModel(request);
-    await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, world_book: [...original, this.generalWorldBookEntry(general)] }, timeout: 15000 });
+    if (original.some(entry => String(entry?.value || "").includes(marker))) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    let applied = false;
     try {
-      return await this.requestModel(request);
+      await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: [...original, this.generalWorldBookEntry(general)] }, timeout: 15000 });
+      applied = true;
+    } catch {
+      return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    }
+    try {
+      return await this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
     } finally {
-      await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, world_book: original }, timeout: 15000 }).catch(() => {});
+      if (applied) await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: original }, timeout: 15000 }).catch(() => {});
     }
   }
 
@@ -1231,18 +1311,20 @@ class OnlineWorldService {
 
   async reconcileOwnGeneralWorldBooks() {
     if (!this.world || !this.work) return;
+    const conversationId = String(this.modelConversationId || "").trim();
+    if (!conversationId) return;
     const accountId = this.account().accountId;
     const player = this.world.players?.[accountId];
     if (!player) return;
     const desired = (player.carriedGeneralIds || []).map(id => this.world.generals?.[id]).filter(Boolean);
     const fingerprint = sha256(Buffer.from(canonicalJson(desired.map(general => ({ id: general.id, name: general.name, setting: general.setting, memoryText: general.memoryText })))))
     if (fingerprint === this.worldBookFingerprint) return;
-    const payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}`, { timeout: 15000 });
+    const payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
     const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
     const worldBook = (Array.isArray(config.world_book) ? config.world_book : []).filter(entry => !String(entry?.value || "").includes("FYOW_GENERAL:"));
     worldBook.push(...desired.map(general => this.generalWorldBookEntry(general)));
-    await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, world_book: worldBook }, timeout: 15000 });
-    const verifiedPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}`, { timeout: 15000 });
+    await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: worldBook }, timeout: 15000 });
+    const verifiedPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
     const verified = verifiedPayload?.data?.data ?? verifiedPayload?.data ?? verifiedPayload ?? {};
     const persisted = new Set((Array.isArray(verified.world_book) ? verified.world_book : []).map(entry => String(entry?.value || "").match(/FYOW_GENERAL:([^\s]+)/)?.[1]).filter(Boolean));
     if (persisted.size !== desired.length || desired.some(general => !persisted.has(String(general.id)))) throw new Error("将领世界书保存后校验失败");

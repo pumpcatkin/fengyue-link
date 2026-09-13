@@ -31,7 +31,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.generate:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：根据输入 JSON 生成一名乱世将领。gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为不超过 1000 个汉字的完整人物设定，包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，只采用 initialWish，不采用 directionTags；为 discovered-general 时，将 1～3 个 directionTags 全部自然融入人物，禁止更改要求性别。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"power\":300,\"setting\":\"人物设定\"}",
+      value: "任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象；gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为不超过 1000 个汉字的完整人物设定，包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，只采用 orientation、gender 和 initialWish，不采用 directionTags；为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物，禁止更改要求性别。模型返回缺少 name、gender、power 或完整 setting 时视为失败，不得用占位内容代替。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"power\":300,\"setting\":\"人物设定\"}",
       value_configs: [], value_region: 1, sort: 0, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -40,7 +40,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker、topic 和 gameYear。reply 应符合人物与关系；memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。\n输出 Schema：{\"reply\":\"将领回答\",\"memoryTopic\":\"谈话主题摘要\",\"intimacyDelta\":1,\"command\":null|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
+      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合人物与关系且不能为空；memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。\n输出 Schema：{\"reply\":\"将领回答\",\"memoryTopic\":\"谈话主题摘要\",\"intimacyDelta\":1,\"command\":null|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 1, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -49,7 +49,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.captive-dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度和当前主公。通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。不得输出其他游戏操作。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"memoryTopic\":\"互动摘要\",\"intimacyDelta\":1,\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
+      value: "任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度和当前主公。必须只返回一个完整 JSON 对象；reply 应符合人物与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。不得输出其他游戏操作。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"memoryTopic\":\"互动摘要\",\"intimacyDelta\":1,\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"toAccountId\":\"历任主公账号\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 2, depth: 0, probability: 100, enable: true
     })
   ])
@@ -147,7 +147,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 6,
+    version: 7,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null

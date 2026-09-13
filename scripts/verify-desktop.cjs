@@ -52,7 +52,7 @@ if (process.type === "renderer") {
     };
     if (name === "listDomains" || name === "listDomainCandidates") return domains;
     if (name === "getLogs") return [];
-    if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 6, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd" }], activeCardId: null };
+    if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 7, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd" }], activeCardId: null };
     if (name === "getOnlineWorldState") return { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "setOrigin") return state;
     if (name === "confirmAction") return true;

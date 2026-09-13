@@ -20,7 +20,8 @@ let generalDetailId = null;
 let dialogueGeneralId = null;
 let joinStep = 0;
 let joinSubmitting = false;
-const joinDraft = { profileId: "", orientation: "any", tags: new Set(), wish: "" };
+const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: "" };
+const preferenceDraft = { orientation: "any", tags: new Map() };
 
 function host(type, data = {}) { parent.postMessage({ source: "fyow-grid-conquest", type, ...data }, "*"); }
 function ownAccountId() { return String(payload?.account?.accountId || ""); }
@@ -158,6 +159,7 @@ function renderClock() {
 }
 function renderPlayer() {
   const player = ownPlayer();
+  document.querySelector("#edit-preferences").disabled = !player;
   document.querySelector("#player-name").textContent = player?.displayName || "尚未加入";
   document.querySelector("#gold").textContent = `${formatNumber(player?.gold)} 金币`;
   const cells = Object.values(payload?.world?.cells || {}).filter(cell => cell.ownerAccountId === ownAccountId());
@@ -202,7 +204,7 @@ function generalCard(general, mode) {
   const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(general.power)}`;
   line.append(name, power);
   const note = document.createElement("small");
-  note.textContent = mode === "captive" ? `原主：${general.loyalToAccountId || general.capturedFromAccountId || "未知"}` : general.status === "waiting" ? `留置于 ${general.location?.x},${general.location?.y}` : "随行中";
+  note.textContent = mode === "captive" ? `原主：${accountLabel(general.loyalToAccountId || general.capturedFromAccountId)}` : general.status === "waiting" ? `留置于 ${general.location?.x},${general.location?.y}` : "随行中";
   const buttons = document.createElement("div"); buttons.className = "buttons";
   buttons.append(makeButton("详情", () => openGeneral(general.id)));
   if (canInteract(general)) buttons.append(makeButton("交互", () => openDialogue(general.id), "primary"));
@@ -324,7 +326,7 @@ function renderInbox() {
   [...inbox].reverse().forEach(item => {
     const node = document.createElement("article"); node.className = "direct-message";
     const line = document.createElement("div");
-    const sender = document.createElement("b"); sender.textContent = item.payload?.generalName ? `${item.payload.generalName} · 来自 ${item.fromAccountId}` : `来自 ${item.fromAccountId}`;
+    const sender = document.createElement("b"); sender.textContent = item.payload?.generalName ? `${item.payload.generalName} · 来自 ${accountLabel(item.fromAccountId)}` : `来自 ${accountLabel(item.fromAccountId)}`;
     const time = document.createElement("time"); time.textContent = new Date(item.createdAt || Date.now()).toLocaleString("zh-CN");
     const text = document.createElement("p"); text.textContent = item.payload?.text || "";
     line.append(sender, time); node.append(line, text); target.append(node);
@@ -335,14 +337,14 @@ function ownerPlayerEntries() {
   const entries = new Map();
   for (const [accountId, player] of Object.entries(payload?.world?.players || {})) entries.set(accountId, {
     accountId,
-    displayName: player.displayName || accountId,
-    accountName: player.accountName || accountId,
+    displayName: player.displayName || "未设置玩家名",
+    accountName: player.accountName || "未设置昵称",
     banned: Boolean(payload?.world?.bans?.[accountId]?.banned)
   });
   for (const [accountId, ban] of Object.entries(payload?.world?.bans || {})) entries.set(accountId, {
     accountId,
-    displayName: entries.get(accountId)?.displayName || ban.displayName || accountId,
-    accountName: entries.get(accountId)?.accountName || ban.accountName || accountId,
+    displayName: entries.get(accountId)?.displayName || ban.displayName || "未设置玩家名",
+    accountName: entries.get(accountId)?.accountName || ban.accountName || "未设置昵称",
     banned: Boolean(ban.banned)
   });
   return [...entries.values()].sort((left, right) => left.displayName.localeCompare(right.displayName, "zh-CN"));
@@ -355,7 +357,7 @@ function fillOwnerPlayerSelect(selector, entries) {
   for (const item of entries) {
     const option = document.createElement("option");
     option.value = item.accountId;
-    option.textContent = `${item.displayName} · 风月账号 ${item.accountName} · ${item.accountId}`;
+    option.textContent = `${item.displayName} · 风月昵称 ${item.accountName}`;
     option.dataset.banned = item.banned ? "true" : "false";
     select.append(option);
   }
@@ -367,7 +369,7 @@ function renderOwnerCommands() {
   const owner = Boolean(payload?.isServerOwner);
   document.querySelector("#owner-command-toggle").classList.toggle("hidden", !owner);
   document.querySelector("#owner-account").textContent = owner
-    ? `服主：${payload?.serverOwnerName || payload?.account?.username || "作品作者"} · ${ownAccountId()}`
+    ? `服主：${payload?.serverOwnerName || payload?.account?.username || "作品作者"}`
     : "";
   document.querySelector("#owner-server-status").textContent = payload?.initialized ? "已开服 · 后台静默同步" : "尚未开服";
   document.querySelector("#owner-open-server").disabled = !owner || Boolean(payload?.initialized);
@@ -397,7 +399,11 @@ function renderOwnerCommands() {
 }
 
 function accountLabel(accountId) {
-  return payload?.world?.players?.[accountId]?.displayName ? `${payload.world.players[accountId].displayName}（${accountId}）` : accountId || "未知";
+  const id = String(accountId || "");
+  return payload?.world?.players?.[id]?.displayName || payload?.world?.bans?.[id]?.displayName || "某位主公";
+}
+function redactAccountIds(text) {
+  return String(text || "").replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, id => accountLabel(id));
 }
 function openGeneral(id) {
   generalDetailId = id;
@@ -407,7 +413,7 @@ function openGeneral(id) {
   document.querySelector("#general-name").textContent = general.name;
   document.querySelector("#general-power").textContent = formatNumber(general.power);
   document.querySelector("#general-holder").textContent = accountLabel(general.holderAccountId);
-  document.querySelector("#general-setting").textContent = general.setting || "暂无设定";
+  document.querySelector("#general-setting").textContent = redactAccountIds(general.setting || "暂无设定");
   const service = document.querySelector("#general-service-history"); service.replaceChildren();
   const records = [
     ...(general.masterHistory || []).map(item => `[${item.fromYear}年${item.toYear == null ? "至今" : "—" + item.toYear + "年"}] 主公：${accountLabel(item.accountId)}（${item.reason || "效忠"}）`),
@@ -417,10 +423,10 @@ function openGeneral(id) {
   else records.forEach(text => { const p = document.createElement("p"); p.textContent = text; service.append(p); });
   const history = document.querySelector("#general-history"); history.replaceChildren();
   const interactions = general.interactionHistory || [];
-  if (!interactions.length) history.textContent = general.memoryText || "暂无互动记录";
+  if (!interactions.length) history.textContent = redactAccountIds(general.memoryText || "暂无互动记录");
   else interactions.forEach(item => {
     const p = document.createElement("p");
-    p.textContent = `[${item.year}年] ${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}\n${general.name}：${item.reply || "—"}`;
+    p.textContent = redactAccountIds(`[${item.year}年] ${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}\n${general.name}：${item.reply || "—"}`);
     history.append(p);
   });
   document.querySelector("#general-interact").classList.toggle("hidden", !canInteract(general));
@@ -436,8 +442,8 @@ function renderDialogue() {
   const lines = general.interactionHistory || [];
   if (!lines.length) { const p = document.createElement("p"); p.textContent = "尚无对话记录。"; history.append(p); }
   else lines.forEach(item => {
-    const user = document.createElement("p"); user.className = "user"; user.textContent = `${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}`;
-    const reply = document.createElement("p"); reply.textContent = `${general.name}：${item.reply || "—"}`;
+    const user = document.createElement("p"); user.className = "user"; user.textContent = redactAccountIds(`${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}`);
+    const reply = document.createElement("p"); reply.textContent = redactAccountIds(`${general.name}：${item.reply || "—"}`);
     history.append(user, reply);
   });
   history.scrollTop = history.scrollHeight;
@@ -481,28 +487,74 @@ function renderProfileOptions() {
     text.append(title, description); label.append(input, text); target.append(label);
   });
 }
-function renderTagOptions() {
-  const search = document.querySelector("#tag-search").value.trim().toLowerCase();
-  const category = document.querySelector("#tag-category").value;
-  const options = document.querySelector("#tag-options"); options.replaceChildren();
+function parseTagEntry(item) {
+  if (item && typeof item === "object" && !Array.isArray(item)) return { tag: String(item.tag ?? item.name ?? item.label ?? "").trim(), note: String(item.note ?? item.annotation ?? "").trim() };
+  const raw = String(item || "").trim();
+  const divider = raw.indexOf("｜");
+  return { tag: (divider < 0 ? raw : raw.slice(0, divider)).trim(), note: divider < 0 ? "" : raw.slice(divider + 1).trim() };
+}
+function mapTags(value) {
+  const result = new Map();
+  for (const item of Array.isArray(value) ? value : []) {
+    const parsed = parseTagEntry(item);
+    if (parsed.tag) result.set(parsed.tag.slice(0, 40), parsed.note.slice(0, 160));
+  }
+  return result;
+}
+function tagPayload(tags) {
+  return [...tags.entries()].map(([tag, note]) => ({ tag, note }));
+}
+function renderTagEditor(target, tags, referenceTarget = null) {
+  target.replaceChildren();
+  if (!tags.size) { target.textContent = "尚未添加标签"; target.classList.add("empty"); }
+  else {
+    target.classList.remove("empty");
+    for (const [tag, note] of tags.entries()) {
+      const row = document.createElement("div"); row.className = "selected-tag-row";
+      const title = document.createElement("b"); title.textContent = tag;
+      const input = document.createElement("input"); input.type = "text"; input.maxLength = 160; input.placeholder = "给这个标签添加注释（可选）"; input.value = note;
+      input.addEventListener("input", () => tags.set(tag, input.value.trim().slice(0, 160)));
+      const remove = makeButton("移除", () => { tags.delete(tag); renderTagEditor(target, tags, referenceTarget); if (referenceTarget) renderReferenceTags(referenceTarget, tags); });
+      row.append(title, input, remove); target.append(row);
+    }
+  }
+  if (referenceTarget) renderReferenceTags(referenceTarget, tags, `#${target.id}`);
+}
+function renderReferenceTags(options, selectedTags, targetSelector = "#selected-tags") {
+  const search = options.id === "preference-tag-options" ? "" : document.querySelector("#tag-search").value.trim().toLowerCase();
+  const category = options.id === "preference-tag-options" ? "" : document.querySelector("#tag-category").value;
+  options.replaceChildren();
   tagCatalog.filter(item => (!category || item.category === category) && (!search || item.name.toLowerCase().includes(search))).forEach(item => {
     const button = makeButton(item.name, () => {
-      if (joinDraft.tags.has(item.name)) joinDraft.tags.delete(item.name); else joinDraft.tags.add(item.name);
-      renderTagOptions();
+      if (selectedTags.has(item.name)) selectedTags.delete(item.name); else selectedTags.set(item.name, "");
+      renderTagEditor(document.querySelector(targetSelector), selectedTags, options);
     });
-    button.classList.toggle("selected", joinDraft.tags.has(item.name));
+    button.classList.toggle("selected", selectedTags.has(item.name));
     button.title = item.category;
     options.append(button);
   });
-  const selectedTags = document.querySelector("#selected-tags"); selectedTags.replaceChildren();
-  joinDraft.tags.forEach(tag => selectedTags.append(makeButton(`${tag} ×`, () => { joinDraft.tags.delete(tag); renderTagOptions(); })));
-  document.querySelector("#tag-count").textContent = `已选 ${joinDraft.tags.size} / 至少 8`;
+}
+function renderTagOptions() {
+  const options = document.querySelector("#tag-options");
+  renderTagEditor(document.querySelector("#selected-tags"), joinDraft.tags, options);
+  document.querySelector("#tag-count").textContent = `已添加 ${joinDraft.tags.size} 个`;
+}
+function renderPreferenceTags() {
+  const target = document.querySelector("#preference-tags");
+  renderTagEditor(target, preferenceDraft.tags, document.querySelector("#preference-tag-options"));
+  document.querySelectorAll('input[name="preference-orientation"]').forEach(input => { input.checked = input.value === preferenceDraft.orientation; });
+}
+function openPreferences() {
+  preferenceDraft.orientation = payload?.localPreferences?.orientation || "any";
+  preferenceDraft.tags = mapTags(payload?.localPreferences?.characterTags);
+  renderPreferenceTags();
+  document.querySelector("#preferences-modal").classList.remove("hidden");
 }
 function renderJoinWizard() {
   const questions = [
     ["第一问 · 1 / 4", "选择角色设定作为游戏角色？", "绑定后无法修改。"],
     ["第二问 · 2 / 4", "选择性取向", "这会影响游戏内发现的将领性别。"],
-    ["第三问 · 3 / 4", "选择人物设定标签", "至少选择 8 个；每次发掘将领时只抽取其中 1～3 个作为生成方向。"],
+    ["第三问 · 3 / 4", "添加标签", "请填写自己的性癖。标签大全仅供参考；每次发掘将领时会从你的标签中抽取 1～3 个方向。"],
     ["第四问 · 4 / 4", "开疆扩土前，你会想要遇到一名怎样的良将？", "此题脱离词条，只保留性取向，并直接生成你的初始将领。"]
   ];
   document.querySelector("#join-progress").textContent = questions[joinStep][0];
@@ -514,7 +566,10 @@ function renderJoinWizard() {
   next.textContent = joinSubmitting ? "正在生成初始将领…" : joinStep === 3 ? "踏入疆土" : "下一问";
   next.disabled = joinSubmitting;
   if (joinStep === 0) renderProfileOptions();
-  if (joinStep === 2) renderTagOptions();
+  if (joinStep === 2) {
+    if (!joinDraft.tags.size) joinDraft.tags = mapTags(payload?.localPreferences?.characterTags);
+    renderTagOptions();
+  }
 }
 function validateJoinStep() {
   if (joinStep === 0 && !joinDraft.profileId) return "请选择一份角色设定";
@@ -522,7 +577,7 @@ function validateJoinStep() {
     joinDraft.orientation = document.querySelector('input[name="orientation"]:checked')?.value || "";
     if (!joinDraft.orientation) return "请选择性取向";
   }
-  if (joinStep === 2 && joinDraft.tags.size < 8) return "请至少选择 8 个词条";
+  if (joinStep === 2 && joinDraft.tags.size < 1) return "请至少添加一个性癖标签";
   if (joinStep === 3) {
     joinDraft.wish = document.querySelector("#initial-general-wish").value.trim();
     if (!joinDraft.wish) return "请描述你想遇到的初始良将";
@@ -542,13 +597,33 @@ document.querySelector("#join-next").addEventListener("click", () => {
     type: "join",
     characterProfileId: joinDraft.profileId,
     orientation: joinDraft.orientation,
-    characterTags: [...joinDraft.tags],
+    characterTags: tagPayload(joinDraft.tags),
     initialGeneralWish: joinDraft.wish
   });
 });
 document.querySelector("#join-prev").addEventListener("click", () => { if (joinStep > 0) { joinStep -= 1; renderJoinWizard(); } });
 document.querySelector("#tag-search").addEventListener("input", renderTagOptions);
 document.querySelector("#tag-category").addEventListener("change", renderTagOptions);
+document.querySelector("#add-custom-tag").addEventListener("click", () => {
+  const input = document.querySelector("#custom-tag-input");
+  const tag = input.value.trim().slice(0, 40);
+  if (!tag) return;
+  joinDraft.tags.set(tag, joinDraft.tags.get(tag) || ""); input.value = ""; renderTagOptions();
+});
+document.querySelector("#edit-preferences").addEventListener("click", openPreferences);
+document.querySelector("#close-preferences").addEventListener("click", () => document.querySelector("#preferences-modal").classList.add("hidden"));
+document.querySelectorAll('input[name="preference-orientation"]').forEach(input => input.addEventListener("change", () => { preferenceDraft.orientation = input.value; }));
+document.querySelector("#add-preference-tag").addEventListener("click", () => {
+  const input = document.querySelector("#preference-tag-input");
+  const tag = input.value.trim().slice(0, 40);
+  if (!tag) return;
+  preferenceDraft.tags.set(tag, preferenceDraft.tags.get(tag) || ""); input.value = ""; renderPreferenceTags();
+});
+document.querySelector("#preferences-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (!preferenceDraft.tags.size) { showToast("请至少添加一个性癖标签"); return; }
+  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } });
+});
 for (const category of [...new Set(tagCatalog.map(item => item.category))]) {
   const option = document.createElement("option"); option.value = category; option.textContent = category;
   document.querySelector("#tag-category").append(option);
@@ -632,6 +707,13 @@ window.addEventListener("message", event => {
     showToast(event.data.message || "行动失败");
     if (!ownPlayer()) renderJoinWizard();
   } else if (event.data.type === "result") {
+    if (event.data.result?.preferences) {
+      payload = event.data.result.state || payload;
+      document.querySelector("#preferences-modal").classList.add("hidden");
+      renderAll();
+      showToast("性癖偏好已保存");
+      return;
+    }
     const dialogue = event.data.result?.dialogue;
     if (dialogue?.reply) {
       if (dialogue.command?.type === "surrender") showToast(`${allGenerals()[dialogueGeneralId]?.name || "将领"}已经决定降服`);

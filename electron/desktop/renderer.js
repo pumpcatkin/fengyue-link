@@ -1233,7 +1233,7 @@ window.addEventListener("message",async event=>{
       }
       const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
       if(!target)throw new Error("请选择已存在的玩家");
-      const label=`${target.displayName||command.targetAccountId}（风月账号 ${target.accountName||command.targetAccountId}）`;
+      const label=`${target.displayName||"未设置玩家名"}（风月昵称 ${target.accountName||"未设置昵称"}）`;
       const copy=command.type==="player-reset"
         ? {text:`重置 ${label} 的玩家数据？该玩家会被移出本局，下次进入需要重新完成开局流程。`,title:"重置玩家数据",acceptText:"确认重置"}
         : command.type==="player-ban"
@@ -1245,6 +1245,15 @@ window.addEventListener("message",async event=>{
       onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{...result,admin:true}},"*");
       toast(command.type==="player-reset"?"玩家数据已重置":command.type==="player-ban"?"玩家已封禁":"玩家已解除封禁");
     }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+    return;
+  }
+  if(event.data.type==="preferences"){
+    try{
+      const next=await api.updateOnlineWorldPreferences(event.data.preferences||{});
+      renderOnlineWorld(next);
+      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{preferences:true,state:next}} ,"*");
+      toast("性癖偏好已保存在本机");
+    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)} ,"*")}
     return;
   }
   if(event.data.type==="direct"){

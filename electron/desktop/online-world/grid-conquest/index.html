@@ -28,6 +28,7 @@
         <aside>
           <section class="panel player-panel">
             <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
+            <button id="edit-preferences" class="preference-button" type="button">修改性癖偏好</button>
             <div class="metrics"><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
           </section>
 
@@ -86,8 +87,10 @@
           </div>
         </div>
         <div class="join-step hidden" data-step="2">
-          <div class="tag-tools"><input id="tag-search" type="search" placeholder="搜索 ACG 词条"><select id="tag-category"><option value="">全部分类</option></select><b id="tag-count">已选 0 / 至少 8</b></div>
+          <div class="tag-add-row"><label><span>添加标签</span><input id="custom-tag-input" maxlength="40" placeholder="填写你的性癖标签"></label><button id="add-custom-tag" type="button" class="primary">添加</button></div>
+          <div class="tag-tools"><input id="tag-search" type="search" placeholder="搜索参考标签"><select id="tag-category"><option value="">全部分类</option></select><b id="tag-count">已添加 0 个</b></div>
           <div id="selected-tags" class="selected-tags"></div>
+          <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
           <div id="tag-options" class="tag-options"></div>
         </div>
         <div class="join-step hidden" data-step="3">
@@ -96,6 +99,22 @@
           </label>
         </div>
         <footer><button id="join-prev" class="hidden" type="button">上一问</button><span></span><button id="join-next" class="primary" type="button">下一问</button></footer>
+      </form>
+    </section>
+
+    <section id="preferences-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
+      <form id="preferences-form" class="paper-modal preferences-modal">
+        <header><span><small>仅保存在本机</small><h1 id="preferences-title">修改性癖偏好</h1><p>修改后会影响之后发掘的将领，不会改动已经获得的将领。</p></span><button id="close-preferences" type="button">关闭</button></header>
+        <div class="choice-grid orientation-grid preference-orientation">
+          <label><input type="radio" name="preference-orientation" value="women"><span><b>只会遇到女性将领</b></span></label>
+          <label><input type="radio" name="preference-orientation" value="men"><span><b>只会遇到男性将领</b></span></label>
+          <label><input type="radio" name="preference-orientation" value="any"><span><b>不限性别</b></span></label>
+        </div>
+        <div class="tag-add-row"><label><span>添加标签</span><input id="preference-tag-input" maxlength="40" placeholder="填写你的性癖标签"></label><button id="add-preference-tag" type="button" class="primary">添加</button></div>
+        <div id="preference-tags" class="selected-tags"></div>
+        <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
+        <div id="preference-tag-options" class="tag-options"></div>
+        <footer><span></span><button id="save-preferences" class="primary" type="submit">保存偏好</button></footer>
       </form>
     </section>
 
@@ -129,7 +148,7 @@
         </section>
         <section class="owner-command-section">
           <h2>封禁管理</h2>
-          <p>封禁记录由作品作者签名后写入评论区。被封账号无法创建角色，其游戏操作与书信会被所有客户端忽略。</p>
+          <p>封禁记录由作品作者签名后写入评论区。列表仅显示玩家名和风月昵称，被封账号无法创建角色，其游戏操作与书信会被所有客户端忽略。</p>
           <div class="owner-command-row"><select id="owner-ban-player" aria-label="选择需要管理封禁状态的玩家"></select><button id="owner-ban-player-button" class="danger" type="button">封禁玩家</button></div>
           <div id="owner-ban-list" class="owner-ban-list">当前没有封禁账号</div>
         </section>

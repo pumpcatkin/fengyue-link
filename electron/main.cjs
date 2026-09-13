@@ -3513,7 +3513,7 @@ class AccountBackend {
         const response = await fetch('/go/api/apps/chat-messages', {
           method:'POST', credentials:'include', cache:'no-store', signal:controller.signal,
           headers:{Authorization:'Bearer ' + token,'Content-Type':'application/json','X-Language':'zh-Hans'},
-          body:JSON.stringify({app_id:${JSON.stringify(workId)},inputs:{},conversation_id:'',query:${JSON.stringify(query)},response_mode:'streaming',files:[]})
+          body:JSON.stringify({app_id:${JSON.stringify(workId)},inputs:{},conversation_id:${JSON.stringify(String(request.conversationId || ''))},query:${JSON.stringify(query)},response_mode:'streaming',files:[]})
         });
         if (!response.ok) {
           const failure = await response.json().catch(() => ({}));
@@ -9117,6 +9117,7 @@ handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineW
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
 handleLocalIpc("online-world:migrate", () => backend.migrateOnlineWorldCard());
 handleLocalIpc("online-world:administer", (_event, command) => backend.onlineWorldService.administer(command || {}));
+handleLocalIpc("online-world:update-preferences", (_event, preferences) => backend.onlineWorldService.updateLocalPreferences(preferences || {}));
 handleLocalIpc("backend:new-instance", (_event, requested) => {
   backend.assertAdminAccount();
   return new Promise((resolve, reject) => {

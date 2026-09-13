@@ -16,10 +16,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 26,775 个字符，解码后 HTML 82,725 字节，gzip 压缩包 20,018 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 28,966 个字符，解码后 HTML 90,557 字节，gzip 压缩包 21,661 字节，程序 SHA-256：
 
 ```text
-7a09eb87bc1cf2991f9c9029a4831de6da20222c7abff13b4cbf305c128ca40c
+4a84f3b2b639c1e7d2649978cf3070cd2a9467b3f1eb46eff8234120031a6e03
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。
@@ -71,7 +71,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：根据输入 JSON 生成一名乱世将领。gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为不超过 1000 个汉字的完整人物设定，包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，只采用 initialWish，不采用 directionTags；为 discovered-general 时，将 1～3 个 directionTags 全部自然融入人物，禁止更改要求性别。不要替玩家决定行动，不生成游戏数值之外的新规则。
+任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；power 为 100～5000 的整数；setting 为不超过 1000 个汉字的完整人物设定，包含出身、外貌特征、性格、志趣、军事能力、弱点、当前处境及可发展的关系倾向。generationKind 为 initial-general 时，只采用 orientation、gender 和 initialWish，不采用 directionTags；为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物，禁止更改要求性别。缺少完整 setting 时视为失败，不得输出占位内容。不要替玩家决定行动，不生成游戏数值之外的新规则。
 输出 Schema：{"name":"姓名","gender":"male|female","power":300,"setting":"人物设定"}
 ```
 
@@ -120,7 +120,7 @@ parent.postMessage({
     type: "join",
     characterProfileId: "LOCAL_PROFILE_ID",
     orientation: "women",
-    characterTags: ["词条1", "词条2", "词条3", "词条4", "词条5", "词条6", "词条7", "词条8"],
+    characterTags: [{ "tag": "自定义性癖", "note": "可选的单标签注释" }],
     initialGeneralWish: "自由描述初始良将",
     idempotencyKey: crypto.randomUUID()
   }
@@ -138,7 +138,7 @@ parent.postMessage({ source: "fyow-grid-conquest", type: "library" }, "*");
 
 前端可提交：`join`、`start-mining`、`stop-mining`、`train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。授予将领、记录互动和降服属于宿主内部动作。
 
-性取向、至少 8 个已选词条、初始良将描述、金币、行动任务、行军队伍、随行/俘虏将领及本地事件不写评论。普通发掘请求从已选词条中稳定抽取 1～3 个方向；初始将领请求忽略词条，只使用性取向与第四问自由描述。
+性取向、自定义性癖标签及其注释、初始良将描述、金币、行动任务、行军队伍、随行/俘虏将领及本地事件不写评论。普通发掘请求从自定义标签中稳定抽取 1～3 个方向；初始将领请求忽略标签，只使用性取向与第四问自由描述。玩家可以在游戏内“修改性癖偏好”中更新后续生成方向。
 
 评论区只承载格子归属、驻军和部署将领档案。合并顺序只采用平台评论时间戳与评论 ID。每 5 秒后台静默轮询，游戏 UI 没有手动同步按钮或同步频率提示。
 
@@ -177,7 +177,7 @@ parent.postMessage({
 
 1. 创作页保存并回读名称、简介、详细介绍、前置词、主提示词、后置词和三个用户范围世界书。
 2. 作者签名启用新程序摘要；其他玩家只加载控制记录指定的摘要。
-3. 新玩家依次完成角色设定、性取向、至少 8 个词条、初始良将四问，确认角色设定绑定后不再修改。
+3. 新玩家依次完成角色设定、性取向、自定义性癖标签、初始良将四问；角色设定绑定后不再修改，性取向和标签可在游戏内继续编辑。
 4. 确认同格第二项并列练兵被拒绝；滚轮缩放和右键拖动地图正常。
 5. 确认评论区只新增领地/驻军/部署将领档案，没有性取向、词条、行动请求或本地行动事件。
 6. 部署、召回、被俘、降服各执行一次，核对双方将领可见性、完整历任主公记录和部署档案的评论恢复。

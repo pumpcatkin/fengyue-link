@@ -26,7 +26,7 @@
 
 ### 1.1 游戏卡整包格式
 
-当前固定格式是 `fyow.game-card/1`。整包至少包含 `cardId`、`gameId`、版本、唯一伴生作品的 `origin/workId/installedUrl/configurationUrl`、完整创作页配置快照、程序摘要、配置摘要和整包摘要。导入时按以下顺序拒绝不一致内容：整包 Schema → 卡与游戏编号 → HTTPS 作品来源 → 作品 ID 与配置 `app.id` → 配置 SHA-256 → 详细介绍程序信封 → `gameId`/宿主 API/程序摘要 → 整包 SHA-256。
+当前固定格式是 `fyow.game-card/1`。整包至少包含 `cardId`、`gameId`、版本、唯一伴生作品的 `origin/workId/installedUrl/configurationUrl/authorAccountId`、完整创作页配置快照、程序摘要、配置摘要和整包摘要。导入时按以下顺序拒绝不一致内容：整包 Schema → 卡与游戏编号 → HTTPS 作品来源 → 作品 ID 与配置 `app.id` → 作者账号声明与平台 `created_by_account_id` → 配置 SHA-256 → 详细介绍程序信封 → `gameId`/宿主 API/程序摘要 → 整包 SHA-256。
 
 导出由作品作者在已打开游戏卡中执行。工具实时调用 `model-config/export` 回读创作页，而不是把本地模板冒充远端内容；生成的 `.fyow-card.json` 因而同时是可导入卡包和伴生作品配置备份。卡包只含公开的创作配置，不含账号令牌、Cookie、密码、设备私钥或玩家私人数据。
 
@@ -236,7 +236,7 @@ SSE 解析器至少处理 `message`、`agent_message`、`message_end`、`message
 }
 ```
 
-变更记录本身不携带可由客户端伪造的行动时间。宿主使用评论接口返回的 `created_at` 作为唯一公共顺序；时间戳完全相同才用评论 ID 做稳定次序。客户端对每个格子和已部署将领分别记录最后一次已应用顺序，因此迟到的旧评论不会覆盖新领地，无关格子的迟到评论仍能补齐。初始和迁移快照只包含公共格子、公开参与者通讯密钥及已部署将领，不含其他玩家位置、加入时间、金币、队列或随行将领。
+变更记录本身不携带可由客户端伪造的行动时间。宿主使用评论接口返回的 `created_at` 作为唯一公共顺序；时间戳完全相同才用评论 ID 做稳定次序。客户端对每个格子和已部署将领分别记录最后一次已应用顺序，因此迟到的旧评论不会覆盖新领地，无关格子的迟到评论仍能补齐。每条玩家地图记录还携带服务端公共状态中的 `playerEpoch`；服主重置玩家时世代号递增，旧世代评论永久失效。初始、迁移和压缩快照只包含公共格子、公开参与者通讯密钥、封禁状态、玩家世代号及已部署将领，不含其他玩家位置、加入时间、金币、队列或随行将领。在线服主每观察到 32 条地图增量会自动发布覆盖快照，任何玩家重置/封禁/解封后也立即发布；读取端组装出最新完整快照后停止向旧页翻页。
 
 ### 4.2 私人数据：工具本地存档
 
@@ -271,6 +271,17 @@ SSE 解析器至少处理 `message`、`agent_message`、`message_end`、`message
 平台私信物理上属于账号聊天系统，不属于作品评论树。用 `workId/seasonId/gameId` 绑定后，它在逻辑上属于这一局；如果“所有字节必须在作品内”是硬约束，就把信封改为评论区公开密文，并接受旁观者可见密文和更高评论量。
 
 私信不得直接改变公开地图。任何领地变化都必须另行发布签名地图变更，私信内容本身不参与地图归并。
+
+### 4.4 伴生作品作者服主指令
+
+每张游戏卡的 `companion.authorAccountId` 是作者账号绑定；宿主打开卡后再次读取作品 `created_by_account_id`，只有两者相同的账号才显示游戏内左上角“服主指令”。服主指令统一经过作者密钥签名并写入 `fyow.authority/1`：
+
+- `open-server`：创建赛季控制记录和公共快照；未开服时作者可进入游戏壳层直接操作，普通玩家停留在游戏库。
+- `migrate-server`：迁移并重置服务器，完整复制创作页配置与公共快照，在旧作品留下定向迁移记录。
+- `player-reset`：从当前或历史玩家中选取目标（包括作者自己），清除领地、部署档案、本地私有数据并递增 `playerEpoch`；旧记录和旧缓存均被视为废弃，目标下次进入必须重新回答四问。
+- `player-ban` / `player-unban`：显示玩家名、风月账号名和风月账号 ID，封禁/解封状态公开写入作者快照。封禁期间该账号不能创建角色，所有地图操作、指令和私信唤醒由其他客户端忽略；解封不会自动恢复被重置的数据。
+
+宿主接收游戏卡前端的 `type: "admin"` 消息，负责确认窗口、作者身份、签名、评论上传和结果回传。游戏卡不得在前端自行判断作者或直接调用平台 Token。
 
 ## 5. 作弊边界与减轻方式
 
@@ -416,12 +427,12 @@ SDK 不暴露通用 `fetch`、`ipcRenderer`、文件路径、Token、Cookie、�
 | 部分 | 当前文件 | 状态 |
 |---|---|---|
 | 程序信封与强制沙箱 CSP | `electron/online-world-runtime.cjs` | 已实现并有摘要/类型/大小/断网测试 |
-| FYOW/3 评论分片、重组、签名 | `electron/online-world-protocol.cjs` | 已实现，单条硬限制 1000 字符 |
+| FYOW/3 评论分片、重组、签名 | `electron/online-world-protocol.cjs` | 已实现，单条硬限制 1000 字符；含作者管理记录 `fyow.authority/1` |
 | 玩家设备加密身份 | `electron/online-world-crypto.cjs` | Ed25519 + X25519/HKDF/AES-256-GCM |
 | 评论分页、地图增量归并、私信唤醒 | `electron/online-world-service.cjs` | 已实现本地与模拟平台测试 |
-| 游戏卡整包、固定作品绑定与摘要校验 | `electron/online-world-card.cjs` | 已实现内置卡、导入/导出、配置快照与迁移重绑定 |
+| 游戏卡整包、固定作品/作者绑定与摘要校验 | `electron/online-world-card.cjs` | 已实现内置卡、导入/导出、配置快照、作者回读匹配与迁移重绑定 |
 | 64×64 规则引擎 | `electron/grid-world-game.cjs` | 已实现固定格子、计时、经济、战斗、将领与记忆 |
-| 游戏前端 | `electron/desktop/online-world/grid-conquest/` | 已实现四问入场、ACG 词条、地图缩放/拖动、计时任务、行军队伍、随行/部署/俘虏将领、互动与来信箱 |
+| 游戏前端 | `electron/desktop/online-world/grid-conquest/` | 已实现四问入场、ACG 词条、地图缩放/拖动、计时任务、行军队伍、随行/部署/俘虏将领、互动、来信箱与作者专属服主指令 |
 | 产品入口 | `electron/desktop/index.html`、`renderer.js` | 已加入“联机同乐”和“编辑个人设定”之间；玩家选择/导入卡名，不填写作品地址 |
 | 伴生作品填写稿与保存经验 | `docs/grid-conquest-companion-work.md`、`docs/aiero-creation-page-save-experience.md` | 已保存到固定作品并完成导出回读 |
 

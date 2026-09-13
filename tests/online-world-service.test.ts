@@ -75,7 +75,7 @@ describe("online world platform service", () => {
     const instance = service({
       getAccount: () => ({ accountId: "player", username: "玩家" }),
       requestConsole: async (endpoint: string) => endpoint.startsWith("/installed-apps/")
-        ? { data: { id: card.companion.workId, name: "在线游戏世界" } }
+        ? { data: { id: card.companion.workId, name: "在线游戏世界", created_by_account_id: card.companion.authorAccountId } }
         : { data: { items: [] } }
     });
     const state = await instance.open({ card, displayName: "玩家", orientation: "any" });
@@ -149,7 +149,7 @@ describe("online world platform service", () => {
     expect(records).toHaveLength(1);
     expect(mapDelta).not.toHaveProperty("intent");
     expect(mapDelta).not.toHaveProperty("orientation");
-    expect(mapDelta.participant).toEqual({ displayName: "服主" });
+    expect(mapDelta.participant).toEqual({ displayName: "服主", accountName: "服主" });
     expect(Object.values(mapDelta.changes.cells)).toHaveLength(1);
     expect(records.some((record: any) => ["fyow.intent/3", "fyow.event/3", "fyow.private-vault/3"].includes(record.schema))).toBe(false);
     expect(instance.world.privatePlayers.author.orientation).toBe("women");
@@ -291,6 +291,57 @@ describe("online world platform service", () => {
     expect(result.mapDelta).toBeNull();
     expect(posted).toBe(false);
     expect(instance.localEvents.at(-1).type).toBe("start-mining");
+  });
+
+  it("lets only the companion author publish signed ban and reset directives", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    world.players.author = { accountId: "author", accountName: "author@example", displayName: "服主", gold: 1000, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    world.players.target = { accountId: "target", accountName: "target@example", displayName: "目标", gold: 1000, position: { x: 2, y: 2 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    world.cells["2,2"] = { ownerAccountId: "target", soldiers: 10, generalIds: [] };
+    const comments: any[] = [];
+    let tick = 1;
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "author@example" }),
+      getIdentity: async () => identity,
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        if (endpoint.startsWith("/comments/") && options.method === "POST") {
+          const item = { id: `admin-${comments.length + 1}`, account_id: "author", is_author: true, created_at: new Date(1_000 + tick++).toISOString(), content: options.body.content };
+          comments.push(item); return item;
+        }
+        throw new Error(`unexpected ${endpoint}`);
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
+    instance.world = world;
+    const banned = await instance.administer({ type: "player-ban", targetAccountId: "target" });
+    expect(banned.state.world.bans.target).toMatchObject({ displayName: "目标", accountName: "target@example", banned: true });
+    expect(comments.map((item: any) => item.content).join("\n")).toContain("FYOW3");
+    expect(comments.length).toBeGreaterThan(1);
+    const unbanned = await instance.administer({ type: "player-unban", targetAccountId: "target" });
+    expect(unbanned.state.world.bans.target.banned).toBe(false);
+    const reset = await instance.administer({ type: "player-reset", targetAccountId: "target" });
+    expect(reset.state.world.players.target).toBeUndefined();
+    expect(reset.state.world.cells["2,2"]).toBeUndefined();
+    expect(reset.state.world.playerEpochs.target).toBe(1);
+    const nonAuthor = service({ getAccount: () => ({ accountId: "target", username: "target@example" }), getIdentity: async () => identity });
+    nonAuthor.work = instance.work; nonAuthor.control = instance.control; nonAuthor.world = world;
+    await expect(nonAuthor.administer({ type: "player-ban", targetAccountId: "author" })).rejects.toThrow(/作者/);
+  });
+
+  it("ignores a banned player map delta and stale player epoch", () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    world.bans.target = { accountId: "target", banned: true };
+    world.playerEpochs.target = 1;
+    const instance = service({ getAccount: () => ({ accountId: "author", username: "author" }), requestConsole: async () => { throw new Error("local merge"); } });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = world;
+    const record = signRecord({ schema: "fyow.map-delta/1", mapDeltaId: "old", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season", actorAccountId: "target", playerEpoch: 0, participant: { displayName: "目标" }, changes: { cells: { "1,1": { ownerAccountId: "target", soldiers: 1, generalIds: [] } }, generals: {} }, deviceSigningPublicKey: identity.signingPublicKey, deviceEncryptionPublicKey: identity.encryptionPublicKey }, identity.signingPrivateKey);
+    expect(instance.applyMapDeltas([{ record, sources: [{ id: "old-comment", account_id: "target", created_at: "2026-09-13T01:00:00Z" }] }])).toBe(0);
+    expect(instance.world.cells["1,1"]).toBeUndefined();
   });
 
   it("does not publish a reset redirect when migration configuration verification fails", async () => {

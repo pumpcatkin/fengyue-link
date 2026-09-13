@@ -12,6 +12,7 @@ const GAME_CARD_SCHEMA = "fyow.game-card/1";
 const CARD_LIBRARY_SCHEMA = "fyow.game-card-library/1";
 const GRID_CARD_ID = "cc.aiero.fyow.grid-conquest.official";
 const GRID_COMPANION_WORK_ID = "b27218e6-80f9-4c0d-91c7-4b8f87d47be8";
+const GRID_COMPANION_AUTHOR_ACCOUNT_ID = "39404f0e-7678-45a1-86c6-9a21116bacbd";
 const GRID_COMPANION_ORIGIN = "https://staging.aiero.cc";
 const GRID_GAME_TITLE = "猎艳疆土";
 const GRID_COMPANION_INSTANCE_ID = GRID_COMPANION_WORK_ID.replaceAll("-", "").slice(0, 16);
@@ -127,6 +128,7 @@ function createBundledGridCard() {
   const companion = {
     origin: GRID_COMPANION_ORIGIN,
     workId: GRID_COMPANION_WORK_ID,
+    authorAccountId: GRID_COMPANION_AUTHOR_ACCOUNT_ID,
     name: GRID_COMPANION_COPY.name,
     summary: GRID_COMPANION_COPY.summary,
     language: "zh-Hans",
@@ -145,7 +147,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 5,
+    version: 6,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null
@@ -161,6 +163,8 @@ function validateGameCard(value) {
   const origin = normalizeOrigin(companion.origin);
   const workId = String(companion.workId || "");
   if (!/^[0-9a-z-]{8,80}$/i.test(workId)) throw new Error("伴生作品编号无效");
+  const authorAccountId = String(companion.authorAccountId || "");
+  if (!/^[0-9a-z-]{8,80}$/i.test(authorAccountId)) throw new Error("游戏卡缺少伴生作品作者账号绑定");
   const expectedInstalledUrl = `${origin}/zh/explore/installed/${encodeURIComponent(workId)}`;
   const expectedConfigurationUrl = `${origin}/zh/app/${encodeURIComponent(workId)}/configuration`;
   const configuration = normalizeConfiguration(companion.configuration, companion);
@@ -178,6 +182,7 @@ function validateGameCard(value) {
       ...JSON.parse(JSON.stringify(companion)),
       origin,
       workId,
+      authorAccountId,
       installedUrl: expectedInstalledUrl,
       configurationUrl: expectedConfigurationUrl,
       configuration,
@@ -235,6 +240,7 @@ function summarizeGameCard(card) {
     version: card.version,
     workId: card.companion.workId,
     workName: card.companion.name,
+    authorAccountId: card.companion.authorAccountId,
     origin: card.companion.origin,
     programDigest: card.program.digest,
     configurationSha256: card.companion.configurationSha256,
@@ -264,6 +270,7 @@ module.exports = {
   GAME_CARD_SCHEMA,
   GRID_CARD_ID,
   GRID_COMPANION_WORK_ID,
+  GRID_COMPANION_AUTHOR_ACCOUNT_ID,
   GRID_COMPANION_ORIGIN,
   GRID_GAME_TITLE,
   GRID_COMPANION_INSTANCE_ID,

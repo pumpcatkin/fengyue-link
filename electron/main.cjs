@@ -9116,6 +9116,7 @@ handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService
 handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineWorldService.submitIntent(intent || {}));
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
 handleLocalIpc("online-world:migrate", () => backend.migrateOnlineWorldCard());
+handleLocalIpc("online-world:administer", (_event, command) => backend.onlineWorldService.administer(command || {}));
 handleLocalIpc("backend:new-instance", (_event, requested) => {
   backend.assertAdminAccount();
   return new Promise((resolve, reject) => {

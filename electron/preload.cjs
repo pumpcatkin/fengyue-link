@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   submitOnlineWorldIntent: intent => ipcRenderer.invoke("online-world:submit-intent", intent),
   sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message),
   migrateOnlineWorld: () => ipcRenderer.invoke("online-world:migrate"),
+  administerOnlineWorld: command => ipcRenderer.invoke("online-world:administer", command),
   newInstance: profileId => ipcRenderer.invoke("backend:new-instance", profileId),
   onState: callback => ipcRenderer.on("backend:state", (_event, state) => callback(state)),
   onGameFrame: callback => ipcRenderer.on("backend:game-frame", (_event, frame) => callback(frame)),

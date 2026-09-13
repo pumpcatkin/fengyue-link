@@ -62,4 +62,12 @@ describe("online game world comment protocol", () => {
     expect(protocol.verifySignedRecord(signed, publicKey)).toBe(true);
     expect(protocol.verifySignedRecord({ ...signed, newWorkId: "forged" }, publicKey)).toBe(false);
   });
+
+  it("classifies signed author moderation directives as authority records", () => {
+    const directive = { schema: protocol.FYOW_SCHEMAS.authority, authorityId: "auth-1", type: "player-ban", targetAccountId: "player" };
+    const comments = protocol.encodeCommentRecord(directive).map((content: string, index: number) => ({ id: `a${index}`, content }));
+    const assembled = protocol.assembleCommentRecords(comments);
+    expect(assembled.records[0].kind).toBe("AUTH");
+    expect(assembled.records[0].record).toEqual(directive);
+  });
 });

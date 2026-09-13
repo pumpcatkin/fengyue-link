@@ -13,6 +13,7 @@ const FYOW_SCHEMAS = Object.freeze({
   direct: "fyow.direct/3",
   directWake: "fyow.direct-wake/3",
   reset: "fyow.reset/3",
+  authority: "fyow.authority/1",
   generalDefinition: "fyow.general-definition/3",
   generalMemory: "fyow.general-memory/3"
 });
@@ -59,6 +60,7 @@ function recordKind(record) {
   if (schema === FYOW_SCHEMAS.direct) return "DIRECT";
   if (schema === FYOW_SCHEMAS.directWake) return "DMWAKE";
   if (schema === FYOW_SCHEMAS.reset) return "RESET";
+  if (schema === FYOW_SCHEMAS.authority) return "AUTH";
   if (schema === FYOW_SCHEMAS.generalDefinition) return "GDEF";
   if (schema === FYOW_SCHEMAS.generalMemory) return "GMEM";
   throw new Error(`未知 FYOW Schema：${schema || "空"}`);

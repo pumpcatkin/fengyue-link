@@ -70,11 +70,45 @@ function createWorld({ seed = crypto.randomBytes(16).toString("hex"), seasonId =
     revision: 0,
     cells: {},
     players: {},
+    bans: {},
+    playerEpochs: {},
     privatePlayers: {},
     generals: {},
     jobs: {},
     processedIntents: []
   };
+}
+
+function resetPlayerState(inputState, targetAccountId, nextEpoch) {
+  const state = inputState;
+  const target = String(targetAccountId || "").trim();
+  if (!target) throw new Error("缺少需要重置的玩家账号");
+  state.bans ||= {};
+  state.playerEpochs ||= {};
+  state.players ||= {};
+  state.privatePlayers ||= {};
+  state.generals ||= {};
+  state.jobs ||= {};
+  const deployedIds = new Set(Object.entries(state.generals)
+    .filter(([, general]) => String(general?.holderAccountId || "") === target)
+    .map(([id]) => id));
+  for (const [key, cell] of Object.entries(state.cells || {})) {
+    if (String(cell?.ownerAccountId || "") === target) delete state.cells[key];
+    else if (Array.isArray(cell?.generalIds)) cell.generalIds = cell.generalIds.filter(id => !deployedIds.has(String(id)));
+  }
+  for (const [id, general] of Object.entries(state.generals)) {
+    if (String(general?.holderAccountId || "") === target) delete state.generals[id];
+  }
+  for (const [id, job] of Object.entries(state.jobs)) {
+    if (String(job?.accountId || "") === target) delete state.jobs[id];
+  }
+  delete state.players[target];
+  delete state.privatePlayers[target];
+  const currentEpoch = Math.max(0, Math.trunc(Number(state.playerEpochs[target] || 0)));
+  state.playerEpochs[target] = Number.isSafeInteger(Number(nextEpoch)) && Number(nextEpoch) > currentEpoch
+    ? Number(nextEpoch)
+    : currentEpoch + 1;
+  return state;
 }
 
 function chooseCapital(state, accountId) {
@@ -372,6 +406,9 @@ function applyIntent(inputState, rawIntent, context = {}) {
   if (!actorAccountId) throw new Error("缺少玩家账号");
   const intent = clone(rawIntent || {});
   const type = String(intent.type || "");
+  inputState.bans ||= {};
+  inputState.playerEpochs ||= {};
+  if (inputState.bans[actorAccountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁");
   const idempotencyKey = String(intent.idempotencyKey || context.eventId || crypto.randomUUID()).slice(0, 100);
   if (inputState.processedIntents.includes(idempotencyKey)) return { state: clone(inputState), duplicate: true, effects: [], event: null };
   const settled = settleWorld(inputState, now);
@@ -394,7 +431,16 @@ function applyIntent(inputState, rawIntent, context = {}) {
     const cell = dynamicCell(state, capital.x, capital.y);
     cell.ownerAccountId = actorAccountId;
     cell.soldiers = Math.max(1, Math.floor(info.garrisonCap * 0.5));
-    state.players[actorAccountId] = { accountId: actorAccountId, displayName: String(intent.displayName || actorAccountId).slice(0, 40), gold: 1000, position: capital, fieldArmySoldiers: 0, carriedGeneralIds: [], joinedAt: now };
+    state.players[actorAccountId] = {
+      accountId: actorAccountId,
+      accountName: String(context.actorAccountName || intent.accountName || actorAccountId).slice(0, 80),
+      displayName: String(intent.displayName || actorAccountId).slice(0, 40),
+      gold: 1000,
+      position: capital,
+      fieldArmySoldiers: 0,
+      carriedGeneralIds: [],
+      joinedAt: now
+    };
     state.privatePlayers[actorAccountId] = { orientation, characterProfileId, characterTags, initialGeneralWish, initialGeneralGranted: false };
     effects.push({
       type: "general-generation-request",
@@ -675,6 +721,8 @@ function projectWorldState(state, viewerAccountId) {
     revision: state.revision,
     cells: clone(state.cells),
     players,
+    bans: clone(state.bans || {}),
+    playerEpochs: clone(state.playerEpochs || {}),
     generals,
     jobs: Object.fromEntries(Object.entries(state.jobs || {}).filter(([, job]) => job.accountId === viewer))
   };
@@ -690,6 +738,7 @@ module.exports = {
   keyOf,
   staticCell,
   createWorld,
+  resetPlayerState,
   dynamicCell,
   publicGeneralState,
   generalDiscoveryChance,

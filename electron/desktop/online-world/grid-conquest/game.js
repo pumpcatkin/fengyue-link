@@ -331,6 +331,71 @@ function renderInbox() {
   });
 }
 
+function ownerPlayerEntries() {
+  const entries = new Map();
+  for (const [accountId, player] of Object.entries(payload?.world?.players || {})) entries.set(accountId, {
+    accountId,
+    displayName: player.displayName || accountId,
+    accountName: player.accountName || accountId,
+    banned: Boolean(payload?.world?.bans?.[accountId]?.banned)
+  });
+  for (const [accountId, ban] of Object.entries(payload?.world?.bans || {})) entries.set(accountId, {
+    accountId,
+    displayName: entries.get(accountId)?.displayName || ban.displayName || accountId,
+    accountName: entries.get(accountId)?.accountName || ban.accountName || accountId,
+    banned: Boolean(ban.banned)
+  });
+  return [...entries.values()].sort((left, right) => left.displayName.localeCompare(right.displayName, "zh-CN"));
+}
+
+function fillOwnerPlayerSelect(selector, entries) {
+  const select = document.querySelector(selector);
+  const previous = select.value;
+  select.replaceChildren();
+  for (const item of entries) {
+    const option = document.createElement("option");
+    option.value = item.accountId;
+    option.textContent = `${item.displayName} · 风月账号 ${item.accountName} · ${item.accountId}`;
+    option.dataset.banned = item.banned ? "true" : "false";
+    select.append(option);
+  }
+  if (entries.some(item => item.accountId === previous)) select.value = previous;
+  select.disabled = !entries.length;
+}
+
+function renderOwnerCommands() {
+  const owner = Boolean(payload?.isServerOwner);
+  document.querySelector("#owner-command-toggle").classList.toggle("hidden", !owner);
+  document.querySelector("#owner-account").textContent = owner
+    ? `服主：${payload?.serverOwnerName || payload?.account?.username || "作品作者"} · ${ownAccountId()}`
+    : "";
+  document.querySelector("#owner-server-status").textContent = payload?.initialized ? "已开服 · 后台静默同步" : "尚未开服";
+  document.querySelector("#owner-open-server").disabled = !owner || Boolean(payload?.initialized);
+  document.querySelector("#owner-open-server").textContent = payload?.initialized ? "已经开服" : "开服";
+  document.querySelector("#owner-migrate-server").disabled = !owner || !payload?.initialized;
+  const entries = ownerPlayerEntries();
+  fillOwnerPlayerSelect("#owner-reset-player", entries);
+  fillOwnerPlayerSelect("#owner-ban-player", entries);
+  document.querySelector("#owner-reset-player-button").disabled = !owner || !payload?.initialized || !entries.length;
+  const banSelect = document.querySelector("#owner-ban-player");
+  const selectedEntry = entries.find(item => item.accountId === banSelect.value);
+  const banButton = document.querySelector("#owner-ban-player-button");
+  banButton.disabled = !owner || !payload?.initialized || !selectedEntry;
+  banButton.textContent = selectedEntry?.banned ? "解除封禁" : "封禁玩家";
+  banButton.classList.toggle("danger", !selectedEntry?.banned);
+  const banList = document.querySelector("#owner-ban-list");
+  const banned = entries.filter(item => item.banned);
+  banList.replaceChildren();
+  if (!banned.length) banList.textContent = "当前没有封禁账号";
+  else for (const item of banned) {
+    const chip = document.createElement("span");
+    chip.textContent = `${item.displayName} · ${item.accountName}`;
+    banList.append(chip);
+  }
+  const ownBan = payload?.world?.bans?.[ownAccountId()];
+  document.querySelector("#banned-notice").classList.toggle("hidden", !ownBan?.banned || owner);
+}
+
 function accountLabel(accountId) {
   return payload?.world?.players?.[accountId]?.displayName ? `${payload.world.players[accountId].displayName}（${accountId}）` : accountId || "未知";
 }
@@ -388,10 +453,11 @@ function openDialogue(id) {
 }
 
 function renderAll() {
-  renderClock(); renderPlayer(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); draw();
+  renderClock(); renderPlayer(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
   const player = ownPlayer();
-  document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player));
-  if (payload?.initialized && !player) renderJoinWizard();
+  const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
+  document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);
+  if (payload?.initialized && !player && !banned) renderJoinWizard();
   if (generalDetailId && !document.querySelector("#general-modal").classList.contains("hidden")) {
     if (allGenerals()[generalDetailId]) openGeneral(generalDetailId); else document.querySelector("#general-modal").classList.add("hidden");
   }
@@ -517,6 +583,18 @@ viewport.addEventListener("wheel", event => { event.preventDefault(); stepZoom(e
 window.addEventListener("resize", () => updateMapScale(true));
 
 document.querySelector("#return-library").addEventListener("click", () => host("library"));
+document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
+document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
+document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
+document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }));
+document.querySelector("#owner-migrate-server").addEventListener("click", () => host("admin", { command: { type: "migrate-server" } }));
+document.querySelector("#owner-reset-player-button").addEventListener("click", () => host("admin", { command: { type: "player-reset", targetAccountId: document.querySelector("#owner-reset-player").value } }));
+document.querySelector("#owner-ban-player-button").addEventListener("click", () => {
+  const select = document.querySelector("#owner-ban-player");
+  const option = select.selectedOptions[0];
+  host("admin", { command: { type: option?.dataset.banned === "true" ? "player-unban" : "player-ban", targetAccountId: select.value } });
+});
+document.querySelector("#banned-return-library").addEventListener("click", () => host("library"));
 document.querySelector("#march-soldiers").addEventListener("input", renderMarchParty);
 document.querySelector("#start-mining").addEventListener("click", () => { if (selected) sendIntent({ type: "start-mining", x: selected.x, y: selected.y, auto: true }); });
 document.querySelector("#train").addEventListener("click", () => { if (selected) sendIntent({ type: "train", x: selected.x, y: selected.y, amount: Number(document.querySelector("#train-amount").value) }); });

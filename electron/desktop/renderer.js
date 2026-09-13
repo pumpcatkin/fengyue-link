@@ -721,7 +721,7 @@ function renderOnlineWorld(next){
   const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":serverOwner?"已确认服主身份 · 可以开服":"等待服主开服",degraded:"使用缓存，等待重新同步",error:"读取失败"};
   status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
   const initialized=Boolean(next?.initialized);
-  const gameVisible=initialized&&!onlineWorldInLibrary;
+  const gameVisible=(initialized||serverOwner)&&!onlineWorldInLibrary;
   onlineWorldPage.classList.toggle("game-active",gameVisible);
   settingsToggle.classList.toggle("hidden",gameVisible);
   document.querySelector("#online-world-setup").classList.toggle("hidden",gameVisible);
@@ -1186,7 +1186,7 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
   try{
     const next=await api.openOnlineWorld({cardId:card.cardId,characterProfileId:profile.id,displayName:profile.displayName||state?.account?.username||"玩家",orientation:"any"});
     closeOnlineWorldDetails();
-    onlineWorldInLibrary=!next?.initialized;renderOnlineWorld(next);
+    onlineWorldInLibrary=!next?.initialized&&!next?.isServerOwner;renderOnlineWorld(next);
   }catch(error){onlineWorldEnteredProfileId=null;renderOnlineWorld({...onlineWorldState,status:"error",error:friendlyError(error)});toast(friendlyError(error))}
   finally{button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
 });
@@ -1216,6 +1216,36 @@ window.addEventListener("message",async event=>{
   }
   if(event.data.type==="library"){
     onlineWorldInLibrary=true;closeOnlineWorldDetails();renderOnlineWorld(onlineWorldState);return;
+  }
+  if(event.data.type==="admin"){
+    const command={...(event.data.command||{})};
+    try{
+      if(command.type==="open-server"){
+        if(!await confirmAction("这会以伴生作品作者账号作为服主，在评论区发布赛季控制记录与第一份覆盖快照。",{title:"服主开服",acceptText:"立即开服"}))return;
+        const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);
+        onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{admin:true,state:next}} ,"*");toast("开服成功");return;
+      }
+      if(command.type==="migrate-server"){
+        if(!await confirmAction("这会复制伴生作品配置与公共地图，建立新作品，并在旧评论区发布作者签名的搬迁指令。",{title:"搬迁并重置服务器",acceptText:"开始搬迁"}))return;
+        const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
+        onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{admin:true,migration:result}},"*");
+        toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
+      }
+      const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
+      if(!target)throw new Error("请选择已存在的玩家");
+      const label=`${target.displayName||command.targetAccountId}（风月账号 ${target.accountName||command.targetAccountId}）`;
+      const copy=command.type==="player-reset"
+        ? {text:`重置 ${label} 的玩家数据？该玩家会被移出本局，下次进入需要重新完成开局流程。`,title:"重置玩家数据",acceptText:"确认重置"}
+        : command.type==="player-ban"
+          ? {text:`封禁 ${label}？封禁记录会上传评论区，其所有游戏操作将被其他客户端忽略。`,title:"封禁玩家",acceptText:"确认封禁"}
+          : {text:`解除 ${label} 的封禁？解除记录同样会由作者签名并上传评论区。`,title:"解除封禁",acceptText:"确认解封"};
+      if(!await confirmAction(copy.text,{title:copy.title,acceptText:copy.acceptText}))return;
+      const result=await api.administerOnlineWorld(command);
+      if(result?.state)renderOnlineWorld(result.state);
+      onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"result",result:{...result,admin:true}},"*");
+      toast(command.type==="player-reset"?"玩家数据已重置":command.type==="player-ban"?"玩家已封禁":"玩家已解除封禁");
+    }catch(error){onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",type:"error",message:friendlyError(error)},"*")}
+    return;
   }
   if(event.data.type==="direct"){
     try{

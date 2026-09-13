@@ -168,6 +168,19 @@ describe("grid conquest rules", () => {
     expect(Object.keys(ownState.jobs)).toHaveLength(1);
   });
 
+  it("blocks banned accounts and removes reset players into a new epoch", () => {
+    const state = joined(1_000_000);
+    state.players.b = { accountId: "b", accountName: "b@example", displayName: "乙", gold: 500, position: { x: 2, y: 2 }, fieldArmySoldiers: 3, carriedGeneralIds: [], joinedAt: 1_000_000 };
+    state.cells["2,2"] = { ownerAccountId: "b", soldiers: 5, generalIds: [] };
+    state.bans.b = { accountId: "b", accountName: "b@example", displayName: "乙", banned: true };
+    expect(() => game.applyIntent(state, { type: "join", orientation: "any", characterProfileId: "p", characterTags: Array(8).fill("标签"), initialGeneralWish: "良将", idempotencyKey: "banned" }, { actorAccountId: "b", now: 1_000_001 })).toThrow(/封禁/);
+    game.resetPlayerState(state, "b", 1);
+    expect(state.players.b).toBeUndefined();
+    expect(state.cells["2,2"]).toBeUndefined();
+    expect(state.playerEpochs.b).toBe(1);
+    expect(state.bans.b.banned).toBe(true);
+  });
+
   it("publishes a deployed general archive with the shared map state", () => {
     const state = joined(1_000_000);
     state.generals.deployed = game.createFallbackGeneral({ id: "deployed", name: "守城将", gender: "female", setting: "公开的守城设定。", power: 700, holderAccountId: "a", year: 1 });

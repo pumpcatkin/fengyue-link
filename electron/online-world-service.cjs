@@ -22,6 +22,7 @@ const {
   GRID_SIZE,
   staticCell,
   createWorld,
+  resetPlayerState,
   settleWorld,
   applyIntent,
   buildGeneralGenerationRequest,
@@ -35,6 +36,7 @@ const POLL_INTERVAL_MS = 5000;
 const DIRECT_RATE_WINDOW_MS = 60 * 1000;
 const DIRECT_SEND_LIMIT = 12;
 const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
+const PUBLIC_LEDGER_COMPACTION_DELTAS = 32;
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -242,6 +244,8 @@ function normalizeWorldState(value) {
   if (!value || typeof value !== "object") return value;
   value.cells ||= {};
   value.players ||= {};
+  value.bans ||= {};
+  value.playerEpochs ||= {};
   value.privatePlayers ||= {};
   value.generals ||= {};
   value.jobs ||= {};
@@ -320,6 +324,8 @@ class OnlineWorldService {
     this.localEvents = [];
     this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "" };
     this.appliedMapDeltaIds = new Set();
+    this.appliedAuthorityIds = new Set();
+    this.publicDeltaCountSinceSnapshot = 0;
     this.publicMapOrder = { timestamp: 0, commentId: "" };
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
@@ -357,6 +363,7 @@ class OnlineWorldService {
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
       localEventCount: this.localEvents.length,
+      publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
       program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "猎艳疆土", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
@@ -402,6 +409,7 @@ class OnlineWorldService {
     const accountId = this.account().accountId;
     const allowed = candidate => String(candidate) === accountId;
     return {
+      playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0))),
       privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
       players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
         ...(Object.hasOwn(player, "gold") ? { gold: Number(player.gold || 0) } : {}),
@@ -435,6 +443,12 @@ class OnlineWorldService {
   restoreLocalOverlay(overlay) {
     if (!this.world) return;
     normalizeWorldState(this.world);
+    const accountId = this.account().accountId;
+    const currentEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0)));
+    if (overlay && Math.max(0, Math.trunc(Number(overlay.playerEpoch || 0))) !== currentEpoch) {
+      this.clearResetLocalPlayer(accountId);
+      overlay = null;
+    }
     if (overlay) {
       Object.assign(this.world.privatePlayers, overlay.privatePlayers || {});
       for (const [accountId, fields] of Object.entries(overlay.players || {})) if (this.world.players[accountId]) Object.assign(this.world.players[accountId], fields);
@@ -442,7 +456,6 @@ class OnlineWorldService {
       Object.assign(this.world.jobs, overlay.jobs || {});
       this.world.processedIntents = [...new Set([...(this.world.processedIntents || []), ...(overlay.processedIntents || [])])].slice(-1000);
     }
-    const accountId = this.account().accountId;
     if (accountId && this.world.players[accountId]) {
       this.world.privatePlayers[accountId] ||= {};
       this.world.privatePlayers[accountId].orientation = this.localPreferences.orientation;
@@ -474,6 +487,8 @@ class OnlineWorldService {
       localEvents: this.localEvents.slice(-2000),
       localPreferences: { ...this.localPreferences },
       appliedMapDeltaIds: [...this.appliedMapDeltaIds].slice(-4000),
+      appliedAuthorityIds: [...this.appliedAuthorityIds].slice(-1000),
+      publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
       publicMapOrder: { ...this.publicMapOrder },
       publicMapBaselineOrder: { ...this.publicMapBaselineOrder },
       publicCellOrders: this.publicCellOrders,
@@ -531,12 +546,15 @@ class OnlineWorldService {
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
     this.card = normalizedCard;
     this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
+    if (normalizedCard?.companion?.authorAccountId && this.work.authorAccountId !== normalizedCard.companion.authorAccountId) throw new Error("伴生作品当前作者与游戏卡绑定的服主账号不一致");
     if (normalizedCard && this.work.name === "在线游戏世界") this.work.name = normalizedCard.companion.name;
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
     this.mapFactsCache = null;
     const cached = this.loadCache(this.work.id);
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
+    this.appliedAuthorityIds = new Set(Array.isArray(cached?.appliedAuthorityIds) ? cached.appliedAuthorityIds.slice(-1000) : []);
+    this.publicDeltaCountSinceSnapshot = Math.max(0, Number(cached?.publicDeltaCountSinceSnapshot || 0));
     this.publicMapOrder = {
       timestamp: Number(cached?.publicMapOrder?.timestamp || 0),
       commentId: String(cached?.publicMapOrder?.commentId || "")
@@ -558,6 +576,8 @@ class OnlineWorldService {
     };
     if (cached?.publicArchivesRequireRefresh) {
       this.appliedMapDeltaIds.clear();
+      this.appliedAuthorityIds.clear();
+      this.publicDeltaCountSinceSnapshot = 0;
       this.publicMapOrder = { timestamp: 0, commentId: "" };
       this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
       this.publicCellOrders = {};
@@ -724,7 +744,11 @@ class OnlineWorldService {
     if (record?.schema !== FYOW_SCHEMAS.mapDelta || record.seasonId !== this.control?.seasonId || record.workId !== this.work?.id || record.gameId !== GRID_GAME_ID) return false;
     const actorAccountId = String(record.actorAccountId || "");
     if (!actorAccountId || !record.deviceSigningPublicKey || !verifySignedRecord(record, record.deviceSigningPublicKey)) return false;
-    if (!(item.sources || []).some(source => commentAccountId(source) === actorAccountId) || !recordPlatformOrder(item).timestamp) return false;
+    const order = recordPlatformOrder(item);
+    if (!(item.sources || []).some(source => commentAccountId(source) === actorAccountId) || !order.timestamp) return false;
+    const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actorAccountId] || 0)));
+    if (Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) !== currentEpoch) return false;
+    if (this.world?.bans?.[actorAccountId]?.banned) return false;
     const cells = record.changes?.cells;
     const generals = record.changes?.generals;
     if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
@@ -751,6 +775,58 @@ class OnlineWorldService {
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
     }
+    return true;
+  }
+
+  validAuthorityDirective(item) {
+    const record = item?.record;
+    if (record?.schema !== FYOW_SCHEMAS.authority || record.gameId !== GRID_GAME_ID || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
+    if (!this.work?.authorAccountId || String(record.authorityAccountId || "") !== this.work.authorAccountId || String(this.control?.authorityAccountId || "") !== this.work.authorAccountId) return false;
+    if (!this.validAuthorSource(item) || !recordPlatformOrder(item).timestamp || !verifySignedRecord(record, this.control.authoritySigningPublicKey)) return false;
+    if (!["player-reset", "player-ban", "player-unban"].includes(String(record.type || ""))) return false;
+    return Boolean(String(record.targetAccountId || "").trim());
+  }
+
+  clearResetLocalPlayer(targetAccountId) {
+    if (String(targetAccountId) !== this.account().accountId) return;
+    this.localEvents = [];
+    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "" };
+    this.directInbox = [];
+    this.seenDirectMessageIds.clear();
+    this.worldBookFingerprint = null;
+  }
+
+  applyAuthorityDirective(item) {
+    if (!this.validAuthorityDirective(item)) return false;
+    const record = item.record;
+    const id = String(record.authorityId || record.id || "");
+    const order = recordPlatformOrder(item);
+    if (!id || this.appliedAuthorityIds.has(id) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
+    normalizeWorldState(this.world);
+    const target = String(record.targetAccountId);
+    if (record.type === "player-reset") {
+      const ownedCells = Object.entries(this.world.cells).filter(([, cell]) => String(cell?.ownerAccountId || "") === target).map(([key]) => key);
+      const ownedGenerals = Object.entries(this.world.generals).filter(([, general]) => String(general?.holderAccountId || "") === target).map(([generalId]) => generalId);
+      resetPlayerState(this.world, target, Number(record.playerEpoch));
+      for (const key of ownedCells) this.publicCellOrders[key] = order;
+      for (const generalId of ownedGenerals) this.publicGeneralOrders[generalId] = order;
+      this.publicParticipantOrders[target] = order;
+      this.clearResetLocalPlayer(target);
+    } else {
+      const previous = this.world.bans[target] || {};
+      this.world.bans[target] = {
+        accountId: target,
+        accountName: String(record.targetAccountName || previous.accountName || target).slice(0, 80),
+        displayName: String(record.targetDisplayName || previous.displayName || this.world.players[target]?.displayName || target).slice(0, 40),
+        banned: record.type === "player-ban",
+        issuedAt: Number(record.issuedAt || 0),
+        authorityId: id
+      };
+    }
+    this.world.revision = Number(this.world.revision || 0) + 1;
+    this.appliedAuthorityIds.add(id);
+    if (this.appliedAuthorityIds.size > 1000) this.appliedAuthorityIds = new Set([...this.appliedAuthorityIds].slice(-1000));
+    if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     return true;
   }
 
@@ -786,6 +862,7 @@ class OnlineWorldService {
       this.world.players[actorAccountId] = {
         ...existing,
         accountId: actorAccountId,
+        accountName: String(record.participant?.accountName || existing.accountName || actorAccountId).slice(0, 80),
         displayName: String(record.participant?.displayName || existing.displayName || actorAccountId).slice(0, 40),
         deviceSigningPublicKey: record.deviceSigningPublicKey,
         deviceEncryptionPublicKey: record.deviceEncryptionPublicKey,
@@ -798,6 +875,7 @@ class OnlineWorldService {
     this.appliedMapDeltaIds.add(String(record.mapDeltaId));
     if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
     this.publicMapOrder = order;
+    this.publicDeltaCountSinceSnapshot += 1;
     return true;
   }
 
@@ -806,6 +884,15 @@ class OnlineWorldService {
       .filter(item => item.record?.schema === FYOW_SCHEMAS.mapDelta)
       .sort(comparePlatformOrder)
       .reduce((count, item) => count + Number(this.applyMapDelta(item)), 0);
+  }
+
+  applyPublicLedger(records) {
+    return records
+      .filter(item => [FYOW_SCHEMAS.mapDelta, FYOW_SCHEMAS.authority].includes(item.record?.schema))
+      .sort(comparePlatformOrder)
+      .reduce((count, item) => count + Number(item.record.schema === FYOW_SCHEMAS.authority
+        ? this.applyAuthorityDirective(item)
+        : this.applyMapDelta(item)), 0);
   }
 
   async sync(fullScan = false) {
@@ -818,6 +905,7 @@ class OnlineWorldService {
       const history = await this.readHistory(Boolean(fullScan || !this.control));
       const controls = history.assembled.records
         .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === this.work.id && item.record.gameId === GRID_GAME_ID && this.validAuthorSource(item))
+        .filter(item => String(item.record.authorityAccountId || "") === this.work.authorAccountId)
         .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
         .sort((left, right) => Number(right.record.updatedAt || right.record.startedAt || 0) - Number(left.record.updatedAt || left.record.startedAt || 0));
       if (controls[0]) this.control = controls[0].record;
@@ -840,13 +928,16 @@ class OnlineWorldService {
           this.publicMapOrder = snapshotOrder;
           this.publicMapBaselineOrder = snapshotOrder;
           this.appliedMapDeltaIds.clear();
+          this.appliedAuthorityIds.clear();
+          this.publicDeltaCountSinceSnapshot = 0;
           this.publicCellOrders = {};
           this.publicGeneralOrders = {};
           this.publicParticipantOrders = {};
         }
         normalizeWorldState(this.world);
-        if (this.world) this.applyMapDeltas(history.assembled.records);
+        if (this.world) this.applyPublicLedger(history.assembled.records);
         if (this.world) await this.settleLocalClock();
+        if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
         await this.reconcileOwnGeneralWorldBooks();
         await this.receiveDirectWakes().catch(() => []);
         const resets = history.assembled.records
@@ -874,6 +965,7 @@ class OnlineWorldService {
   async submitIntent(intent = {}) {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
     const account = this.account();
+    if (this.world?.bans?.[account.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，所有游戏操作均会被忽略");
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
     if (normalized.type === "join") {
       const orientation = ["men", "women", "any"].includes(normalized.orientation) ? normalized.orientation : this.pendingJoin?.orientation;
@@ -902,7 +994,11 @@ class OnlineWorldService {
       workId: this.work.id,
       seasonId: this.control.seasonId,
       actorAccountId: this.account().accountId,
-      participant: { displayName: String(actor?.displayName || this.account().username || "玩家").slice(0, 40) },
+      participant: {
+        displayName: String(actor?.displayName || this.account().username || "玩家").slice(0, 40),
+        accountName: String(this.account().username || this.account().accountId).slice(0, 80)
+      },
+      playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0))),
       changes,
       deviceSigningPublicKey: identity.signingPublicKey,
       deviceEncryptionPublicKey: identity.encryptionPublicKey
@@ -912,6 +1008,7 @@ class OnlineWorldService {
     const rootId = sources.map(commentId).filter(Boolean).sort()[0] || null;
     if (actor && rootId && !actor.commentRootId) actor.commentRootId = rootId;
     this.appliedMapDeltaIds.add(record.mapDeltaId);
+    this.publicDeltaCountSinceSnapshot += 1;
     if (order.timestamp) {
       for (const key of Object.keys(changes.cells || {})) this.publicCellOrders[key] = order;
       for (const id of Object.keys(changes.generals || {})) this.publicGeneralOrders[id] = order;
@@ -926,11 +1023,12 @@ class OnlineWorldService {
     const identity = await this.getIdentity();
     const actionTime = this.now();
     const beforeWorld = cloneJson(this.world);
-    const outcome = applyIntent(this.world, intent, { actorAccountId, authorityAccountId: this.control.authorityAccountId, now: actionTime });
+    const outcome = applyIntent(this.world, intent, { actorAccountId, actorAccountName: this.account().username, authorityAccountId: this.control.authorityAccountId, now: actionTime });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
     this.world = outcome.state;
     if (intent.type === "join") {
       const player = this.world.players[actorAccountId];
+      player.accountName = this.account().username;
       player.deviceSigningPublicKey = identity.signingPublicKey;
       player.deviceEncryptionPublicKey = identity.encryptionPublicKey;
     }
@@ -942,6 +1040,7 @@ class OnlineWorldService {
     let dialogue = null;
     if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
     await this.handleEffects(outcome.effects, identity);
+    if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
     this.saveCache();
     this.notify();
     return { event: localEvent, mapDelta, effects: outcome.effects, dialogue, state: this.state() };
@@ -974,6 +1073,43 @@ class OnlineWorldService {
     return settled.effects;
   }
 
+  async administer(command = {}) {
+    if (!this.work || !this.control || !this.world) throw new Error("请先开启在线游戏服务器");
+    const account = this.account();
+    if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId || !this.isAuthority()) throw new Error("服主指令仅对伴生作品作者开放");
+    const type = String(command.type || "");
+    if (!["player-reset", "player-ban", "player-unban"].includes(type)) throw new Error("未知服主指令");
+    const targetAccountId = String(command.targetAccountId || "").trim();
+    if (!targetAccountId) throw new Error("请选择目标玩家");
+    const player = this.world.players?.[targetAccountId];
+    const ban = this.world.bans?.[targetAccountId];
+    if (!player && !ban) throw new Error("目标账号没有加入过当前服务器");
+    const identity = await this.getIdentity();
+    if (identity.signingPublicKey !== this.control.authoritySigningPublicKey) throw new Error("当前设备不是本赛季登记的作者设备");
+    const authorityId = crypto.randomUUID();
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.authority,
+      authorityId,
+      gameId: GRID_GAME_ID,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      authorityAccountId: account.accountId,
+      type,
+      targetAccountId,
+      targetDisplayName: String(player?.displayName || ban?.displayName || targetAccountId).slice(0, 40),
+      targetAccountName: String(player?.accountName || ban?.accountName || targetAccountId).slice(0, 80),
+      ...(type === "player-reset" ? { playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[targetAccountId] || 0))) + 1 } : {}),
+      issuedAt: this.now()
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    if (!this.applyAuthorityDirective({ record, sources })) throw new Error("服主指令发布后未通过作者身份与时间戳校验");
+    await this.publishSnapshot();
+    await this.reconcileOwnGeneralWorldBooks();
+    this.saveCache();
+    this.notify();
+    return { command: { type, targetAccountId, authorityId }, state: this.state() };
+  }
+
   async publishSnapshot() {
     const identity = await this.getIdentity();
     const state = projectWorldState(this.world, null);
@@ -989,7 +1125,18 @@ class OnlineWorldService {
       stateHash: sha256(Buffer.from(canonicalJson(state))),
       createdAt: this.now()
     }, identity.signingPrivateKey);
-    await this.postRecord(snapshot);
+    const sources = await this.postRecord(snapshot);
+    const order = recordPlatformOrder({ sources });
+    if (order.timestamp) {
+      this.publicMapOrder = order;
+      this.publicMapBaselineOrder = order;
+      this.appliedMapDeltaIds.clear();
+      this.appliedAuthorityIds.clear();
+      this.publicCellOrders = {};
+      this.publicGeneralOrders = {};
+      this.publicParticipantOrders = {};
+      this.publicDeltaCountSinceSnapshot = 0;
+    }
     return snapshot;
   }
 
@@ -1140,6 +1287,7 @@ class OnlineWorldService {
   async sendDirect(toAccountId, type, payload, options = {}) {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
     const sender = this.account();
+    if (this.world.bans?.[sender.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，书信指令会被忽略");
     const recipient = String(toAccountId || "");
     if (!recipient || recipient === sender.accountId) throw new Error("请选择另一名在线世界玩家");
     const messageType = String(type || "");
@@ -1181,6 +1329,7 @@ class OnlineWorldService {
     const wakes = assembledWakes.records
       .map(item => item.record)
       .filter(record => record?.schema === FYOW_SCHEMAS.directWake && record.workId === this.work.id && record.seasonId === this.control.seasonId && record.toAccountId === accountId)
+      .filter(record => !this.world.bans?.[record.fromAccountId]?.banned)
       .filter(record => {
         const senderKey = this.world.players?.[record.fromAccountId]?.deviceSigningPublicKey;
         return senderKey && verifySignedRecord(record, senderKey);

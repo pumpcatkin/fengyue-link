@@ -10,6 +10,7 @@
   <body>
     <main>
       <header class="time-strip" aria-label="游戏时间">
+        <button id="owner-command-toggle" class="owner-command-toggle hidden" type="button">服主指令</button>
         <span id="clock">--:--:--</span><i></i><b id="year">第 1 年</b>
       </header>
       <section class="layout">
@@ -115,6 +116,34 @@
         <div id="dialogue-history" class="dialogue-history"></div>
         <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button class="primary" type="submit">发送</button></form>
       </article>
+    </section>
+
+    <section id="owner-command-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="owner-command-title">
+      <article class="paper-modal owner-command-modal">
+        <header><span><small>伴生作品作者专用</small><h1 id="owner-command-title">服主指令</h1><p id="owner-account">—</p></span><button id="close-owner-command" type="button">关闭</button></header>
+        <div class="owner-server-state"><span><small>服务器状态</small><b id="owner-server-status">尚未开服</b></span><button id="owner-open-server" class="primary" type="button">开服</button></div>
+        <section class="owner-command-section">
+          <h2>玩家数据</h2>
+          <p>重置后清除该玩家的领地、部署将领与本地角色进度，并提高玩家世代号；该账号下次进入时重新完成开局流程。</p>
+          <div class="owner-command-row"><select id="owner-reset-player" aria-label="选择需要重置的玩家"></select><button id="owner-reset-player-button" type="button">重置玩家数据</button></div>
+        </section>
+        <section class="owner-command-section">
+          <h2>封禁管理</h2>
+          <p>封禁记录由作品作者签名后写入评论区。被封账号无法创建角色，其游戏操作与书信会被所有客户端忽略。</p>
+          <div class="owner-command-row"><select id="owner-ban-player" aria-label="选择需要管理封禁状态的玩家"></select><button id="owner-ban-player-button" class="danger" type="button">封禁玩家</button></div>
+          <div id="owner-ban-list" class="owner-ban-list">当前没有封禁账号</div>
+        </section>
+        <section class="owner-command-section migration-command">
+          <h2>服务器搬迁</h2>
+          <p>复制伴生作品配置与公共地图快照，建立新作品，再在旧评论区发布作者签名的定向搬迁记录。</p>
+          <button id="owner-migrate-server" type="button">搬迁并重置服务器</button>
+        </section>
+        <footer><small>公共账本每累计 32 条地图变更会由在线服主自动写入覆盖快照；新客户端读到完整快照后即可跳过更旧页面。</small></footer>
+      </article>
+    </section>
+
+    <section id="banned-notice" class="overlay hidden" role="dialog" aria-modal="true">
+      <article class="paper-modal banned-modal"><small>猎艳疆土</small><h1>该风月账号已被服主封禁</h1><p>本账号无法创建角色或提交游戏操作。解封状态会随评论区后台同步自动更新。</p><button id="banned-return-library" type="button">返回游戏库</button></article>
     </section>
 
     <div id="toast" class="toast hidden" role="status"></div>

@@ -1229,19 +1229,24 @@ class OnlineWorldService {
   }
 
   async requestStructuredModel(request, { attempts = 2, label = "模型请求" } = {}) {
-    let lastError = null;
-    for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
-      try {
-        const answer = await this.requestModel({ ...request, conversationId: String(request?.conversationId || this.modelConversationId || "") });
-        const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
-        if (conversationId) this.modelConversationId = conversationId.slice(0, 200);
-        return parseJsonAnswer(answer?.answer ?? answer);
-      } catch (error) {
-        lastError = error;
-        if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
+    const run = async () => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+        try {
+          const answer = await this.requestModel({ ...request, conversationId: String(request?.conversationId || this.modelConversationId || "") });
+          const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
+          if (conversationId) this.modelConversationId = conversationId.slice(0, 200);
+          return parseJsonAnswer(answer?.answer ?? answer);
+        } catch (error) {
+          lastError = error;
+          if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
+        }
       }
-    }
-    throw new Error(`${label}未返回有效结构化结果：${lastError?.message || String(lastError || "未知错误")}`);
+      throw new Error(`${label}未返回有效结构化结果：${lastError?.message || String(lastError || "未知错误")}`);
+    };
+    const queued = this.modelRequestQueue.then(run, run);
+    this.modelRequestQueue = queued.then(() => undefined, () => undefined);
+    return queued;
   }
 
   async administer(command = {}) {

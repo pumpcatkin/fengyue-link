@@ -52,6 +52,7 @@ const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
 const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
+const { consumeModelEventStream } = require("./model-stream.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -3499,68 +3500,49 @@ class AccountBackend {
     if (!workId) throw new Error("在线世界尚未绑定伴生作品");
     const keyword = String(request.keyword || `[[FYOW:TASK:${request.task || "unknown"}:v1]]`).slice(0, 200);
     const query = `${keyword}\n${JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} })}`;
-    const anchor = await this.ensureAnchor();
-    if (anchor.webContents.isLoading()) await Promise.race([
-      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
-    ]);
-    return anchor.webContents.executeJavaScript(`(async () => {
-      const token = localStorage.getItem('console_token') || '';
-      if (!token) throw new Error('账号登录令牌不存在');
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+    let anchor = null;
+    let token = "";
+    let tokenError = null;
+    for (let attempt = 1; attempt <= 3 && !token; attempt += 1) {
       try {
-        const response = await fetch('/go/api/apps/chat-messages', {
-          method:'POST', credentials:'include', cache:'no-store', signal:controller.signal,
-          headers:{Authorization:'Bearer ' + token,'Content-Type':'application/json','X-Language':'zh-Hans'},
-          body:JSON.stringify({app_id:${JSON.stringify(workId)},inputs:{},conversation_id:${JSON.stringify(String(request.conversationId || ''))},query:${JSON.stringify(query)},response_mode:'streaming',files:[]})
-        });
-        if (!response.ok) {
-          const failure = await response.json().catch(() => ({}));
-          throw new Error(failure?.message || failure?.msg || ('模型请求失败：' + response.status));
-        }
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('模型响应缺少数据流');
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let answer = '';
-        let taskId = null;
-        let messageId = null;
-        let conversationId = null;
-        let usage = null;
-        const accept = raw => {
-          const line = raw.trim();
-          if (!line.startsWith('data:')) return;
-          const body = line.slice(5).trim();
-          if (!body || body === '[DONE]') return;
-          let data; try { data = JSON.parse(body); } catch { return; }
-          if (data.event === 'error') throw new Error(data.message || data.error || '模型流返回错误');
-          taskId ||= data.task_id || data.taskId || null;
-          messageId ||= data.message_id || data.messageId || null;
-          conversationId ||= data.conversation_id || data.conversationId || null;
-          const text = data.answer ?? data.text ?? data.data?.answer ?? data.data?.text ?? '';
-          if (typeof text === 'string' && text) {
-            if (data.event === 'message_replace' || data.event === 'text_replace') answer = text;
-            else answer += text;
-          }
-          usage = data.metadata?.usage || data.usage || usage;
-        };
-        while (true) {
-          const chunk = await reader.read();
-          buffer += decoder.decode(chunk.value || new Uint8Array(), {stream:!chunk.done});
-          const lines = buffer.split(/\r?\n/);
-          buffer = lines.pop() || '';
-          for (const line of lines) accept(line);
-          if (chunk.done) break;
-        }
-        if (buffer) accept(buffer);
-        if (!answer.trim()) throw new Error('模型没有返回正文');
-        return {answer:answer.trim(),taskId,messageId,conversationId,usage};
+        anchor = await this.ensureAnchor();
+        if (anchor.webContents.isLoading()) await Promise.race([
+          new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
+        ]);
+        token = String(await anchor.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
       } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('模型请求超过 60 秒');
-        throw error;
-      } finally { clearTimeout(timeoutId); }
-    })()`, true);
+        tokenError = error;
+        await new Promise(resolve => setTimeout(resolve, attempt * 250));
+      }
+    }
+    if (!token) throw new Error(`读取账号登录令牌失败：${tokenError?.message || "登录状态尚未就绪"}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 180000);
+    this.appendSessionLog("online-world-model", { event: "request-started", task: String(request.task || "unknown"), conversationId: String(request.conversationId || "") || null });
+    try {
+      const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Language": "zh-Hans" },
+        body: JSON.stringify({ app_id: workId, inputs: {}, conversation_id: String(request.conversationId || ""), query, response_mode: "streaming", files: [] })
+      });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+      }
+      const result = await consumeModelEventStream(response.body);
+      this.appendSessionLog("online-world-model", { event: "request-completed", task: String(request.task || "unknown"), conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });
+      return result;
+    } catch (error) {
+      const normalized = error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
+      this.appendSessionLog("online-world-model", { event: "request-failed", task: String(request.task || "unknown"), error: normalized?.message || String(normalized) });
+      throw normalized;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
 
   selectedCharacterProfile() {

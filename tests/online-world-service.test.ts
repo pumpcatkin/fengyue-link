@@ -33,6 +33,27 @@ function service(options: Record<string, unknown>) {
 }
 
 describe("online world platform service", () => {
+  it("serializes every model request so one conversation cannot overlap generations", async () => {
+    const calls: string[] = [];
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const instance = service({
+      requestModel: async (request: any) => {
+        calls.push(request.task);
+        if (request.task === "first") await firstGate;
+        return { conversationId: "conversation-queue", answer: JSON.stringify({ task: request.task }) };
+      }
+    });
+    const first = instance.requestStructuredModel({ task: "first" });
+    const second = instance.requestStructuredModel({ task: "second" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(calls).toEqual(["first"]);
+    releaseFirst();
+    await expect(first).resolves.toEqual({ task: "first" });
+    await expect(second).resolves.toEqual({ task: "second" });
+    expect(calls).toEqual(["first", "second"]);
+  });
+
   it("calibrates rule time from the platform response clock", async () => {
     let localTime = 1_000_000;
     const instance = service({ now: () => localTime, monotonicNow: () => localTime, readPlatformTime: async () => 1_005_000, getAccount: () => ({ accountId: "a" }) });

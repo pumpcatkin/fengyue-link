@@ -1271,6 +1271,14 @@ window.addEventListener("message",async event=>{
     onlineWorldEnteredProfileId=profile.id;
     intent.characterProfileId=profile.id;
     intent.displayName=profile?.displayName||state?.account?.username||"玩家";
+    intent.characterProfile={
+      id:profile.id,
+      label:profile.label||"",
+      displayName:intent.displayName,
+      basicInfo:profile.basicInfo||"",
+      appearance:profile.appearance||"",
+      info:profile.info||""
+    };
   }
   try{
     const result=await api.submitOnlineWorldIntent(intent);

@@ -90,6 +90,15 @@ describe("grid conquest rules", () => {
     expect(march.state.players.a.gold).toBe(before - game.marchCost(2, 1));
   });
 
+  it("rejects a march immediately when a damaged local save has lost the player position", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    delete state.players.a.position;
+    expect(() => game.applyIntent(state, {
+      type: "march", to: { x: 10, y: 10 }, soldiers: 1, attack: false, idempotencyKey: "damaged-position"
+    }, { actorAccountId: "a", now })).toThrow(/玩家所在地横坐标/);
+  });
+
   it("allows dialogue only with a carried general and keeps compact memory", () => {
     const now = 1_000_000;
     let state = joined(now);

@@ -6,7 +6,7 @@
 https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configuration
 ```
 
-结果：保存接口与导出回读接口均返回 HTTP 200；作品名称、简介、详细介绍、前置词、提示词、后置词和三个世界书条目逐项比对。该作品是一张游戏卡服务全体玩家的唯一伴生作品，玩家侧不填写或替换作品 ID。游戏卡固定记录作者账号 `39404f0e-7678-45a1-86c6-9a21116bacbd`，运行时以安装作品接口返回的 `created_by_account_id` 再次核对。
+结果：保存接口与导出回读接口均返回 HTTP 200；作品名称、简介、详细介绍、前置词、提示词、后置词和五个世界书条目逐项比对。该作品是一张游戏卡服务全体玩家的唯一伴生作品，玩家侧不填写或替换作品 ID。游戏卡固定记录作者账号 `39404f0e-7678-45a1-86c6-9a21116bacbd`，运行时以安装作品接口返回的 `created_by_account_id` 再次核对。
 
 ## 1. 页面结构
 
@@ -38,7 +38,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 
 ```text
 [[FYOW:TASK:general.generate:v1]]
+[[FYOW:TASK:player.profile-context:v1]]
 [[FYOW:TASK:general.dialogue:v1]]
+[[FYOW:TASK:general.captive-dialogue:v1]]
+[[FYOW:TASK:general.memory.update:v1]]
 ```
 
 导出数据会给“或”关键词增加 `_or_` 前缀，这是平台序列化格式，页面输入时不需要手工添加。
@@ -77,13 +80,13 @@ world_book
 GET /console/api/apps/{workId}/model-config/export
 ```
 
-至少核对：名称、简介、程序信封、三段提示词、世界书数量、关键词、`key_region=2`、`enable=true` 和 `probability=100`。程序信封还要解码并核对 `gameId`、宿主 API 版本和 SHA-256，不能只比较字符数。
+至少核对：名称、简介、程序信封、三段提示词、世界书数量、关键词、`key_region=2`、`enable=true` 和 `probability=100`。本次五个固定任务依次覆盖将领生成、玩家角色设定整理、普通互动、俘虏互动和将领记忆整理。程序信封还要解码并核对 `gameId`、宿主 API 版本和 SHA-256，不能只比较字符数。
 
 本次结果：
 
 ```text
 作品名：猎艳疆土[b27218e680f94c0d]
-世界书：3 条
+世界书：5 条
 详细介绍：28,966 字符
 程序 SHA-256：4a84f3b2b639c1e7d2649978cf3070cd2a9467b3f1eb46eff8234120031a6e03
 ```

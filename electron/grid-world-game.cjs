@@ -186,11 +186,16 @@ function regionPower(state, x, y) {
 }
 
 function pathBetween(from, to) {
+  const fromX = coordinate(from?.x, "起点横坐标");
+  const fromY = coordinate(from?.y, "起点纵坐标");
+  const toX = coordinate(to?.x, "目标横坐标");
+  const toY = coordinate(to?.y, "目标纵坐标");
   const path = [];
-  let x = from.x;
-  let y = from.y;
-  while (x !== to.x) { x += Math.sign(to.x - x); path.push({ x, y }); }
-  while (y !== to.y) { y += Math.sign(to.y - y); path.push({ x, y }); }
+  let x = fromX;
+  let y = fromY;
+  while (x !== toX && path.length <= GRID_SIZE * 2) { x += Math.sign(toX - x); path.push({ x, y }); }
+  while (y !== toY && path.length <= GRID_SIZE * 2) { y += Math.sign(toY - y); path.push({ x, y }); }
+  if (path.length > (GRID_SIZE - 1) * 2 || x !== toX || y !== toY) throw new Error("行军路径超出地图范围");
   return path;
 }
 
@@ -454,7 +459,14 @@ function applyIntent(inputState, rawIntent, context = {}) {
       carriedGeneralIds: [],
       joinedAt: now
     };
-    state.privatePlayers[actorAccountId] = { orientation, characterProfileId, characterTags, initialGeneralWish, initialGeneralGranted: false };
+    state.privatePlayers[actorAccountId] = {
+      orientation,
+      characterProfileId,
+      characterTags,
+      initialGeneralWish,
+      playerContext: intent.playerContext && typeof intent.playerContext === "object" ? clone(intent.playerContext) : null,
+      initialGeneralGranted: false
+    };
     effects.push({
       type: "general-generation-request",
       accountId: actorAccountId,
@@ -504,7 +516,10 @@ function applyIntent(inputState, rawIntent, context = {}) {
     } else if (type === "march") {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("已有行军正在途中");
       const to = { x: coordinate(intent.to?.x, "目标横坐标"), y: coordinate(intent.to?.y, "目标纵坐标") };
-      const from = { ...player.position };
+      const from = {
+        x: coordinate(player.position?.x, "玩家所在地横坐标"),
+        y: coordinate(player.position?.y, "玩家所在地纵坐标")
+      };
       const path = pathBetween(from, to);
       if (!path.length) throw new Error("目标位置与当前位置相同");
       const origin = dynamicCell(state, from.x, from.y);
@@ -577,13 +592,22 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const generalId = String(intent.generalId || "");
       const general = state.generals[generalId];
       if (!canInteractWithGeneral(state, player, general)) throw new Error("当前不可与这名将领交谈");
-      appendGeneralMemory(general, { year: gameYear(state, now), category: "speech", text: `和${player.displayName}谈论${String(intent.topic || "日常").slice(0, 40)}`, accountId: actorAccountId, intimacyDelta: clamp(Number(intent.intimacyDelta || 1), -5, 5) });
+      const memoryUpdate = intent.memoryUpdate && typeof intent.memoryUpdate === "object" ? intent.memoryUpdate : {};
+      const category = memoryUpdate.category === "deed" ? "deed" : "speech";
+      const summary = String(memoryUpdate.summary || `和${player.displayName}谈论${String(intent.topic || "日常").slice(0, 40)}`).trim().slice(0, 120);
+      const emotion = String(memoryUpdate.emotion || "").trim().slice(0, 40);
+      appendGeneralMemory(general, { year: gameYear(state, now), category, text: emotion ? `${summary}（${emotion}）` : summary, accountId: actorAccountId, intimacyDelta: clamp(Number(memoryUpdate.intimacyDelta ?? intent.intimacyDelta ?? 1), -5, 5) });
+      const compactMemory = String(memoryUpdate.compactMemory || "").trim();
+      if (compactMemory) general.memoryText = compactMemory.slice(0, 1000);
       general.interactionHistory ||= [];
       general.interactionHistory.push({
         year: gameYear(state, now),
         accountId: actorAccountId,
         speakerName: player.displayName,
         kind: general.status === "captured" ? "captive" : "ordinary",
+        category,
+        summary,
+        emotion,
         userText: String(intent.userText || "").slice(0, 240),
         reply: String(intent.reply || "").slice(0, 600)
       });
@@ -632,6 +656,9 @@ function applyIntent(inputState, rawIntent, context = {}) {
   delete publicIntent.characterTags;
   delete publicIntent.initialGeneralWish;
   delete publicIntent.characterProfileId;
+  delete publicIntent.characterProfile;
+  delete publicIntent.playerContext;
+  delete publicIntent.memoryUpdate;
   const event = { schema: "fyow.event/3", eventId: String(context.eventId || crypto.randomUUID()), gameId: state.gameId, seasonId: state.seasonId, revision: state.revision, actorAccountId, type, intent: publicIntent, result, createdAt: now };
   return { state, effects, result, event, duplicate: false };
 }
@@ -664,6 +691,7 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
 function buildGeneralDialogueRequest(state, general, player, topic, now) {
   const captive = general.status === "captured" && general.loyalToAccountId !== player.accountId;
   const formerLords = [...new Set((general.masterHistory || []).map(item => String(item.accountId || "")).filter(id => id && id !== player.accountId))];
+  const playerContext = clone(state.privatePlayers?.[player.accountId]?.playerContext || null);
   return {
     task: captive ? "general.captive-dialogue" : "general.dialogue",
     keyword: `${captive ? "[[FYOW:TASK:general.captive-dialogue:v1]]" : "[[FYOW:TASK:general.dialogue:v1]]"}\n${general.name}`,
@@ -676,10 +704,58 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
         masterHistory: clone(general.masterHistory || []), captivityHistory: clone(general.captivityHistory || []),
         recentInteractions: clone((general.interactionHistory || []).slice(-12))
       },
-      speaker: { accountId: player.accountId, name: player.displayName },
+      speaker: { accountId: player.accountId, name: player.displayName, context: playerContext },
       allowedFormerLordAccountIds: formerLords,
       topic,
       gameYear: gameYear(state, now)
+    }
+  };
+}
+
+function buildPlayerProfileContextRequest(profile, idempotencyKey) {
+  const source = profile && typeof profile === "object" ? profile : {};
+  return {
+    task: "player.profile-context",
+    keyword: "[[FYOW:TASK:player.profile-context:v1]]",
+    idempotencyKey: String(idempotencyKey),
+    input: {
+      schema: "fyow.player-profile-context-request/1",
+      displayName: String(source.displayName || "玩家").trim().slice(0, 80),
+      label: String(source.label || "").trim().slice(0, 80),
+      basicInfo: String(source.basicInfo || "").trim().slice(0, 6000),
+      appearance: String(source.appearance || "").trim().slice(0, 3000),
+      fullSetting: String(source.info || "").trim().slice(0, 9000),
+      instruction: "仅整理玩家已填写的人物设定，保留身份、外貌、性格、说话方式与关系倾向，不添加原设定中没有的事实。"
+    }
+  };
+}
+
+function buildGeneralMemoryUpdateRequest(state, general, player, interaction, now) {
+  return {
+    task: "general.memory.update",
+    keyword: `[[FYOW:TASK:general.memory.update:v1]]\n${general.name}`,
+    idempotencyKey: String(interaction?.idempotencyKey || crypto.randomUUID()),
+    input: {
+      schema: "fyow.general-memory-update-request/1",
+      gameYear: gameYear(state, now),
+      general: {
+        name: general.name,
+        setting: general.setting,
+        priorMemory: general.memoryText,
+        masterHistory: clone(general.masterHistory || []),
+        captivityHistory: clone(general.captivityHistory || []),
+        recentInteractions: clone((general.interactionHistory || []).slice(-12))
+      },
+      speaker: {
+        name: player.displayName,
+        context: clone(state.privatePlayers?.[player.accountId]?.playerContext || null)
+      },
+      interaction: {
+        mode: general.status === "captured" ? "captive" : "ordinary",
+        userText: String(interaction?.userText || "").slice(0, 240),
+        reply: String(interaction?.reply || "").slice(0, 600)
+      },
+      instruction: "把本次互动归入言谈或经历，更新亲密度，并把旧记忆与本次事件压缩成不超过1000个汉字的完整记忆。历任主公、被俘与降服事实必须保留。"
     }
   };
 }
@@ -772,5 +848,7 @@ module.exports = {
   applyIntent,
   buildGeneralGenerationRequest,
   buildGeneralDialogueRequest,
+  buildPlayerProfileContextRequest,
+  buildGeneralMemoryUpdateRequest,
   projectWorldState
 };

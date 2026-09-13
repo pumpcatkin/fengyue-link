@@ -56,9 +56,9 @@ npm run game:bundle
 严格返回当前任务世界书规定的单个 JSON 对象。字符串使用简体中文；不要添加未在输出 Schema 中声明的顶层字段。若输入不完整，仍返回同一 Schema，并在 error 字段简要说明。
 ```
 
-## 3. 三个用户范围世界书
+## 3. 五个用户范围世界书
 
-三个条目的触发范围都选“用户”（`key_region: 2`），概率 100%，保持启用。
+五个条目的触发范围都选“用户”（`key_region: 2`），概率 100%，保持启用。
 
 ### 3.1 将领生成
 
@@ -75,7 +75,22 @@ npm run game:bundle
 输出 Schema：{"name":"姓名","gender":"male|female","power":300,"setting":"人物设定"}
 ```
 
-### 3.2 普通将领互动
+### 3.2 玩家角色设定整理
+
+关键词：
+
+```text
+[[FYOW:TASK:player.profile-context:v1]]
+```
+
+内容：
+
+```text
+任务：把玩家已填写的角色设定整理为将领可稳定理解的上下文。必须只返回一个完整 JSON 对象；仅提取输入中已有的身份、经历、性格、外貌、说话方式和关系倾向，不添加原设定中没有的事实。personaSummary 不超过 2000 字，appearanceSummary 不超过 1000 字，speechStyle 不超过 500 字，relationshipApproach 不超过 800 字。
+输出 Schema：{"personaSummary":"玩家人物摘要","appearanceSummary":"外貌摘要","speechStyle":"说话方式","relationshipApproach":"关系倾向"}
+```
+
+### 3.3 普通将领互动
 
 关键词：
 
@@ -86,11 +101,11 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker、topic 和 gameYear。reply 应符合人物与关系；memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。
-输出 Schema：{"reply":"将领回答","memoryTopic":"谈话主题摘要","intimacyDelta":1,"command":null|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
+任务：以已经效忠或新发掘的普通将领身份回应。依据 general.setting、general.memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地或归属。
+输出 Schema：{"reply":"将领回答","command":null|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
 ```
 
-### 3.3 俘虏将领互动
+### 3.4 俘虏将领互动
 
 关键词：
 
@@ -101,11 +116,26 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度和当前主公。通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。memoryTopic 不超过 40 个汉字；intimacyDelta 为 -5 到 5 的整数。不得输出其他游戏操作。
-输出 Schema：{"reply":"俘虏将领回答","memoryTopic":"互动摘要","intimacyDelta":1,"command":null|{"type":"surrender"}|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
+任务：以尚未降服的俘虏将领身份回应。综合 general.setting、general.memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。
+输出 Schema：{"reply":"俘虏将领回答","command":null|{"type":"surrender"}|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
 ```
 
-随行将领的个人世界书由工具写入当前玩家的“自定义配置”，关键词为将领姓名，内容带 `FYOW_GENERAL:<generalId>` 标记、设定和压缩记忆。部署时移除个人世界书，并把将领设定、战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。召回后恢复到当前玩家本地和自定义世界书。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。
+### 3.5 将领记忆整理
+
+关键词：
+
+```text
+[[FYOW:TASK:general.memory.update:v1]]
+```
+
+内容：
+
+```text
+任务：在将领完成一次互动后，更新其长期记忆。必须只返回一个完整 JSON 对象。category 只能为 speech 或 deed；summary 不超过 120 字，emotion 不超过 40 字，intimacyDelta 为 -5 到 5 的整数。compactMemory 必须同时包含“言谈：”和“经历：”，总长度不超过 1000 个汉字；合并重复事件时使用年份区间和次数，保留对象设定名、事件、情绪和关系结果。历任主公、被俘、降服与易主事实必须完整保留。面向玩家的记忆文本使用设定名，不显示账号编号。
+输出 Schema：{"category":"speech|deed","summary":"事件摘要","emotion":"情绪与关系感受","intimacyDelta":1,"compactMemory":"言谈：……\n经历：……"}
+```
+
+工具在玩家首次加入时调用角色设定整理任务，并把结果作为 `FYOW_PLAYER_CONTEXT:<profileId>` 用户自定义世界书保存。随行将领的个人世界书同样由工具写入当前玩家的“自定义配置”，关键词为将领姓名，内容带 `FYOW_GENERAL:<generalId>` 标记、设定和压缩记忆。对话请求同时携带玩家上下文与将领上下文；完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。部署时移除个人将领世界书，并把将领设定、战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。召回后恢复到当前玩家本地和自定义世界书。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。
 
 ## 4. 宿主通讯约定
 
@@ -149,7 +179,7 @@ parent.postMessage({ source: "fyow-grid-conquest", type: "library" }, "*");
 1. `open-server`：创建新赛季控制记录和第一份公共快照。尚未开服时作者也可以进入游戏壳层调用；普通玩家仍停留在游戏库等待。
 2. `migrate-server`：导出并回读验证完整创作配置，复制新作品、初始化新账本，然后在旧作品发布作者签名搬迁指令。
 3. `player-reset`：从所有已存在玩家中选择目标（包含作者自己）。清除目标的公共玩家记录、领地、部署将领及本机私有进度，并提高 `playerEpoch`。目标立即被视作离开本局，下次进入重新回答四个开局问题。
-4. `player-ban` / `player-unban`：选择已存在或曾被封禁的玩家，界面同时显示游戏玩家名、风月账户名和风月账户 ID。封禁/解封记录使用 `fyow.authority/1` 写入评论区；被封账号不能创建角色，其地图变更、游戏操作与书信唤醒会被其他客户端忽略。封禁不会隐式删除现有领地，需要时由服主另行执行玩家重置。
+4. `player-ban` / `player-unban`：选择已存在或曾被封禁的玩家，界面显示游戏玩家名与风月账户名，内部目标 ID 不直接展示。封禁/解封记录使用 `fyow.authority/1` 写入评论区；被封账号不能创建角色，其地图变更、游戏操作与书信唤醒会被其他客户端忽略。封禁不会隐式删除现有领地，需要时由服主另行执行玩家重置。
 
 前端发给宿主的统一入口：
 
@@ -175,13 +205,13 @@ parent.postMessage({
 
 ## 5. 发布验收
 
-1. 创作页保存并回读名称、简介、详细介绍、前置词、主提示词、后置词和三个用户范围世界书。
+1. 创作页保存并回读名称、简介、详细介绍、前置词、主提示词、后置词和五个用户范围世界书。
 2. 作者签名启用新程序摘要；其他玩家只加载控制记录指定的摘要。
 3. 新玩家依次完成角色设定、性取向、自定义性癖标签、初始良将四问；角色设定绑定后不再修改，性取向和标签可在游戏内继续编辑。
 4. 确认同格第二项并列练兵被拒绝；滚轮缩放和右键拖动地图正常。
 5. 确认评论区只新增领地/驻军/部署将领档案，没有性取向、词条、行动请求或本地行动事件。
 6. 部署、召回、被俘、降服各执行一次，核对双方将领可见性、完整历任主公记录和部署档案的评论恢复。
-7. 从普通将领与俘虏将领互动分别触发书信，核对评论回复唤醒、目标限制、私信加密与收件箱展示。
+7. 从普通将领与俘虏将领互动分别触发书信，核对角色设定上下文、对话结果、记忆二次整理、评论回复唤醒、目标限制、私信加密与收件箱展示。
 8. 使用作者账号打开左上角服主指令，验证开服、搬迁、重置自己/其他玩家、封禁与解封；普通玩家不显示入口。
 9. 重置后确认目标玩家立刻回到四问入场流程，旧 `playerEpoch` 地图记录不再生效；封禁后确认目标无法加入，且其地图增量和私信唤醒被忽略。
 10. 累计至少 32 条地图增量后确认作者客户端发布覆盖快照，新客户端在快照页停止历史扫描并只合并水位线之后的记录。

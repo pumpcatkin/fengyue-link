@@ -16,7 +16,16 @@ function service(options: Record<string, unknown>) {
       if (request.method === "POST" && Array.isArray(request.body?.world_book)) worldBook = request.body.world_book;
       return { data: { world_book: worldBook } };
     },
-    requestModel: async () => ({ answer: "{\"name\":\"初将\",\"gender\":\"female\",\"power\":320,\"setting\":\"善守城，重信义。\"}" }),
+    requestModel: async (request: any) => ({
+      conversationId: "conversation-1",
+      answer: request?.task === "player.profile-context"
+        ? "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"黑发军装\",\"speechStyle\":\"沉稳\",\"relationshipApproach\":\"重视忠诚\"}"
+        : request?.task === "general.memory.update"
+          ? "{\"category\":\"speech\",\"summary\":\"与玩家谈论戏剧\",\"emotion\":\"愉快\",\"intimacyDelta\":1,\"compactMemory\":\"言谈：[1年]与玩家谈论戏剧\\n经历：暂无\"}"
+          : request?.task === "general.dialogue" || request?.task === "general.captive-dialogue"
+            ? "{\"reply\":\"愿与主公详谈。\",\"command\":null}"
+            : "{\"name\":\"初将\",\"gender\":\"female\",\"power\":320,\"setting\":\"善守城，重信义。\"}"
+    }),
     getOrigin: () => "https://aigirlfriend.baby",
     onChange: () => {},
     ...options
@@ -156,6 +165,71 @@ describe("online world platform service", () => {
     expect(instance.localEvents).toHaveLength(2);
     expect(instance.localEvents[0].type).toBe("join");
     expect(instance.localEvents[1].type).toBe("grant-general");
+    expect(instance.localPreferences.playerContext).toMatchObject({
+      personaSummary: "慧眼之主",
+      appearanceSummary: "黑发军装",
+      speechStyle: "沉稳",
+      relationshipApproach: "重视忠诚"
+    });
+    expect(instance.modelConversationId).toBe("conversation-1");
+  });
+
+  it("restores a player position and private resources from a pre-overlay local save", () => {
+    const now = 1_000_000;
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
+    world.players.author = { accountId: "author", displayName: "服主" };
+    world.cells["7,9"] = { ownerAccountId: "author", soldiers: 20, generalIds: [] };
+    world.generals.g1 = {
+      id: "g1", name: "青禾", status: "carried", holderAccountId: "author", loyalToAccountId: "author",
+      setting: "善守城。", power: 300, location: { x: 7, y: 9 }, masterHistory: [], captivityHistory: []
+    };
+    const instance = service({ getAccount: () => ({ accountId: "author", username: "服主" }) });
+    instance.world = world;
+    instance.localEvents = [{
+      type: "join", actorAccountId: "author", createdAt: now,
+      result: { capital: { x: 7, y: 9 }, gold: 1800 }
+    }];
+    instance.restoreLocalOverlay(null);
+    expect(instance.world.players.author).toMatchObject({
+      position: { x: 7, y: 9 }, gold: 1800, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"], joinedAt: now
+    });
+  });
+
+  it("runs dialogue and memory world books in sequence and binds the compact memory to the general", async () => {
+    const now = 1_000_000;
+    const identity = generateOnlineWorldIdentity();
+    let world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
+    world = require("../electron/grid-world-game.cjs").applyIntent(world, {
+      type: "join", displayName: "主公甲", orientation: "women", characterProfileId: "profile-a",
+      characterTags: ["沉稳"], initialGeneralWish: "良将", playerContext: { personaSummary: "慧眼之主" }, idempotencyKey: "join"
+    }, { actorAccountId: "author", now }).state;
+    world = require("../electron/grid-world-game.cjs").applyIntent(world, {
+      type: "grant-general", generalId: "g1", name: "青禾", gender: "female", setting: "善守城。", power: 320,
+      discoveryId: "grant", idempotencyKey: "grant"
+    }, { actorAccountId: "author", authorityAccountId: "author", now }).state;
+    const requestedTasks: string[] = [];
+    const instance = service({
+      now: () => now + 20_000,
+      getAccount: () => ({ accountId: "author", username: "服主昵称" }),
+      getIdentity: async () => identity,
+      requestModel: async (request: any) => {
+        requestedTasks.push(request.task);
+        if (request.task === "general.dialogue") return { conversationId: "conversation-1", answer: '{"reply":"愿与主公谈谈北境。","command":null}' };
+        if (request.task === "general.memory.update") return { conversationId: "conversation-1", answer: '{"category":"speech","summary":"与主公甲谈论北境","emotion":"振奋","intimacyDelta":2,"compactMemory":"言谈：[1年]与主公甲谈论北境，感到振奋。\\n经历：[1年]被主公甲发掘并提拔为将领"}' };
+        throw new Error(`unexpected task ${request.task}`);
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = world;
+    instance.modelConversationId = "conversation-1";
+    instance.localPreferences.characterProfileId = "profile-a";
+    instance.localPreferences.playerContext = { displayName: "主公甲", personaSummary: "慧眼之主", appearanceSummary: "", speechStyle: "沉稳", relationshipApproach: "重视忠诚" };
+    const result = await instance.submitIntent({ type: "talk-general", generalId: "g1", topic: "北境局势", idempotencyKey: "talk" });
+    expect(requestedTasks).toEqual(["general.dialogue", "general.memory.update"]);
+    expect(result.dialogue.memory).toMatchObject({ category: "speech", intimacyDelta: 2 });
+    expect(instance.world.generals.g1.memoryText).toContain("与主公甲谈论北境");
+    expect(instance.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ category: "speech", emotion: "振奋" });
   });
 
   it("does not commit a new player until the initial general model returns a complete setting", async () => {
@@ -164,7 +238,9 @@ describe("online world platform service", () => {
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
-      requestModel: async () => ({ answer: "模型暂时没有返回完整设定" }),
+      requestModel: async (request: any) => request?.task === "player.profile-context"
+        ? { conversationId: "conversation-1", answer: "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"\",\"speechStyle\":\"\",\"relationshipApproach\":\"\"}" }
+        : { conversationId: "conversation-1", answer: "模型暂时没有返回完整设定" },
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint.startsWith("/comments/") && options.method === "POST") return { id: "c1", account_id: "author", is_author: true, created_at: new Date(2_000).toISOString(), content: options.body.content };
         throw new Error(`unexpected ${endpoint}`);

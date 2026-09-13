@@ -26,6 +26,8 @@ const {
   settleWorld,
   applyIntent,
   buildGeneralGenerationRequest,
+  buildPlayerProfileContextRequest,
+  buildGeneralMemoryUpdateRequest,
   normalizedCharacterTags,
   projectWorldState,
   publicGeneralState
@@ -133,6 +135,23 @@ function comparePlatformOrder(left, right) {
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function normalizeCharacterProfile(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    id: String(source.id || "").trim().slice(0, 100),
+    label: String(source.label || "").trim().slice(0, 80),
+    displayName: String(source.displayName || "玩家").trim().slice(0, 80) || "玩家",
+    basicInfo: String(source.basicInfo || "").trim().slice(0, 6000),
+    appearance: String(source.appearance || "").trim().slice(0, 3000),
+    info: String(source.info || "").trim().slice(0, 9000)
+  };
+}
+
+function validPosition(value) {
+  return Number.isInteger(Number(value?.x)) && Number(value.x) >= 0 && Number(value.x) < GRID_SIZE
+    && Number.isInteger(Number(value?.y)) && Number(value.y) >= 0 && Number(value.y) < GRID_SIZE;
 }
 
 function compareOrderValue(left, right) {
@@ -323,7 +342,7 @@ class OnlineWorldService {
     this.directSendTimes = [];
     this.directReceiveTimes = new Map();
     this.localEvents = [];
-    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "" };
+    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.appliedMapDeltaIds = new Set();
     this.appliedAuthorityIds = new Set();
     this.publicDeltaCountSinceSnapshot = 0;
@@ -390,7 +409,11 @@ class OnlineWorldService {
         startedAt: this.control.startedAt
       } : null,
       world: projection,
-      localPreferences: cloneJson(this.localPreferences),
+      localPreferences: {
+        orientation: this.localPreferences.orientation,
+        characterProfileId: this.localPreferences.characterProfileId,
+        characterTags: cloneJson(this.localPreferences.characterTags)
+      },
       mapFacts: projection ? this.mapFactsCache : [],
       directInbox: this.directInbox.slice(-100),
       programHtml: this.program?.html || null,
@@ -418,7 +441,9 @@ class OnlineWorldService {
       players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
         ...(Object.hasOwn(player, "gold") ? { gold: Number(player.gold || 0) } : {}),
         ...(Object.hasOwn(player, "fieldArmySoldiers") ? { fieldArmySoldiers: Number(player.fieldArmySoldiers || 0) } : {}),
-        ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {})
+        ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {}),
+        ...(validPosition(player.position) ? { position: { x: Number(player.position.x), y: Number(player.position.y) } } : {}),
+        ...(Object.hasOwn(player, "joinedAt") ? { joinedAt: Number(player.joinedAt || 0) } : {})
       }])),
       generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
       jobs: Object.fromEntries(Object.entries(this.world.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
@@ -466,8 +491,56 @@ class OnlineWorldService {
       this.world.privatePlayers[accountId].characterProfileId = this.localPreferences.characterProfileId;
       this.world.privatePlayers[accountId].characterTags = [...this.localPreferences.characterTags];
       this.world.privatePlayers[accountId].initialGeneralWish = this.localPreferences.initialGeneralWish;
+      this.world.privatePlayers[accountId].playerContext = cloneJson(this.localPreferences.playerContext);
     }
+    this.recoverOwnLocalPlayerState();
     this.pruneForeignPrivateState();
+  }
+
+  recoverOwnLocalPlayerState() {
+    if (!this.world) return false;
+    const accountId = this.account().accountId;
+    const player = this.world.players?.[accountId];
+    if (!accountId || !player) return false;
+    const ownEvents = (this.localEvents || []).filter(event => String(event?.actorAccountId || event?.intent?.actorAccountId || "") === accountId);
+    const joinEvent = [...ownEvents].reverse().find(event => event?.type === "join" && validPosition(event?.result?.capital));
+    let changed = false;
+    if (!validPosition(player.position)) {
+      let recovered = null;
+      for (const event of [...ownEvents].reverse()) {
+        const effects = event?.type === "time-settle" && Array.isArray(event?.result?.effects) ? [...event.result.effects].reverse() : [];
+        const movement = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.at) && ["march-arrived", "battle-won"].includes(effect.type));
+        const returned = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.returnedTo));
+        if (movement || returned) { recovered = movement?.at || returned.returnedTo; break; }
+      }
+      if (!recovered) recovered = joinEvent?.result?.capital || null;
+      if (!recovered) {
+        const ownedKey = Object.entries(this.world.cells || {}).find(([, cell]) => String(cell?.ownerAccountId || "") === accountId)?.[0];
+        if (ownedKey) { const [x, y] = ownedKey.split(",").map(Number); recovered = { x, y }; }
+      }
+      if (validPosition(recovered)) { player.position = { x: Number(recovered.x), y: Number(recovered.y) }; changed = true; }
+    }
+    if (!Number.isFinite(Number(player.gold))) {
+      let gold = Number(joinEvent?.result?.gold);
+      if (!Number.isFinite(gold)) gold = 0;
+      const start = joinEvent ? ownEvents.indexOf(joinEvent) + 1 : 0;
+      for (const event of ownEvents.slice(start)) {
+        if (["train", "march"].includes(event?.type)) gold -= Math.max(0, Number(event?.result?.cost || 0));
+        if (event?.type === "time-settle") for (const effect of event?.result?.effects || []) {
+          if (effect?.type === "mining-complete" && String(effect.accountId || "") === accountId) gold += Math.max(0, Number(effect.gold || 0));
+        }
+      }
+      player.gold = Math.max(0, gold); changed = true;
+    }
+    if (!Number.isFinite(Number(player.fieldArmySoldiers))) { player.fieldArmySoldiers = 0; changed = true; }
+    if (!Array.isArray(player.carriedGeneralIds)) {
+      player.carriedGeneralIds = Object.entries(this.world.generals || {})
+        .filter(([, general]) => String(general?.holderAccountId || "") === accountId && general?.status === "carried")
+        .map(([id]) => id).slice(0, 2);
+      changed = true;
+    }
+    if (!Number.isFinite(Number(player.joinedAt)) && joinEvent) { player.joinedAt = Number(joinEvent.createdAt || this.world.startedAt || this.now()); changed = true; }
+    return changed;
   }
 
   loadCache(workId) {
@@ -487,9 +560,9 @@ class OnlineWorldService {
     root.worlds[this.work.id] = {
       control: this.control,
       world: cacheWorldWithoutDeployedArchives(this.world),
+      localOverlay: this.captureLocalOverlay(),
       publicArchivesRequireRefresh: true,
       localEvents: this.localEvents.slice(-2000),
-      localPreferences: { ...this.localPreferences },
       appliedMapDeltaIds: [...this.appliedMapDeltaIds].slice(-4000),
       appliedAuthorityIds: [...this.appliedAuthorityIds].slice(-1000),
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
@@ -578,7 +651,9 @@ class OnlineWorldService {
         : (["men", "women", "any"].includes(orientation) ? orientation : "any"),
       characterProfileId: String(cached?.localPreferences?.characterProfileId || ""),
       characterTags: Array.isArray(cached?.localPreferences?.characterTags) ? cached.localPreferences.characterTags.map(String).slice(0, 80) : [],
-      initialGeneralWish: String(cached?.localPreferences?.initialGeneralWish || "").slice(0, 500)
+      initialGeneralWish: String(cached?.localPreferences?.initialGeneralWish || "").slice(0, 500),
+      characterProfile: cached?.localPreferences?.characterProfile ? normalizeCharacterProfile(cached.localPreferences.characterProfile) : null,
+      playerContext: cached?.localPreferences?.playerContext && typeof cached.localPreferences.playerContext === "object" ? cloneJson(cached.localPreferences.playerContext) : null
     };
     if (cached?.publicArchivesRequireRefresh) {
       this.appliedMapDeltaIds.clear();
@@ -593,7 +668,7 @@ class OnlineWorldService {
     if (cached?.world?.gameId === GRID_GAME_ID) {
       this.control = cached.control || null;
       this.world = normalizeWorldState(cached.world);
-      this.pruneForeignPrivateState();
+      this.restoreLocalOverlay(cached.localOverlay || null);
       this.directInbox = Array.isArray(cached.directInbox) ? cached.directInbox.slice(-100) : [];
       this.seenDirectMessageIds = new Set(Array.isArray(cached.seenDirectMessageIds) ? cached.seenDirectMessageIds : this.directInbox.map(item => item.messageId));
     } else {
@@ -796,7 +871,7 @@ class OnlineWorldService {
   clearResetLocalPlayer(targetAccountId) {
     if (String(targetAccountId) !== this.account().accountId) return;
     this.localEvents = [];
-    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "" };
+    this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.directInbox = [];
     this.seenDirectMessageIds.clear();
     this.worldBookFingerprint = null;
@@ -981,9 +1056,30 @@ class OnlineWorldService {
       this.localPreferences.characterProfileId = String(normalized.characterProfileId || "").slice(0, 100);
       this.localPreferences.characterTags = normalizedCharacterTags(normalized.characterTags);
       this.localPreferences.initialGeneralWish = String(normalized.initialGeneralWish || "").slice(0, 500);
+      this.localPreferences.characterProfile = normalizeCharacterProfile(normalized.characterProfile || { id: normalized.characterProfileId, displayName: normalized.displayName });
       normalized.orientation = orientation;
     }
     try {
+      if (normalized.type === "join") {
+        const parsed = await this.requestStructuredModel(
+          buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context:${normalized.idempotencyKey}`),
+          { attempts: 3, label: "玩家角色设定整理" }
+        );
+        const personaSummary = String(parsed?.personaSummary || "").trim();
+        const appearanceSummary = String(parsed?.appearanceSummary || "").trim();
+        const speechStyle = String(parsed?.speechStyle || "").trim();
+        const relationshipApproach = String(parsed?.relationshipApproach || "").trim();
+        if (!personaSummary || personaSummary.length > 2000 || appearanceSummary.length > 1000 || speechStyle.length > 500 || relationshipApproach.length > 800) throw new Error("玩家角色设定世界书返回不完整");
+        this.localPreferences.playerContext = {
+          displayName: this.localPreferences.characterProfile.displayName,
+          personaSummary,
+          appearanceSummary,
+          speechStyle,
+          relationshipApproach
+        };
+        normalized.playerContext = cloneJson(this.localPreferences.playerContext);
+        this.worldBookFingerprint = null;
+      }
       return await this.applyLocalIntent(normalized, account.accountId, { rollbackPreferences: normalized.type === "join" ? previousPreferences : null });
     } catch (error) {
       if (normalized.type === "join") {
@@ -1128,7 +1224,7 @@ class OnlineWorldService {
     let lastError = null;
     for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
       try {
-        const answer = await this.requestModel(request);
+        const answer = await this.requestModel({ ...request, conversationId: String(request?.conversationId || this.modelConversationId || "") });
         const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
         if (conversationId) this.modelConversationId = conversationId.slice(0, 200);
         return parseJsonAnswer(answer?.answer ?? answer);
@@ -1236,10 +1332,30 @@ class OnlineWorldService {
 
   async completeDialogue(request, actorAccountId, intent) {
     const general = this.world.generals?.[intent.generalId];
+    const player = this.world.players?.[actorAccountId];
     const parsed = await this.requestModelWithGeneralWorldBook(request, general);
     const reply = String(parsed.reply || "").trim().slice(0, 2000);
     if (!reply) throw new Error("将领互动未返回有效回答");
-    await this.applyLocalIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, userText: intent.topic, reply, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId);
+    const memory = await this.requestStructuredModel(
+      buildGeneralMemoryUpdateRequest(this.world, general, player, { userText: intent.topic, reply, idempotencyKey: `memory:${intent.idempotencyKey}` }, this.now()),
+      { attempts: 2, label: "将领记忆整理" }
+    );
+    const category = memory?.category === "deed" ? "deed" : memory?.category === "speech" ? "speech" : "";
+    const summary = String(memory?.summary || "").trim();
+    const emotion = String(memory?.emotion || "").trim();
+    const compactMemory = String(memory?.compactMemory || "").trim();
+    const intimacyDelta = Number(memory?.intimacyDelta);
+    if (!category || !summary || summary.length > 120 || emotion.length > 40 || !compactMemory || compactMemory.length > 1000 || !Number.isInteger(intimacyDelta) || intimacyDelta < -5 || intimacyDelta > 5) throw new Error("将领记忆世界书返回格式不完整");
+    await this.applyLocalIntent({
+      type: "record-general-dialogue",
+      generalId: intent.generalId,
+      topic: summary,
+      userText: intent.topic,
+      reply,
+      intimacyDelta,
+      memoryUpdate: { category, summary, emotion, intimacyDelta, compactMemory },
+      idempotencyKey: `dialogue:${intent.idempotencyKey}`
+    }, actorAccountId);
     const command = parsed.command && typeof parsed.command === "object" ? parsed.command : null;
     let commandResult = null;
     if (command?.type === "surrender" && general?.status === "captured") {
@@ -1247,7 +1363,7 @@ class OnlineWorldService {
     } else if (command?.type === "send-letter") {
       commandResult = await this.sendDirect(String(command.toAccountId || ""), "general-letter", { generalId: general?.id, text: String(command.text || "") }, { fromGeneralDialogue: true });
     }
-    return { reply, intimacyDelta: Number(parsed.intimacyDelta || 1), command: command || null, commandResult };
+    return { reply, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command || null, commandResult };
   }
 
   async requestModelWithGeneralWorldBook(request, general) {
@@ -1266,10 +1382,13 @@ class OnlineWorldService {
     const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
     const original = Array.isArray(config.world_book) ? config.world_book : [];
     const marker = `FYOW_GENERAL:${general.id}`;
-    if (original.some(entry => String(entry?.value || "").includes(marker))) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
+    const extras = [];
+    if (!original.some(entry => String(entry?.value || "").includes(marker))) extras.push(this.generalWorldBookEntry(general));
+    if (this.localPreferences.playerContext && !original.some(entry => String(entry?.value || "").includes("FYOW_PLAYER_CONTEXT:"))) extras.push(this.playerWorldBookEntry());
+    if (!extras.length) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
     let applied = false;
     try {
-      await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: [...original, this.generalWorldBookEntry(general)] }, timeout: 15000 });
+      await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: [...original, ...extras] }, timeout: 15000 });
       applied = true;
     } catch {
       return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
@@ -1309,6 +1428,20 @@ class OnlineWorldService {
     };
   }
 
+  playerWorldBookEntry() {
+    const context = this.localPreferences.playerContext || {};
+    const marker = `FYOW_PLAYER_CONTEXT:${this.localPreferences.characterProfileId || "bound"}`;
+    return {
+      group: "在线游戏世界/玩家角色",
+      match_type: 2,
+      key: `_or_${String(context.displayName || "玩家").slice(0, 80)}`,
+      key_region: 2,
+      value_type: 0,
+      value: `${marker}\n角色摘要：${context.personaSummary || "暂无"}\n外貌：${context.appearanceSummary || "暂无"}\n说话方式：${context.speechStyle || "暂无"}\n关系倾向：${context.relationshipApproach || "暂无"}`.slice(0, 6000),
+      value_configs: [], value_region: 1, sort: -1, depth: 0, probability: 100, enable: true
+    };
+  }
+
   async reconcileOwnGeneralWorldBooks() {
     if (!this.world || !this.work) return;
     const conversationId = String(this.modelConversationId || "").trim();
@@ -1317,17 +1450,25 @@ class OnlineWorldService {
     const player = this.world.players?.[accountId];
     if (!player) return;
     const desired = (player.carriedGeneralIds || []).map(id => this.world.generals?.[id]).filter(Boolean);
-    const fingerprint = sha256(Buffer.from(canonicalJson(desired.map(general => ({ id: general.id, name: general.name, setting: general.setting, memoryText: general.memoryText })))))
+    const fingerprint = sha256(Buffer.from(canonicalJson({
+      playerContext: this.localPreferences.playerContext,
+      generals: desired.map(general => ({ id: general.id, name: general.name, setting: general.setting, memoryText: general.memoryText }))
+    })))
     if (fingerprint === this.worldBookFingerprint) return;
     const payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
     const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
-    const worldBook = (Array.isArray(config.world_book) ? config.world_book : []).filter(entry => !String(entry?.value || "").includes("FYOW_GENERAL:"));
+    const worldBook = (Array.isArray(config.world_book) ? config.world_book : []).filter(entry => {
+      const value = String(entry?.value || "");
+      return !value.includes("FYOW_GENERAL:") && !value.includes("FYOW_PLAYER_CONTEXT:");
+    });
+    if (this.localPreferences.playerContext) worldBook.push(this.playerWorldBookEntry());
     worldBook.push(...desired.map(general => this.generalWorldBookEntry(general)));
     await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: worldBook }, timeout: 15000 });
     const verifiedPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
     const verified = verifiedPayload?.data?.data ?? verifiedPayload?.data ?? verifiedPayload ?? {};
     const persisted = new Set((Array.isArray(verified.world_book) ? verified.world_book : []).map(entry => String(entry?.value || "").match(/FYOW_GENERAL:([^\s]+)/)?.[1]).filter(Boolean));
-    if (persisted.size !== desired.length || desired.some(general => !persisted.has(String(general.id)))) throw new Error("将领世界书保存后校验失败");
+    const playerPersisted = !this.localPreferences.playerContext || (Array.isArray(verified.world_book) ? verified.world_book : []).some(entry => String(entry?.value || "").includes("FYOW_PLAYER_CONTEXT:"));
+    if (!playerPersisted || persisted.size !== desired.length || desired.some(general => !persisted.has(String(general.id)))) throw new Error("玩家与将领世界书保存后校验失败");
     this.worldBookFingerprint = fingerprint;
   }
 

@@ -23,7 +23,14 @@ const MAX_RELEASE_METADATA_BYTES = 1024 * 1024;
 const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_SIGNATURE_BYTES = 4096;
 const MAX_INSTALLER_BYTES = 512 * 1024 * 1024;
-const NETWORK_TIMEOUT_MS = 8000;
+// GitHub can briefly reset an individual asset request while the desktop
+// proxy is reconnecting. Keep a single startup deadline, but allow a few
+// short attempts inside it so a transient transport error does not strand
+// the login page.
+const NETWORK_TIMEOUT_MS = 30000;
+const NETWORK_RETRY_ATTEMPTS = 3;
+const NETWORK_ATTEMPT_TIMEOUT_MS = 9000;
+const NETWORK_RETRY_DELAYS_MS = [350, 800];
 // These two files are the complete trust boundary for application code at
 // runtime: app.asar contains the main/preload/renderer code and the executable
 // is the Electron host which loads it. Keep this deliberately small so every
@@ -345,7 +352,14 @@ class ReleaseSecurityGate {
 
   async initialize() {
     if (!this.isPackaged) return this.state();
-    if (!this.initializationPromise) this.initializationPromise = this.initializeStartupVerification();
+    // A failed startup check must be retryable from the login action. A
+    // successful check remains authoritative for this process lifetime.
+    if (this.securityState.verified) return this.state();
+    if (!this.initializationPromise) {
+      this.initializationPromise = this.initializeStartupVerification().finally(() => {
+        this.initializationPromise = null;
+      });
+    }
     return this.initializationPromise;
   }
 
@@ -359,22 +373,35 @@ class ReleaseSecurityGate {
   }
 
   async fetch(url, options, maxBytes, label, deadlineAt) {
-    const remainingMs = Math.trunc(Number(deadlineAt) - Date.now());
-    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
-      throw new ReleaseSecurityError("network-timeout", `${label}连接超时`);
+    let lastError = null;
+    for (let attempt = 0; attempt < NETWORK_RETRY_ATTEMPTS; attempt += 1) {
+      const remainingMs = Math.trunc(Number(deadlineAt) - Date.now());
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+        throw new ReleaseSecurityError("network-timeout", `${label}连接超时`);
+      }
+      const attemptTimeout = Math.min(remainingMs, NETWORK_ATTEMPT_TIMEOUT_MS);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), attemptTimeout);
+      try {
+        const response = await this.net.fetch(url, { ...options, redirect: "follow", signal: controller.signal });
+        return await readBoundedResponse(response, maxBytes, label);
+      } catch (error) {
+        if (error instanceof ReleaseSecurityError
+            && !["network-timeout", "network-error"].includes(error.code)) throw error;
+        const timedOut = error?.name === "AbortError" || error?.code === "network-timeout";
+        lastError = error instanceof ReleaseSecurityError
+          ? error
+          : new ReleaseSecurityError(timedOut ? "network-timeout" : "network-error", timedOut ? `${label}连接超时` : `${label}连接失败`);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (attempt + 1 >= NETWORK_RETRY_ATTEMPTS) break;
+      const delayMs = NETWORK_RETRY_DELAYS_MS[attempt] || 0;
+      const afterAttemptMs = Math.trunc(Number(deadlineAt) - Date.now());
+      if (afterAttemptMs <= delayMs) break;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), remainingMs);
-    try {
-      const response = await this.net.fetch(url, { ...options, redirect: "follow", signal: controller.signal });
-      return await readBoundedResponse(response, maxBytes, label);
-    } catch (error) {
-      if (error instanceof ReleaseSecurityError) throw error;
-      const timedOut = error?.name === "AbortError";
-      throw new ReleaseSecurityError(timedOut ? "network-timeout" : "network-error", timedOut ? `${label}连接超时` : `${label}连接失败`);
-    } finally {
-      clearTimeout(timer);
-    }
+    throw lastError || new ReleaseSecurityError("network-error", `${label}连接失败`);
   }
 
   async fetchLatestVerification(deadlineAt) {

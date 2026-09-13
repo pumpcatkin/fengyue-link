@@ -894,7 +894,8 @@ describe("Electron platform API regressions", () => {
     expect(releaseSecurity).toContain('const OFFICIAL_REPOSITORY = "pumpcatkin/fengyue-link"');
     expect(releaseSecurity).toContain("crypto.verify(null, bytes, publicKey, signature)");
     expect(releaseSecurity).toContain('path.join(this.resourcesPath, "app.asar")');
-    expect(releaseSecurity).toContain("const NETWORK_TIMEOUT_MS = 8000");
+    expect(releaseSecurity).toContain("const NETWORK_TIMEOUT_MS = 30000");
+    expect(releaseSecurity).toContain("const NETWORK_RETRY_ATTEMPTS = 3");
     expect(releaseSecurity).toContain("LATEST_MANIFEST_URL");
     expect(releaseSecurity).toContain("LATEST_SIGNATURE_URL");
     expect(releaseSecurity).not.toContain("this.fetch(LATEST_RELEASE_API");

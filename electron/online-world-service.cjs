@@ -14,7 +14,7 @@ const {
   verifySignedRecord,
   createResetDirective
 } = require("./online-world-protocol.cjs");
-const { sealJson, openSealedJson, publicIdentity } = require("./online-world-crypto.cjs");
+const { sealJson, openSealedJson } = require("./online-world-crypto.cjs");
 const { parseProgram } = require("./online-world-runtime.cjs");
 const { builtInGridProgram, validateGameCard, createExportedGameCard, summarizeGameCard } = require("./online-world-card.cjs");
 const {
@@ -34,9 +34,6 @@ const POLL_INTERVAL_MS = 5000;
 const DIRECT_RATE_WINDOW_MS = 60 * 1000;
 const DIRECT_SEND_LIMIT = 12;
 const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
-const INTENT_RATE_WINDOW_MS = 60 * 1000;
-const INTENT_RATE_LIMIT = 30;
-const INTENT_PROCESS_LIMIT_PER_SYNC = 60;
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -100,6 +97,80 @@ function commentId(value) {
 
 function commentAccountId(value) {
   return String(value?.account_id || value?.accountId || value?.created_by_account_id || value?.from_account_id || value?.account?.id || value?.user?.id || value?.author?.id || value?.created_by?.id || value?.sender?.id || "");
+}
+
+function commentTimestamp(value) {
+  const raw = value?.created_at ?? value?.createdAt ?? value?.create_time ?? value?.createTime
+    ?? value?.published_at ?? value?.publishedAt ?? value?.timestamp ?? null;
+  if (raw == null || raw === "") return 0;
+  if (typeof raw === "number" || /^\d+(?:\.\d+)?$/.test(String(raw))) {
+    const numeric = Number(raw);
+    if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+    return numeric < 10_000_000_000 ? Math.round(numeric * 1000) : Math.round(numeric);
+  }
+  const parsed = Date.parse(String(raw));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function recordPlatformOrder(item) {
+  const sources = Array.isArray(item?.sources) ? item.sources : [];
+  const timestamps = sources.map(commentTimestamp).filter(Boolean);
+  return {
+    timestamp: timestamps.length ? Math.max(...timestamps) : 0,
+    commentId: sources.map(commentId).filter(Boolean).sort().at(-1) || ""
+  };
+}
+
+function comparePlatformOrder(left, right) {
+  const a = recordPlatformOrder(left);
+  const b = recordPlatformOrder(right);
+  return a.timestamp - b.timestamp || a.commentId.localeCompare(b.commentId);
+}
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function compareOrderValue(left, right) {
+  return Number(left?.timestamp || 0) - Number(right?.timestamp || 0)
+    || String(left?.commentId || "").localeCompare(String(right?.commentId || ""));
+}
+
+function publicCells(state) {
+  return Object.fromEntries(Object.entries(state?.cells || {})
+    .filter(([, cell]) => cell?.ownerAccountId || Number(cell?.soldiers || 0) || (cell?.generalIds || []).length)
+    .map(([key, cell]) => [key, {
+      ownerAccountId: cell.ownerAccountId ? String(cell.ownerAccountId) : null,
+      soldiers: Math.max(0, Math.trunc(Number(cell.soldiers || 0))),
+      generalIds: [...new Set((cell.generalIds || []).map(String))].slice(0, 2)
+    }]));
+}
+
+function publicGenerals(state) {
+  return Object.fromEntries(Object.entries(state?.generals || {})
+    .filter(([, general]) => general?.status === "deployed")
+    .map(([id, general]) => [id, cloneJson(general)]));
+}
+
+function changedEntries(before, after) {
+  const changes = {};
+  for (const key of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
+    const previous = Object.hasOwn(before || {}, key) ? before[key] : null;
+    const next = Object.hasOwn(after || {}, key) ? after[key] : null;
+    if (canonicalJson(previous) !== canonicalJson(next)) changes[key] = cloneJson(next);
+  }
+  return changes;
+}
+
+function createPublicMapChanges(beforeWorld, afterWorld) {
+  return {
+    cells: changedEntries(publicCells(beforeWorld), publicCells(afterWorld)),
+    generals: changedEntries(publicGenerals(beforeWorld), publicGenerals(afterWorld))
+  };
+}
+
+function hasPublicMapChanges(changes) {
+  return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length);
 }
 
 function parseJsonAnswer(value) {
@@ -237,8 +308,14 @@ class OnlineWorldService {
     this.seenDirectMessageIds = new Set();
     this.directSendTimes = [];
     this.directReceiveTimes = new Map();
-    this.intentSubmitTimes = [];
-    this.authorityIntentTimes = new Map();
+    this.localEvents = [];
+    this.localPreferences = { orientation: "any" };
+    this.appliedMapDeltaIds = new Set();
+    this.publicMapOrder = { timestamp: 0, commentId: "" };
+    this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+    this.publicCellOrders = {};
+    this.publicGeneralOrders = {};
+    this.publicParticipantOrders = {};
     this.worldBookFingerprint = null;
     this.pollTimer = null;
     this.mapFactsCache = null;
@@ -270,6 +347,7 @@ class OnlineWorldService {
       history: { ...this.history },
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
+      localEventCount: this.localEvents.length,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
       program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "艳猎征途", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
@@ -304,6 +382,65 @@ class OnlineWorldService {
     try { this.onChange(this.state()); } catch {}
   }
 
+  recordLocalEvent(event) {
+    if (!event) return;
+    this.localEvents.push(cloneJson(event));
+    if (this.localEvents.length > 2000) this.localEvents.splice(0, this.localEvents.length - 2000);
+  }
+
+  captureLocalOverlay() {
+    if (!this.world) return null;
+    const accountId = this.account().accountId;
+    const allowed = candidate => String(candidate) === accountId;
+    return {
+      privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
+      players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
+        ...(Object.hasOwn(player, "gold") ? { gold: Number(player.gold || 0) } : {}),
+        ...(Object.hasOwn(player, "fieldArmySoldiers") ? { fieldArmySoldiers: Number(player.fieldArmySoldiers || 0) } : {}),
+        ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {})
+      }])),
+      generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
+      jobs: Object.fromEntries(Object.entries(this.world.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
+      processedIntents: [...(this.world.processedIntents || [])]
+    };
+  }
+
+  pruneForeignPrivateState() {
+    if (!this.world) return;
+    normalizeWorldState(this.world);
+    const accountId = this.account().accountId;
+    this.world.privatePlayers = Object.fromEntries(Object.entries(this.world.privatePlayers).filter(([id]) => id === accountId));
+    this.world.jobs = Object.fromEntries(Object.entries(this.world.jobs).filter(([, job]) => String(job.accountId) === accountId));
+    for (const [id, general] of Object.entries(this.world.generals)) {
+      if (general.status !== "deployed" && String(general.holderAccountId) !== accountId) delete this.world.generals[id];
+    }
+    for (const [id, player] of Object.entries(this.world.players)) {
+      if (id === accountId) continue;
+      delete player.gold;
+      delete player.fieldArmySoldiers;
+      delete player.carriedGeneralIds;
+      delete player.position;
+    }
+  }
+
+  restoreLocalOverlay(overlay) {
+    if (!this.world) return;
+    normalizeWorldState(this.world);
+    if (overlay) {
+      Object.assign(this.world.privatePlayers, overlay.privatePlayers || {});
+      for (const [accountId, fields] of Object.entries(overlay.players || {})) if (this.world.players[accountId]) Object.assign(this.world.players[accountId], fields);
+      Object.assign(this.world.generals, overlay.generals || {});
+      Object.assign(this.world.jobs, overlay.jobs || {});
+      this.world.processedIntents = [...new Set([...(this.world.processedIntents || []), ...(overlay.processedIntents || [])])].slice(-1000);
+    }
+    const accountId = this.account().accountId;
+    if (accountId && this.world.players[accountId]) {
+      this.world.privatePlayers[accountId] ||= {};
+      this.world.privatePlayers[accountId].orientation = this.localPreferences.orientation;
+    }
+    this.pruneForeignPrivateState();
+  }
+
   loadCache(workId) {
     if (!this.cacheFile || !fs.existsSync(this.cacheFile)) return null;
     try {
@@ -318,7 +455,21 @@ class OnlineWorldService {
     try {
       if (fs.existsSync(this.cacheFile)) root = readJsonWithBackupSync(fs, this.cacheFile, value => value?.version === 1 && value?.worlds && typeof value.worlds === "object").value || root;
     } catch {}
-    root.worlds[this.work.id] = { control: this.control, world: this.world, directInbox: this.directInbox.slice(-100), seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500), updatedAt: this.now() };
+    root.worlds[this.work.id] = {
+      control: this.control,
+      world: this.world,
+      localEvents: this.localEvents.slice(-2000),
+      localPreferences: { ...this.localPreferences },
+      appliedMapDeltaIds: [...this.appliedMapDeltaIds].slice(-4000),
+      publicMapOrder: { ...this.publicMapOrder },
+      publicMapBaselineOrder: { ...this.publicMapBaselineOrder },
+      publicCellOrders: this.publicCellOrders,
+      publicGeneralOrders: this.publicGeneralOrders,
+      publicParticipantOrders: this.publicParticipantOrders,
+      directInbox: this.directInbox.slice(-100),
+      seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
+      updatedAt: this.now()
+    };
     atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
   }
 
@@ -370,9 +521,28 @@ class OnlineWorldService {
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
     this.mapFactsCache = null;
     const cached = this.loadCache(this.work.id);
+    this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
+    this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
+    this.publicMapOrder = {
+      timestamp: Number(cached?.publicMapOrder?.timestamp || 0),
+      commentId: String(cached?.publicMapOrder?.commentId || "")
+    };
+    this.publicMapBaselineOrder = {
+      timestamp: Number(cached?.publicMapBaselineOrder?.timestamp || 0),
+      commentId: String(cached?.publicMapBaselineOrder?.commentId || "")
+    };
+    this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
+    this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
+    this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
+    this.localPreferences = {
+      orientation: ["men", "women", "any"].includes(cached?.localPreferences?.orientation)
+        ? cached.localPreferences.orientation
+        : (["men", "women", "any"].includes(orientation) ? orientation : "any")
+    };
     if (cached?.world?.gameId === GRID_GAME_ID) {
       this.control = cached.control || null;
       this.world = normalizeWorldState(cached.world);
+      this.pruneForeignPrivateState();
       this.directInbox = Array.isArray(cached.directInbox) ? cached.directInbox.slice(-100) : [];
       this.seenDirectMessageIds = new Set(Array.isArray(cached.seenDirectMessageIds) ? cached.seenDirectMessageIds : this.directInbox.map(item => item.messageId));
     } else {
@@ -380,7 +550,7 @@ class OnlineWorldService {
       this.world = null;
     }
     this.pendingJoin = {
-      orientation: ["men", "women", "any"].includes(orientation) ? orientation : "any",
+      orientation: this.localPreferences.orientation,
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
     await this.sync(true);
@@ -478,7 +648,16 @@ class OnlineWorldService {
 
   async postRecord(record, options = {}) {
     const responses = [];
-    for (const content of encodeCommentRecord(record)) responses.push(await this.postComment(content, options));
+    for (const content of encodeCommentRecord(record)) {
+      const response = await this.postComment(content, options);
+      const source = firstObject(response, item => Boolean(commentId(item))) || response || {};
+      responses.push({
+        ...(source && typeof source === "object" ? source : {}),
+        id: commentId(source) || commentId(response),
+        account_id: commentAccountId(source) || commentAccountId(response) || this.account().accountId,
+        content
+      });
+    }
     return responses;
   }
 
@@ -515,6 +694,82 @@ class OnlineWorldService {
     return (item.sources || []).some(source => commentIsFromAuthor(source) || commentAccountId(source) === this.work.authorAccountId);
   }
 
+  validMapDelta(item) {
+    const record = item?.record;
+    if (record?.schema !== FYOW_SCHEMAS.mapDelta || record.seasonId !== this.control?.seasonId || record.workId !== this.work?.id || record.gameId !== GRID_GAME_ID) return false;
+    const actorAccountId = String(record.actorAccountId || "");
+    if (!actorAccountId || !record.deviceSigningPublicKey || !verifySignedRecord(record, record.deviceSigningPublicKey)) return false;
+    if (!(item.sources || []).some(source => commentAccountId(source) === actorAccountId) || !recordPlatformOrder(item).timestamp) return false;
+    const cells = record.changes?.cells;
+    const generals = record.changes?.generals;
+    if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
+    if (Object.keys(cells).length > GRID_SIZE * GRID_SIZE || Object.keys(generals).length > 100) return false;
+    for (const [key, cell] of Object.entries(cells)) {
+      const match = key.match(/^(\d+),(\d+)$/);
+      if (!match) return false;
+      const x = Number(match[1]);
+      const y = Number(match[2]);
+      if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
+      if (cell == null) continue;
+      if (String(cell.ownerAccountId || "") !== actorAccountId) return false;
+      if (!Number.isSafeInteger(Number(cell.soldiers)) || Number(cell.soldiers) < 0 || Number(cell.soldiers) > staticCell(this.world.seed, x, y).garrisonCap) return false;
+      if (!Array.isArray(cell.generalIds) || cell.generalIds.length > 2 || new Set(cell.generalIds.map(String)).size !== cell.generalIds.length) return false;
+    }
+    for (const general of Object.values(generals)) {
+      if (general == null) continue;
+      if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
+      const x = Number(general.location.x);
+      const y = Number(general.location.y);
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
+    }
+    return true;
+  }
+
+  applyMapDelta(item) {
+    if (!this.validMapDelta(item)) return false;
+    const record = item.record;
+    const order = recordPlatformOrder(item);
+    if (this.appliedMapDeltaIds.has(String(record.mapDeltaId)) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
+    for (const [key, cell] of Object.entries(record.changes.cells)) {
+      if (compareOrderValue(order, this.publicCellOrders[key] || this.publicMapBaselineOrder) <= 0) continue;
+      if (cell == null) delete this.world.cells[key];
+      else this.world.cells[key] = cloneJson(cell);
+      this.publicCellOrders[key] = order;
+    }
+    for (const [id, general] of Object.entries(record.changes.generals)) {
+      if (compareOrderValue(order, this.publicGeneralOrders[id] || this.publicMapBaselineOrder) <= 0) continue;
+      if (general == null) delete this.world.generals[id];
+      else this.world.generals[id] = cloneJson(general);
+      this.publicGeneralOrders[id] = order;
+    }
+    const actorAccountId = String(record.actorAccountId);
+    if (compareOrderValue(order, this.publicParticipantOrders[actorAccountId] || this.publicMapBaselineOrder) > 0) {
+      const existing = this.world.players[actorAccountId] || { accountId: actorAccountId };
+      this.world.players[actorAccountId] = {
+        ...existing,
+        accountId: actorAccountId,
+        displayName: String(record.participant?.displayName || existing.displayName || actorAccountId).slice(0, 40),
+        deviceSigningPublicKey: record.deviceSigningPublicKey,
+        deviceEncryptionPublicKey: record.deviceEncryptionPublicKey,
+        commentRootId: existing.commentRootId || item.sources.map(commentId).filter(Boolean).sort()[0] || null
+      };
+      if (actorAccountId !== this.account().accountId) delete this.world.players[actorAccountId].position;
+      this.publicParticipantOrders[actorAccountId] = order;
+    }
+    this.world.revision = Number(this.world.revision || 0) + 1;
+    this.appliedMapDeltaIds.add(String(record.mapDeltaId));
+    if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
+    this.publicMapOrder = order;
+    return true;
+  }
+
+  applyMapDeltas(records) {
+    return records
+      .filter(item => item.record?.schema === FYOW_SCHEMAS.mapDelta)
+      .sort(comparePlatformOrder)
+      .reduce((count, item) => count + Number(this.applyMapDelta(item)), 0);
+  }
+
   async sync(fullScan = false) {
     if (!this.work || this.syncing) return this.state();
     this.syncing = true;
@@ -535,15 +790,25 @@ class OnlineWorldService {
           .filter(item => item.record?.schema === FYOW_SCHEMAS.snapshot && item.record.seasonId === this.control.seasonId && item.record.workId === this.work.id && item.record.gameId === GRID_GAME_ID)
           .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
           .filter(item => item.record.stateHash === sha256(Buffer.from(canonicalJson(item.record.state))))
-          .sort((left, right) => Number(right.record.revision || 0) - Number(left.record.revision || 0));
-        const snapshot = snapshots[0]?.record;
-        const cachedStateIsCurrent = this.world && Number(this.world.revision || 0) >= Number(snapshot?.revision || 0);
-        if (snapshot && !cachedStateIsCurrent) this.world = normalizeWorldState(snapshot.state);
+          .sort((left, right) => comparePlatformOrder(right, left));
+        const snapshotItem = snapshots[0];
+        const snapshot = snapshotItem?.record;
+        const snapshotOrder = recordPlatformOrder(snapshotItem);
+        const snapshotIsNewer = snapshot && (!this.world || compareOrderValue(snapshotOrder, this.publicMapOrder) > 0);
+        if (snapshotIsNewer) {
+          const localOverlay = this.captureLocalOverlay();
+          this.world = normalizeWorldState(cloneJson(snapshot.state));
+          this.restoreLocalOverlay(localOverlay);
+          this.publicMapOrder = snapshotOrder;
+          this.publicMapBaselineOrder = snapshotOrder;
+          this.appliedMapDeltaIds.clear();
+          this.publicCellOrders = {};
+          this.publicGeneralOrders = {};
+          this.publicParticipantOrders = {};
+        }
         normalizeWorldState(this.world);
-        if (snapshot && this.isAuthority()) await this.restoreAuthoritySnapshot(snapshot);
-        await this.restoreVaults(history.assembled.records);
-        if (this.isAuthority() && this.world) await this.processPendingIntents(history.assembled.records);
-        if (this.isAuthority() && this.world) await this.settleAuthorityClock();
+        if (this.world) this.applyMapDeltas(history.assembled.records);
+        if (this.world) await this.settleLocalClock();
         await this.reconcileOwnGeneralWorldBooks();
         await this.receiveDirectWakes().catch(() => []);
         const resets = history.assembled.records
@@ -568,164 +833,16 @@ class OnlineWorldService {
     }
   }
 
-  async restoreVaults(records) {
-    if (!this.control || !this.world) return;
-    const currentAccountId = this.account().accountId;
-    const allowedAccounts = this.isAuthority() ? null : new Set([currentAccountId]);
-    const vaults = records
-      .filter(item => item.record?.schema === FYOW_SCHEMAS.privateVault && item.record.seasonId === this.control.seasonId)
-      .filter(item => !allowedAccounts || allowedAccounts.has(String(item.record.accountId)))
-      .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
-      .sort((left, right) => Number(right.record.revision || 0) - Number(left.record.revision || 0));
-    if (!vaults.length) return;
-    const latestByAccount = new Map();
-    for (const item of vaults) if (!latestByAccount.has(String(item.record.accountId))) latestByAccount.set(String(item.record.accountId), item.record);
-    const identity = await this.getIdentity();
-    normalizeWorldState(this.world);
-    for (const [accountId, vault] of latestByAccount) {
-      try {
-        const context = `${this.work.id}/${this.control.seasonId}/${accountId}`;
-        const box = accountId === currentAccountId ? (vault.playerBox || vault.box) : vault.authorityBox;
-        if (!box) continue;
-        const privateState = openSealedJson(box, identity.encryptionPrivateKey, context);
-        if (vault.commitment !== sha256(Buffer.from(canonicalJson(privateState)))) continue;
-        if (privateState.privatePlayer) this.world.privatePlayers[accountId] = privateState.privatePlayer;
-        if (this.world.players[accountId] && privateState.player) Object.assign(this.world.players[accountId], privateState.player);
-        for (const general of privateState.generals || []) this.world.generals[general.id] = general;
-        for (const job of privateState.jobs || []) this.world.jobs[job.id] = job;
-      } catch {}
-    }
-  }
-
-  async restoreAuthoritySnapshot(snapshot) {
-    if (!snapshot?.authorityBox || !this.isAuthority() || !this.world) return;
-    try {
-      const identity = await this.getIdentity();
-      const context = `${this.work.id}/${this.control.seasonId}/snapshot/${snapshot.snapshotId}`;
-      const privateState = openSealedJson(snapshot.authorityBox, identity.encryptionPrivateKey, context);
-      normalizeWorldState(this.world);
-      Object.assign(this.world.privatePlayers, privateState.privatePlayers || {});
-      for (const [accountId, fields] of Object.entries(privateState.players || {})) if (this.world.players[accountId]) Object.assign(this.world.players[accountId], fields);
-      for (const general of privateState.generals || []) this.world.generals[general.id] = general;
-      for (const job of privateState.jobs || []) this.world.jobs[job.id] = job;
-    } catch {}
-  }
-
-  async processPendingIntents(records) {
-    const pending = records
-      .filter(item => item.record?.schema === FYOW_SCHEMAS.intent
-        && item.record.seasonId === this.control.seasonId
-        && item.record.workId === this.work.id
-        && item.record.gameId === GRID_GAME_ID)
-      .sort((left, right) => Number(left.record.createdAt || 0) - Number(right.record.createdAt || 0));
-    let processedThisSync = 0;
-    for (const item of pending) {
-      if (processedThisSync >= INTENT_PROCESS_LIMIT_PER_SYNC) break;
-      const record = item.record;
-      if (this.world.processedIntents?.includes(record.idempotencyKey)) continue;
-      const sourceMatches = item.sources.some(source => commentAccountId(source) === record.actorAccountId);
-      if (!sourceMatches || !verifySignedRecord(record, record.deviceSigningPublicKey)) continue;
-      if (!this.consumeAuthorityIntentBudget(record.actorAccountId)) continue;
-      processedThisSync += 1;
-      const boundPlayer = this.world.players?.[record.actorAccountId];
-      if (boundPlayer?.deviceSigningPublicKey && boundPlayer.deviceSigningPublicKey !== record.deviceSigningPublicKey) {
-        await this.rejectIntent(record, new Error("玩家设备签名密钥与本赛季绑定不一致"));
-        continue;
-      }
-      try {
-        let intent = { ...record.intent, idempotencyKey: record.idempotencyKey };
-        if (intent.type === "join") {
-          const identity = await this.getIdentity();
-          const context = `${this.work.id}/${this.control.seasonId}/${record.actorAccountId}/join`;
-          const privateJoin = openSealedJson(record.privateBox, identity.encryptionPrivateKey, context);
-          intent = { ...intent, orientation: privateJoin.orientation };
-        }
-        await this.applyAuthorityIntent(intent, record.actorAccountId, {
-          deviceSigningPublicKey: record.deviceSigningPublicKey,
-          deviceEncryptionPublicKey: record.deviceEncryptionPublicKey,
-          sourceCommentId: commentId(item.sources[0])
-        });
-      } catch (error) {
-        if (!this.world.processedIntents?.includes(record.idempotencyKey)) await this.rejectIntent(record, error);
-      }
-    }
-  }
-
-  async rejectIntent(record, error) {
-    this.world.processedIntents ||= [];
-    this.world.processedIntents.push(String(record.idempotencyKey));
-    if (this.world.processedIntents.length > 1000) this.world.processedIntents.splice(0, this.world.processedIntents.length - 1000);
-    this.world.revision = Number(this.world.revision || 0) + 1;
-    const identity = await this.getIdentity();
-    const event = signRecord({
-      schema: FYOW_SCHEMAS.event,
-      eventId: crypto.randomUUID(),
-      gameId: GRID_GAME_ID,
-      workId: this.work.id,
-      seasonId: this.control.seasonId,
-      revision: this.world.revision,
-      actorAccountId: record.actorAccountId,
-      type: "intent-rejected",
-      intent: { type: String(record.intent?.type || "unknown"), idempotencyKey: record.idempotencyKey },
-      result: { accepted: false, reason: String(error?.message || error || "行动无效").slice(0, 200) },
-      createdAt: this.now()
-    }, identity.signingPrivateKey);
-    await this.postRecord(event);
-    await this.publishSnapshot();
-  }
-
   async submitIntent(intent = {}) {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
-    this.consumeIntentSubmitBudget();
     const account = this.account();
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
-    if (this.isAuthority()) return this.applyAuthorityIntent(normalized, account.accountId, { self: true });
-    const identity = await this.getIdentity();
-    let publicIntent = { ...normalized };
-    let privateBox = null;
-    if (publicIntent.type === "join") {
-      const orientation = ["men", "women", "any"].includes(publicIntent.orientation) ? publicIntent.orientation : this.pendingJoin?.orientation;
-      delete publicIntent.orientation;
-      const context = `${this.work.id}/${this.control.seasonId}/${account.accountId}/join`;
-      privateBox = sealJson({ orientation }, this.control.authorityEncryptionPublicKey, context);
+    if (normalized.type === "join") {
+      const orientation = ["men", "women", "any"].includes(normalized.orientation) ? normalized.orientation : this.pendingJoin?.orientation;
+      this.localPreferences.orientation = orientation;
+      normalized.orientation = orientation;
     }
-    const record = signRecord({
-      schema: FYOW_SCHEMAS.intent,
-      intentId: crypto.randomUUID(),
-      gameId: GRID_GAME_ID,
-      workId: this.work.id,
-      seasonId: this.control.seasonId,
-      actorAccountId: account.accountId,
-      idempotencyKey: normalized.idempotencyKey,
-      intent: publicIntent,
-      privateBox,
-      ...publicIdentity(identity),
-      deviceSigningPublicKey: identity.signingPublicKey,
-      deviceEncryptionPublicKey: identity.encryptionPublicKey,
-      createdAt: this.now()
-    }, identity.signingPrivateKey);
-    await this.postRecord(record);
-    return { queued: true, intentId: record.intentId, idempotencyKey: record.idempotencyKey };
-  }
-
-  consumeIntentSubmitBudget() {
-    const now = this.now();
-    this.intentSubmitTimes = this.intentSubmitTimes.filter(timestamp => now - timestamp < INTENT_RATE_WINDOW_MS);
-    if (this.intentSubmitTimes.length >= INTENT_RATE_LIMIT) throw new Error("游戏行动提交过于频繁，请稍后再试");
-    this.intentSubmitTimes.push(now);
-  }
-
-  consumeAuthorityIntentBudget(accountId) {
-    const now = this.now();
-    const key = String(accountId);
-    const times = (this.authorityIntentTimes.get(key) || []).filter(timestamp => now - timestamp < INTENT_RATE_WINDOW_MS);
-    if (times.length >= INTENT_RATE_LIMIT) {
-      this.authorityIntentTimes.set(key, times);
-      return false;
-    }
-    times.push(now);
-    this.authorityIntentTimes.set(key, times);
-    return true;
+    return this.applyLocalIntent(normalized, account.accountId);
   }
 
   sanitizedEvent(event) {
@@ -734,75 +851,92 @@ class OnlineWorldService {
     return event;
   }
 
-  async applyAuthorityIntent(intent, actorAccountId, metadata = {}) {
-    if (!this.isAuthority()) throw new Error("当前账号不是本局权威端");
+  async publishMapChanges(changes, identity) {
+    if (!hasPublicMapChanges(changes)) return null;
+    const actor = this.world.players?.[this.account().accountId];
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.mapDelta,
+      mapDeltaId: crypto.randomUUID(),
+      gameId: GRID_GAME_ID,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      actorAccountId: this.account().accountId,
+      participant: { displayName: String(actor?.displayName || this.account().username || "玩家").slice(0, 40) },
+      changes,
+      deviceSigningPublicKey: identity.signingPublicKey,
+      deviceEncryptionPublicKey: identity.encryptionPublicKey
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    const order = recordPlatformOrder({ sources });
+    const rootId = sources.map(commentId).filter(Boolean).sort()[0] || null;
+    if (actor && rootId && !actor.commentRootId) actor.commentRootId = rootId;
+    this.appliedMapDeltaIds.add(record.mapDeltaId);
+    if (order.timestamp) {
+      for (const key of Object.keys(changes.cells || {})) this.publicCellOrders[key] = order;
+      for (const id of Object.keys(changes.generals || {})) this.publicGeneralOrders[id] = order;
+      this.publicParticipantOrders[this.account().accountId] = order;
+      if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
+    }
+    return record;
+  }
+
+  async applyLocalIntent(intent, actorAccountId) {
+    if (String(actorAccountId) !== this.account().accountId) throw new Error("只能在本机执行当前玩家的行动");
     const identity = await this.getIdentity();
-    const outcome = applyIntent(this.world, intent, { actorAccountId, authorityAccountId: this.control.authorityAccountId, now: this.now() });
+    const actionTime = this.now();
+    const beforeWorld = cloneJson(this.world);
+    const outcome = applyIntent(this.world, intent, { actorAccountId, authorityAccountId: this.control.authorityAccountId, now: actionTime });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
     this.world = outcome.state;
     if (intent.type === "join") {
       const player = this.world.players[actorAccountId];
-      player.deviceSigningPublicKey = metadata.deviceSigningPublicKey || identity.signingPublicKey;
-      player.deviceEncryptionPublicKey = metadata.deviceEncryptionPublicKey || identity.encryptionPublicKey;
-      player.commentRootId = metadata.sourceCommentId || await this.postPlayerPresence(player);
+      player.deviceSigningPublicKey = identity.signingPublicKey;
+      player.deviceEncryptionPublicKey = identity.encryptionPublicKey;
     }
-    const signedEvent = signRecord(this.sanitizedEvent(outcome.event), identity.signingPrivateKey);
-    await this.postRecord(signedEvent);
+    const localEvent = this.sanitizedEvent(outcome.event);
+    this.recordLocalEvent(localEvent);
     await this.handleWorldBookTransition(intent, outcome, actorAccountId);
-    await this.publishSnapshot();
-    const affectedAccounts = new Set([actorAccountId, ...(outcome.effects || []).map(effect => effect.accountId).filter(Boolean)]);
-    for (const accountId of affectedAccounts) await this.publishPrivateVault(accountId);
+    const changes = createPublicMapChanges(beforeWorld, this.world);
+    const mapDelta = await this.publishMapChanges(changes, identity);
     let dialogue = null;
     if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
     await this.handleEffects(outcome.effects, identity);
     this.saveCache();
     this.notify();
-    return { event: signedEvent, effects: outcome.effects, dialogue, state: this.state() };
+    return { event: localEvent, mapDelta, effects: outcome.effects, dialogue, state: this.state() };
   }
 
-  async settleAuthorityClock() {
-    if (!this.isAuthority() || !this.world) return [];
+  async settleLocalClock() {
+    if (!this.world) return [];
+    const beforeWorld = cloneJson(this.world);
     const settled = settleWorld(this.world, this.now());
     if (!settled.effects.length) return [];
     this.world = normalizeWorldState(settled.state);
     this.world.revision = Number(this.world.revision || 0) + 1;
-    const identity = await this.getIdentity();
-    const event = signRecord({
+    const event = {
       schema: FYOW_SCHEMAS.event,
       eventId: crypto.randomUUID(),
       gameId: GRID_GAME_ID,
       workId: this.work.id,
       seasonId: this.control.seasonId,
       revision: this.world.revision,
-      actorAccountId: this.control.authorityAccountId,
+      actorAccountId: this.account().accountId,
       type: "time-settle",
       result: { effects: settled.effects },
       createdAt: settled.now
-    }, identity.signingPrivateKey);
-    await this.postRecord(event);
-    await this.publishSnapshot();
-    for (const accountId of new Set(settled.effects.map(effect => effect.accountId).filter(Boolean))) await this.publishPrivateVault(accountId);
+    };
+    this.recordLocalEvent(event);
+    const identity = await this.getIdentity();
+    await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world), identity);
     await this.handleEffects(settled.effects, identity);
     this.saveCache();
     return settled.effects;
-  }
-
-  async postPlayerPresence(player) {
-    const response = await this.postComment(`§FYOW3§PLAYER§${player.accountId}§${String(player.displayName || "玩家").slice(0, 40)}§${this.control.seasonId}`);
-    return commentId(response) || null;
   }
 
   async publishSnapshot() {
     const identity = await this.getIdentity();
     const state = projectWorldState(this.world, null);
     const snapshotId = crypto.randomUUID();
-    const authorityPrivateState = {
-      privatePlayers: this.world.privatePlayers || {},
-      players: Object.fromEntries(Object.entries(this.world.players || {}).map(([accountId, player]) => [accountId, { gold: Number(player.gold || 0), fieldArmySoldiers: Number(player.fieldArmySoldiers || 0), carriedGeneralIds: [...(player.carriedGeneralIds || [])] }])),
-      generals: Object.values(this.world.generals || {}).filter(general => general.status !== "deployed"),
-      jobs: Object.values(this.world.jobs || {})
-    };
-    const context = `${this.work.id}/${this.control.seasonId}/snapshot/${snapshotId}`;
     const snapshot = signRecord({
       schema: FYOW_SCHEMAS.snapshot,
       snapshotId,
@@ -812,43 +946,10 @@ class OnlineWorldService {
       revision: Number(this.world.revision || 0),
       state,
       stateHash: sha256(Buffer.from(canonicalJson(state))),
-      authorityBox: sealJson(authorityPrivateState, this.control.authorityEncryptionPublicKey, context),
       createdAt: this.now()
     }, identity.signingPrivateKey);
     await this.postRecord(snapshot);
     return snapshot;
-  }
-
-  async publishPrivateVault(accountId) {
-    const player = this.world.players[accountId];
-    if (!player?.deviceEncryptionPublicKey) return null;
-    const identity = await this.getIdentity();
-    const context = `${this.work.id}/${this.control.seasonId}/${accountId}`;
-    const privateState = {
-      privatePlayer: this.world.privatePlayers?.[accountId] || null,
-      player: {
-        gold: Number(player.gold || 0),
-        fieldArmySoldiers: Number(player.fieldArmySoldiers || 0),
-        carriedGeneralIds: [...(player.carriedGeneralIds || [])]
-      },
-      generals: Object.values(this.world.generals || {}).filter(general => general.holderAccountId === accountId && general.status !== "deployed"),
-      jobs: Object.values(this.world.jobs || {}).filter(job => job.accountId === accountId)
-    };
-    const vault = signRecord({
-      schema: FYOW_SCHEMAS.privateVault,
-      id: crypto.randomUUID(),
-      gameId: GRID_GAME_ID,
-      workId: this.work.id,
-      seasonId: this.control.seasonId,
-      accountId,
-      revision: Number(this.world.revision || 0),
-      commitment: sha256(Buffer.from(canonicalJson(privateState))),
-      playerBox: sealJson(privateState, player.deviceEncryptionPublicKey, context),
-      authorityBox: sealJson(privateState, this.control.authorityEncryptionPublicKey, context),
-      createdAt: this.now()
-    }, identity.signingPrivateKey);
-    await this.postRecord(vault);
-    return vault;
   }
 
   async handleEffects(effects, identity) {
@@ -859,7 +960,7 @@ class OnlineWorldService {
       const parsed = parseJsonAnswer(answer?.answer ?? answer);
       const setting = String(parsed.setting || "").trim().slice(0, 1000);
       if (!setting) throw new Error("将领生成结果缺少设定");
-      await this.applyAuthorityIntent({
+      await this.applyLocalIntent({
         type: "grant-general",
         generalId: crypto.randomUUID(),
         discoveryId: request.idempotencyKey,
@@ -869,7 +970,7 @@ class OnlineWorldService {
         setting,
         power: Math.max(100, Math.min(5000, Number(parsed.power) || 300)),
         idempotencyKey: `general:${request.idempotencyKey}`
-      }, effect.accountId, { internal: true });
+      }, effect.accountId);
     }
   }
 
@@ -878,7 +979,7 @@ class OnlineWorldService {
     const answer = await this.requestModelWithGeneralWorldBook(request, general);
     const parsed = parseJsonAnswer(answer?.answer ?? answer);
     const reply = String(parsed.reply || "").trim().slice(0, 2000);
-    await this.applyAuthorityIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
+    await this.applyLocalIntent({ type: "record-general-dialogue", generalId: intent.generalId, topic: parsed.memoryTopic || intent.topic, intimacyDelta: Number(parsed.intimacyDelta || 1), idempotencyKey: `dialogue:${intent.idempotencyKey}` }, actorAccountId);
     return { reply, intimacyDelta: Number(parsed.intimacyDelta || 1) };
   }
 
@@ -906,7 +1007,6 @@ class OnlineWorldService {
         this.worldBookFingerprint = null;
         await this.reconcileOwnGeneralWorldBooks();
       }
-      await this.postGeneralArchive(general, outcome.result.x, outcome.result.y);
     } else if ((intent.type === "recall-general" || intent.type === "grant-general") && String(actorAccountId) === this.account().accountId) {
       this.worldBookFingerprint = null;
       await this.reconcileOwnGeneralWorldBooks();
@@ -944,16 +1044,6 @@ class OnlineWorldService {
     const persisted = new Set((Array.isArray(verified.world_book) ? verified.world_book : []).map(entry => String(entry?.value || "").match(/FYOW_GENERAL:([^\s]+)/)?.[1]).filter(Boolean));
     if (persisted.size !== desired.length || desired.some(general => !persisted.has(String(general.id)))) throw new Error("将领世界书保存后校验失败");
     this.worldBookFingerprint = fingerprint;
-  }
-
-  async postGeneralArchive(general, x, y) {
-    const root = await this.postComment(`§FYOW3§GENERAL§${general.id}§${general.name}§${x},${y}§r${this.world.revision}`);
-    const parentId = commentId(root);
-    if (!parentId) throw new Error("平台没有返回将领主评论编号");
-    const target = this.control.authorityAccountId;
-    const identity = await this.getIdentity();
-    await this.postRecord(signRecord({ schema: FYOW_SCHEMAS.generalDefinition, id: crypto.randomUUID(), generalId: general.id, name: general.name, location: { x, y }, setting: general.setting, power: general.power, revision: this.world.revision }, identity.signingPrivateKey), { parentId, toAccountId: target });
-    await this.postRecord(signRecord({ schema: FYOW_SCHEMAS.generalMemory, id: crypto.randomUUID(), generalId: general.id, name: general.name, location: { x, y }, memory: general.memoryText || "暂无", revision: this.world.revision }, identity.signingPrivateKey), { parentId, toAccountId: target });
   }
 
   async findPrivateChat(accountId) {
@@ -1115,7 +1205,6 @@ class OnlineWorldService {
       this.control = newControl;
       await this.postRecord(newControl);
       await this.publishSnapshot();
-      for (const accountId of Object.keys(this.world.players || {})) await this.publishPrivateVault(accountId);
     } catch (error) {
       this.work = oldWork;
       this.control = oldControl;
@@ -1138,4 +1227,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, parseJsonAnswer, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

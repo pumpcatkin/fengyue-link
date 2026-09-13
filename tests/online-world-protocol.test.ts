@@ -22,6 +22,15 @@ describe("online game world comment protocol", () => {
     expect(assembled.records[0].record).toEqual(record);
   });
 
+  it("classifies public territory changes separately from private actions", () => {
+    const record = { schema: protocol.FYOW_SCHEMAS.mapDelta, mapDeltaId: "map-1", changes: { cells: { "2,3": { ownerAccountId: "a", soldiers: 20, generalIds: [] } }, generals: {} } };
+    const comments = protocol.encodeCommentRecord(record).map((content: string, index: number) => ({ id: `m${index}`, content }));
+    const assembled = protocol.assembleCommentRecords(comments);
+    expect(assembled.records).toHaveLength(1);
+    expect(assembled.records[0].kind).toBe("MAP");
+    expect(assembled.records[0].record).toEqual(record);
+  });
+
   it("stops a full history scan once an intact snapshot covers older events", () => {
     const snapshot = { schema: protocol.FYOW_SCHEMAS.snapshot, snapshotId: "snap", revision: 50, stateHash: "x" };
     const event = { schema: protocol.FYOW_SCHEMAS.event, eventId: "event", revision: 42 };

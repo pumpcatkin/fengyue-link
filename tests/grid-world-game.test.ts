@@ -143,8 +143,11 @@ describe("grid conquest rules", () => {
     const publicState = game.projectWorldState(state, null);
     expect(publicState.players.a.gold).toBeUndefined();
     expect(publicState.players.a.carriedGeneralIds).toBeUndefined();
+    expect(publicState.players.a.position).toBeUndefined();
+    expect(publicState.players.a.joinedAt).toBeUndefined();
     expect(publicState.generals["private-general"]).toBeUndefined();
     expect(Object.keys(publicState.jobs)).toHaveLength(0);
+    expect(publicState.processedIntents).toBeUndefined();
     const ownState = game.projectWorldState(state, "a");
     expect(ownState.players.a.gold).toBeTypeOf("number");
     expect(ownState.generals["private-general"].name).toBe("青禾");

@@ -8,6 +8,7 @@ const FYOW_SCHEMAS = Object.freeze({
   intent: "fyow.intent/3",
   event: "fyow.event/3",
   snapshot: "fyow.snapshot/3",
+  mapDelta: "fyow.map-delta/1",
   privateVault: "fyow.private-vault/3",
   direct: "fyow.direct/3",
   directWake: "fyow.direct-wake/3",
@@ -53,6 +54,7 @@ function recordKind(record) {
   if (schema === FYOW_SCHEMAS.intent) return "INTENT";
   if (schema === FYOW_SCHEMAS.event) return "EVENT";
   if (schema === FYOW_SCHEMAS.snapshot) return "SNAP";
+  if (schema === FYOW_SCHEMAS.mapDelta) return "MAP";
   if (schema === FYOW_SCHEMAS.privateVault) return "VAULT";
   if (schema === FYOW_SCHEMAS.direct) return "DIRECT";
   if (schema === FYOW_SCHEMAS.directWake) return "DMWAKE";

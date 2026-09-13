@@ -136,11 +136,11 @@ function renderDirect(){
   document.querySelector("#direct-form button").disabled=!ownPlayer()||!players.length;
 }
 function render(){
-  document.querySelector("#world-status").textContent=payload?.syncing?"正在同步评论账本…":payload?.initialized?`赛季 ${payload.control?.seasonId?.slice(0,8)||"—"} · 修订 ${payload.world?.revision||0}`:payload?.status==="needs-initialization"?"等待作品作者初始化赛季":"等待宿主";
+  document.querySelector("#world-status").textContent=payload?.syncing?"正在同步公共地图…":payload?.initialized?`赛季 ${payload.control?.seasonId?.slice(0,8)||"—"} · 地图修订 ${payload.world?.revision||0}`:payload?.status==="needs-initialization"?"等待作品作者初始化赛季":"等待宿主";
   renderPlayer();renderCell();renderJobs();renderGenerals();renderMarchGenerals();renderDirect();draw();renderClock();
   if(!mapCentered&&ownPlayer()){mapCentered=true;requestAnimationFrame(()=>centerMap(ownPlayer().position,"auto"))}
 }
-function sendIntent(intent){if(!payload?.initialized){showMessage("赛季尚未初始化");return}host("intent",{intent:{...intent,idempotencyKey:crypto.randomUUID()}});showMessage("行动已提交给工具宿主验证…")}
+function sendIntent(intent){if(!payload?.initialized){showMessage("赛季尚未初始化");return}host("intent",{intent:{...intent,idempotencyKey:crypto.randomUUID()}});showMessage("正在本地执行行动…")}
 function openDialogue(general){dialogueGeneralId=general.id;document.querySelector("#dialogue-panel").classList.remove("hidden");document.querySelector("#dialogue-general").textContent=`与 ${general.name} 交谈`;document.querySelector("#dialogue-input").focus()}
 function addDialogue(text){dialogueLines.push(text);const target=document.querySelector("#dialogue-history");const line=document.createElement("p");line.textContent=text;target.append(line);target.scrollTop=target.scrollHeight}
 
@@ -162,7 +162,7 @@ document.querySelector("#dialogue-form").addEventListener("submit",event=>{event
 document.querySelector("#direct-type").addEventListener("change",renderDirectGeneralOptions);
 document.querySelector("#direct-recipient").addEventListener("change",renderDirectGeneralOptions);
 document.querySelector("#direct-form").addEventListener("submit",event=>{event.preventDefault();const toAccountId=document.querySelector("#direct-recipient").value;const type=document.querySelector("#direct-type").value;const text=document.querySelector("#direct-text").value.trim();const generalId=document.querySelector("#direct-general").value;if(!toAccountId){showMessage("当前没有可选择的收信玩家");return}if(!text){showMessage("请输入消息正文");return}if(type==="captured-general-letter"&&!generalId){showMessage("请选择当前带在身边的被俘将领");return}host("direct",{message:{toAccountId,type,payload:{text,...(generalId?{generalId}:{})}}});showMessage("正在通过评论回复唤醒收信方，并发送加密私信…")});
-window.addEventListener("message",event=>{if(event.source!==parent||event.data?.source!=="fengyue-host")return;if(event.data.type==="state"){payload=event.data.state;receivedAt=Date.now();serverNow=Number(payload.serverNow||Date.now());render()}else if(event.data.type==="result"){const result=event.data.result;if(result?.dialogue?.reply)addDialogue(`${document.querySelector("#dialogue-general").textContent.replace("与 ","").replace(" 交谈","")}：${result.dialogue.reply}`);if(result?.direct){document.querySelector("#direct-text").value="";showMessage("定向消息已加密发送，并在收信方评论入口留下唤醒指令。")}else showMessage(result?.queued?"行动已写入评论区，等待权威端确认。":"行动已经确认并写入账本。") }else if(event.data.type==="error")showMessage(`行动失败：${event.data.message}`)});
+window.addEventListener("message",event=>{if(event.source!==parent||event.data?.source!=="fengyue-host")return;if(event.data.type==="state"){payload=event.data.state;receivedAt=Date.now();serverNow=Number(payload.serverNow||Date.now());render()}else if(event.data.type==="result"){const result=event.data.result;if(result?.dialogue?.reply)addDialogue(`${document.querySelector("#dialogue-general").textContent.replace("与 ","").replace(" 交谈","")}：${result.dialogue.reply}`);if(result?.direct){document.querySelector("#direct-text").value="";showMessage("定向消息已加密发送，并在收信方评论入口留下唤醒指令。")}else showMessage(result?.mapDelta?"行动已保存，本次领地变化已经同步到公共地图。":"行动已保存到本地，本次没有产生领地变化。") }else if(event.data.type==="error")showMessage(`行动失败：${event.data.message}`)});
 setInterval(()=>{renderClock();document.querySelectorAll("[data-finish]").forEach(node=>node.textContent=formatDuration(Number(node.dataset.finish)-hostTime()))},1000);
 new ResizeObserver(()=>updateMapScale(true)).observe(viewport);
 requestAnimationFrame(()=>updateMapScale(false));

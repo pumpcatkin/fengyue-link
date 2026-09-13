@@ -1,10 +1,12 @@
 "use strict";
 
 const { app, BrowserWindow, safeStorage, session } = require("electron");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
 const { createBundledGridCard, configurationDigest } = require("../electron/online-world-card.cjs");
+const { FYOW_SCHEMAS, encodeCommentRecord, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 
 const ORIGIN = "https://staging.aiero.cc";
 const PROFILE_ID = String(process.env.FYOW_PROFILE_ID || "default").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80) || "default";
@@ -155,6 +157,16 @@ function shapeOf(value) {
   }));
 }
 
+function loadOnlineWorldIdentity(accountId) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows 加密存储当前不可用");
+  const safeAccountId = String(accountId || "").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80);
+  const file = path.join(app.getPath("userData"), "online-world", "identities", `${PROFILE_ID}-${safeAccountId}.json`);
+  const payload = readJsonWithBackupSync(fs, file, value => value?.version === 1 && typeof value?.encrypted === "string").value;
+  const identity = JSON.parse(safeStorage.decryptString(Buffer.from(payload.encrypted, "base64")));
+  if (!identity?.signingPrivateKey || !identity?.signingPublicKey) throw new Error("本机在线世界身份记录不完整");
+  return identity;
+}
+
 function identityFieldPaths(root) {
   const result = [];
   const queue = [{ value: root, path: "$", depth: 0 }];
@@ -298,6 +310,92 @@ function readbackChecks(exported, desired) {
   };
 }
 
+async function readAllComments(window, workId) {
+  const comments = [];
+  const seen = new Set();
+  for (let page = 1; page <= 200; page += 1) {
+    const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1?page=${page}&limit=50&order=desc&filter_type=all`);
+    if (!response.ok) throw new Error(`读取控制评论第 ${page} 页失败：HTTP ${response.status}`);
+    const pageItems = extractCommentItems(unwrap(response));
+    for (const item of pageItems) {
+      const id = String(item?.id || item?.comment_id || "");
+      if (id && !seen.has(id)) { seen.add(id); comments.push(item); }
+    }
+    if (pageItems.length < 50) break;
+  }
+  return comments;
+}
+
+async function activateSavedProgram(window, card, workId) {
+  const [installedResponse, profileResponse, comments] = await Promise.all([
+    api(window, `/console/api/installed-apps/${encodeURIComponent(workId)}`),
+    api(window, "/go/api/account/profile"),
+    readAllComments(window, workId)
+  ]);
+  if (!installedResponse.ok || !profileResponse.ok) throw new Error("读取作品作者或当前账号失败");
+  const installed = unwrap(installedResponse);
+  const profile = unwrap(profileResponse);
+  const authorAccountId = String(installed?.app?.created_by_account_id || installed?.created_by_account_id || "");
+  const signedInAccountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+  if (!authorAccountId || authorAccountId !== signedInAccountId) throw new Error("当前登录账号不是伴生作品作者");
+  const controls = assembleCommentRecords(comments).records
+    .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === workId && item.record.authorityAccountId === signedInAccountId)
+    .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
+    .sort((left, right) => Number(right.record.updatedAt || right.record.startedAt || 0) - Number(left.record.updatedAt || left.record.startedAt || 0));
+  const current = controls[0]?.record;
+  if (!current) throw new Error("评论区没有可更新的作者控制记录");
+  if (current.programHash === card.program.digest) {
+    const matching = controls.filter(item => item.record.programHash === card.program.digest);
+    let removedCommentIds = [];
+    if (process.env.FYOW_CLEAN_DUPLICATE_CONTROLS === "1" && matching.length > 1) {
+      const duplicateRecords = matching.filter(item => item.record.id !== current.id);
+      for (const duplicate of duplicateRecords) {
+        for (const source of duplicate.sources || []) {
+          const commentId = String(source?.id || source?.comment_id || "");
+          if (!commentId) continue;
+          const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1/${encodeURIComponent(commentId)}`, { method: "DELETE" });
+          if (!response.ok) throw new Error(`清理重复程序控制评论失败：${commentId} HTTP ${response.status}`);
+          removedCommentIds.push(commentId);
+        }
+      }
+      await sleep(700);
+      const remaining = assembleCommentRecords(await readAllComments(window, workId)).records
+        .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === workId
+          && item.record.programHash === card.program.digest && verifySignedRecord(item.record, current.authoritySigningPublicKey));
+      if (remaining.length !== 1 || remaining[0].record.id !== current.id) {
+        throw new Error(`重复程序控制评论清理后数量异常：${JSON.stringify(remaining.map(item => item.record.id))}`);
+      }
+    }
+    return {
+      activated: false,
+      alreadyCurrent: true,
+      matchingControlIds: matching.map(item => item.record.id),
+      removedCommentIds
+    };
+  }
+  const identity = loadOnlineWorldIdentity(signedInAccountId);
+  if (identity.signingPublicKey !== current.authoritySigningPublicKey) throw new Error("本机设备密钥与当前赛季控制记录不一致");
+  const unsigned = { ...current, id: crypto.randomUUID(), programHash: card.program.digest, updatedAt: Date.now() };
+  delete unsigned.signature;
+  const updated = signRecord(unsigned, identity.signingPrivateKey);
+  for (const content of encodeCommentRecord(updated)) {
+    const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1`, { method: "POST", body: { is_anonymous: false, biz_type: 1, content } });
+    if (!response.ok) throw new Error(`发布程序控制记录失败：HTTP ${response.status}`);
+  }
+  let verified = false;
+  let verificationDiagnostic = null;
+  for (let attempt = 0; attempt < 10 && !verified; attempt += 1) {
+    await sleep(1000);
+    const commentItems = await readAllComments(window, workId);
+    const records = assembleCommentRecords(commentItems).records;
+    verified = records.some(item => item.record?.id === updated.id
+      && item.record.programHash === card.program.digest && verifySignedRecord(item.record, identity.signingPublicKey));
+    verificationDiagnostic = { comments: commentItems.length, controls: records.filter(item => item.record?.schema === FYOW_SCHEMAS.control).map(item => ({ id: item.record.id, programHash: item.record.programHash })) };
+  }
+  if (!verified) throw new Error(`程序控制记录发布后回读校验失败：${JSON.stringify(verificationDiagnostic)}`);
+  return { activated: true, alreadyCurrent: false, controlId: updated.id };
+}
+
 async function main() {
   const card = createBundledGridCard();
   const workId = card.companion.workId;
@@ -368,6 +466,7 @@ async function main() {
     if (!Object.values(checks).every(value => value === true || value === 2)) {
       throw new Error(`保存后回读不一致：${JSON.stringify({ checks, exported: shapeOf(verified), app: shapeOf(verified?.app) })}`);
     }
+    const activation = process.env.FYOW_ACTIVATE_PROGRAM === "1" ? await activateSavedProgram(window, card, workId) : null;
     process.stdout.write(`${JSON.stringify({
       ok: true,
       workId,
@@ -377,7 +476,8 @@ async function main() {
       checks,
       descriptionCharacters: desired.app.description.length,
       programDigest: card.program.digest,
-      configurationSha256: configurationDigest(desired)
+      configurationSha256: configurationDigest(desired),
+      activation
     }, null, 2)}\n`);
   } finally {
     window.destroy();

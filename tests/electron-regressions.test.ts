@@ -272,9 +272,12 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain('if(event.data.type==="direct")');
     expect(readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8")).toContain('id="direct-panel"');
     const gridGame = readFileSync(new URL("../electron/desktop/online-world/grid-conquest/game.js", import.meta.url), "utf8");
+    const gridStyles = readFileSync(new URL("../electron/desktop/online-world/grid-conquest/styles.css", import.meta.url), "utf8");
     expect(gridGame).toContain("const DEFAULT_VISIBLE_CELLS=12");
     expect(gridGame).toContain('if(event.button!==2)return');
     expect(gridGame).toContain('viewport.addEventListener("contextmenu"');
+    expect(gridStyles).toMatch(/aside\s*\{[^}]*overflow-y:\s*auto/);
+    expect(gridStyles).toMatch(/html, body\s*\{[^}]*overflow:\s*hidden/);
     expect(main).toContain("async platformServerTime()");
     expect(main).toContain("response.headers.get('date')");
     expect(runtime).toContain("connect-src 'none'");

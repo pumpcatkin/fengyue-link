@@ -107,6 +107,74 @@ describe("online world platform service", () => {
     const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
     expect(records.some((record: any) => record.schema === "fyow.control/3")).toBe(true);
     expect(records.some((record: any) => record.schema === "fyow.snapshot/3" && record.state.width === 64)).toBe(true);
+    expect(records.some((record: any) => record.schema === "fyow.event/3" || record.schema === "fyow.private-vault/3")).toBe(false);
+    const snapshot = records.find((record: any) => record.schema === "fyow.snapshot/3");
+    expect(snapshot).not.toHaveProperty("authorityBox");
+    expect(snapshot.state.privatePlayers).toBeUndefined();
+  });
+
+  it("keeps orientation and action history local and publishes only the resulting territory change", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000 });
+    const comments: any[] = [];
+    const platformTime = Date.parse("2026-09-13T05:10:20.000Z");
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => identity,
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        if (endpoint.startsWith("/comments/") && options.method === "POST") {
+          const item = { id: `c${String(comments.length + 1).padStart(3, "0")}`, account_id: "author", is_author: true, created_at: new Date(platformTime).toISOString(), content: options.body.content };
+          comments.push(item);
+          return item;
+        }
+        throw new Error(`unexpected ${endpoint}`);
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
+    instance.world = world;
+
+    const result = await instance.submitIntent({ type: "join", displayName: "服主", orientation: "women", idempotencyKey: "join-author" });
+    const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
+    const mapDelta = records.find((record: any) => record.schema === "fyow.map-delta/1");
+    expect(result.mapDelta.schema).toBe("fyow.map-delta/1");
+    expect(records).toHaveLength(1);
+    expect(mapDelta).not.toHaveProperty("intent");
+    expect(mapDelta).not.toHaveProperty("orientation");
+    expect(mapDelta.participant).toEqual({ displayName: "服主" });
+    expect(Object.values(mapDelta.changes.cells)).toHaveLength(1);
+    expect(records.some((record: any) => ["fyow.intent/3", "fyow.event/3", "fyow.private-vault/3"].includes(record.schema))).toBe(false);
+    expect(instance.world.privatePlayers.author.orientation).toBe("women");
+    expect(instance.localEvents).toHaveLength(1);
+    expect(instance.localEvents[0].type).toBe("join");
+  });
+
+  it("merges territory changes by platform comment timestamp and never publishes other players positions", () => {
+    const earlyIdentity = generateOnlineWorldIdentity();
+    const lateIdentity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season", startedAt: 1_000 });
+    const instance = service({
+      getAccount: () => ({ accountId: "authority", username: "服主" }),
+      requestConsole: async () => { throw new Error("map merge is local"); }
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+    const signedDelta = (actorAccountId: string, displayName: string, id: string, identity: any, fakeClientTime: number) => signRecord({
+      schema: "fyow.map-delta/1", mapDeltaId: id, gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season", actorAccountId,
+      participant: { displayName }, changes: { cells: { "4,5": { ownerAccountId: actorAccountId, soldiers: 1, generalIds: [] } }, generals: {} },
+      deviceSigningPublicKey: identity.signingPublicKey, deviceEncryptionPublicKey: identity.encryptionPublicKey, createdAt: fakeClientTime
+    }, identity.signingPrivateKey);
+    const late = signedDelta("late", "后提交", "late-delta", lateIdentity, 1);
+    const early = signedDelta("early", "先提交", "early-delta", earlyIdentity, 9_999_999_999_999);
+    instance.applyMapDeltas([
+      { record: late, sources: [{ id: "comment-2", account_id: "late", created_at: "2026-09-13T05:00:02.000Z" }] },
+      { record: early, sources: [{ id: "comment-1", account_id: "early", created_at: "2026-09-13T05:00:01.000Z" }] }
+    ]);
+    expect(instance.world.cells["4,5"].ownerAccountId).toBe("late");
+    expect(instance.world.players.early.position).toBeUndefined();
+    expect(instance.world.players.late.position).toBeUndefined();
+    expect(instance.publicMapOrder.timestamp).toBe(Date.parse("2026-09-13T05:00:02.000Z"));
   });
 
   it("uses a comment reply as a wake-up and reads only the matching encrypted private chat", async () => {
@@ -182,30 +250,36 @@ describe("online world platform service", () => {
     await expect(instance.sendDirect("receiver", "diplomacy", { text: "频率测试" })).rejects.toThrow(/过于频繁/);
   });
 
-  it("ignores signed intents bound to another work or game", async () => {
-    const authorityIdentity = generateOnlineWorldIdentity();
+  it("ignores territory changes bound to another work or game", () => {
     const playerIdentity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "authority", seasonId: "shared-season" });
-    const instance = service({ getAccount: () => ({ accountId: "authority", username: "服主" }), getIdentity: async () => authorityIdentity, requestConsole: async () => { throw new Error("foreign intent must not publish"); } });
+    const instance = service({ getAccount: () => ({ accountId: "authority", username: "服主" }), requestConsole: async () => { throw new Error("foreign map change stays local"); } });
     instance.work = { id: "current-work", authorAccountId: "authority" };
     instance.control = { seasonId: world.seasonId, authorityAccountId: "authority" };
     instance.world = world;
-    const base = { schema: "fyow.intent/3", intentId: "foreign", seasonId: world.seasonId, actorAccountId: "player", idempotencyKey: "foreign-join", intent: { type: "join", displayName: "串局玩家" }, deviceSigningPublicKey: playerIdentity.signingPublicKey, deviceEncryptionPublicKey: playerIdentity.encryptionPublicKey, createdAt: 1 };
+    const base = { schema: "fyow.map-delta/1", mapDeltaId: "foreign", seasonId: world.seasonId, actorAccountId: "player", participant: { displayName: "串局玩家" }, changes: { cells: { "1,1": { ownerAccountId: "player", soldiers: 1, generalIds: [] } }, generals: {} }, deviceSigningPublicKey: playerIdentity.signingPublicKey, deviceEncryptionPublicKey: playerIdentity.encryptionPublicKey };
     const foreignWork = signRecord({ ...base, workId: "another-work", gameId: "cc.aiero.fyow.grid-conquest" }, playerIdentity.signingPrivateKey);
-    const foreignGame = signRecord({ ...base, intentId: "foreign-game", idempotencyKey: "foreign-game-join", workId: "current-work", gameId: "another-game" }, playerIdentity.signingPrivateKey);
-    await instance.processPendingIntents([{ record: foreignWork, sources: [{ account_id: "player" }] }, { record: foreignGame, sources: [{ account_id: "player" }] }]);
-    expect(instance.world.players.player).toBeUndefined();
+    const foreignGame = signRecord({ ...base, mapDeltaId: "foreign-game", workId: "current-work", gameId: "another-game" }, playerIdentity.signingPrivateKey);
+    instance.applyMapDeltas([{ record: foreignWork, sources: [{ id: "f1", account_id: "player", created_at: "2026-09-13T01:00:00Z" }] }, { record: foreignGame, sources: [{ id: "f2", account_id: "player", created_at: "2026-09-13T01:00:01Z" }] }]);
+    expect(instance.world.cells["1,1"]).toBeUndefined();
     expect(instance.world.revision).toBe(0);
   });
 
-  it("rate-limits local intent submission before signing or network access", async () => {
-    const world = createWorld({ authorityAccountId: "authority" });
-    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }), getIdentity: async () => { throw new Error("rate limit must run first"); }, requestConsole: async () => { throw new Error("rate limit must run first"); } });
+  it("does not post a comment for an action that changes only local private state", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
+    world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: [], position: { x: 1, y: 1 } };
+    world.privatePlayers.player = { orientation: "any" };
+    world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    let posted = false;
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }), getIdentity: async () => identity, requestConsole: async () => { posted = true; throw new Error("private-only action should not post"); } });
     instance.work = { id: "work", authorAccountId: "authority" };
     instance.control = { seasonId: world.seasonId, authorityAccountId: "authority" };
     instance.world = world;
-    instance.intentSubmitTimes = Array(30).fill(instance.now());
-    await expect(instance.submitIntent({ type: "join", displayName: "玩家", orientation: "any" })).rejects.toThrow(/过于频繁/);
+    const result = await instance.submitIntent({ type: "start-mining", x: 1, y: 1, auto: true, idempotencyKey: "mine" });
+    expect(result.mapDelta).toBeNull();
+    expect(posted).toBe(false);
+    expect(instance.localEvents.at(-1).type).toBe("start-mining");
   });
 
   it("does not publish a reset redirect when migration configuration verification fails", async () => {

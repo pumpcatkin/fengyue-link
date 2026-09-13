@@ -1,6 +1,6 @@
 # 《艳猎征途》伴生作品配置
 
-这份文档是首张“在线游戏世界”游戏卡的创作页填写稿。游戏 ID 固定为 `cc.aiero.fyow.grid-conquest`，宿主 API 版本为 1，整张卡固定绑定伴生作品 `b27218e6-80f9-4c0d-91c7-4b8f87d47be8`。该作品同时处理所有玩家的模型请求、评论账本与私信唤醒；玩家不填写自己的伴生作品 ID。
+这份文档是首张“在线游戏世界”游戏卡的创作页填写稿。游戏 ID 固定为 `cc.aiero.fyow.grid-conquest`，宿主 API 版本为 1，整张卡固定绑定伴生作品 `b27218e6-80f9-4c0d-91c7-4b8f87d47be8`。该作品同时处理所有玩家的模型请求、公共地图变更与私信唤醒；玩家不填写自己的伴生作品 ID。
 
 > 2026-09-13 已在 staging 创作页完成真实保存并由导出接口回读：名称、简介、详细介绍程序信封、前置词、提示词、后置词及两个用户范围世界书全部一致。
 
@@ -18,7 +18,7 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-将 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放进作品“详细介绍”。可在信封前后写普通介绍文字，但一份详细介绍只能保留一个活动信封。生成器会把 HTML、CSS 和 JavaScript 合成单文件后 gzip/Base64URL 编码；当前信封共 14,656 个字符，解码后的压缩包为 10,929 字节。
+将 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放进作品“详细介绍”。可在信封前后写普通介绍文字，但一份详细介绍只能保留一个活动信封。生成器会把 HTML、CSS 和 JavaScript 合成单文件后 gzip/Base64URL 编码；当前信封共 14,834 个字符，解码后的压缩包为 11,062 字节。
 
 工具优先读取已安装作品详情中的程序；平台详情接口未返回详细介绍时，会回退到已通过整卡摘要校验的配置快照。两条路径都会校验信封摘要、`gameId`、宿主 API 和大小，并向程序强制注入无网络 CSP。作品作者首次建局或更新程序后，需要在“在线游戏世界”入口点击“作者：签名启用详情程序”。其他玩家只接受作者签名控制记录指定的程序摘要。
 
@@ -88,7 +88,7 @@ npm run game:bundle
 输出 Schema：{"reply":"将领回答","memoryTopic":"谈话主题摘要","intimacyDelta":1}
 ```
 
-随行将领的个人世界书由工具写入每位玩家在作品页的“自定义配置”，关键词是将领姓名，内容带 `FYOW_GENERAL:<generalId>` 标记、设定和压缩记忆。将领部署后工具移除此条目，并在评论区用“姓名与坐标”的根评论以及“设定”“记忆”两组回复归档；召回或带走后重新加入玩家自己的世界书。
+随行将领的个人世界书由工具写入每位玩家在作品页的“自定义配置”，关键词是将领姓名，内容带 `FYOW_GENERAL:<generalId>` 标记、设定和压缩记忆。将领部署后工具移除此条目，部署所需的公开设定、记忆、战力和坐标随同领地地图变更发布；召回或带走后从公共地图移除，并重新加入玩家自己的世界书。
 
 ## 4. 宿主通讯约定
 
@@ -121,14 +121,14 @@ parent.postMessage({
 { source: "fengyue-host", type: "error", message: "错误说明" }
 ```
 
-允许的第一版意图：`join`、`start-mining`、`stop-mining`、`train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。`grant-general` 与 `record-general-dialogue` 仅供权威端内部使用。定向消息只接受 `diplomacy` 与 `captured-general-letter`；后者还会在宿主层验证将领确由发送者随行持有，且收信人是其被俘前或当前效忠对象。游戏程序不接触通用网络、平台接口、Cookie、Token、文件系统或 Electron IPC。
+允许的第一版意图：`join`、`start-mining`、`stop-mining`、`train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。这些意图只是 iframe 到宿主的本机调用，不会成为评论；`grant-general` 与 `record-general-dialogue` 也只在本机执行。金币、性取向、计时队列、随行将领和行动历史留在本地，只有格子归属、驻军或已部署将领变化时才发布 `fyow.map-delta/1`。地图变更按评论的平台注册时间归并，公共数据不含其他玩家当前位置或加入时间。定向消息只接受 `diplomacy` 与 `captured-general-letter`。游戏程序不接触通用网络、平台接口、Cookie、Token、文件系统或 Electron IPC。
 
 ## 5. 发布前验收
 
-1. **已完成**：保存作品后，从导出接口回读名称、简介、前置词、主提示词、后置词、两个用户范围世界书和完整程序信封；HTTP 200，程序 SHA-256 为 `c41ad57299e4bea9dd58688a712ded4102cec21e5dc3836a30c9d43f26f1d009`。
+1. **已完成**：保存作品后，从导出接口回读名称、简介、前置词、主提示词、后置词、两个用户范围世界书和完整程序信封；HTTP 200，程序 SHA-256 为 `785c29e99c5587cd70b647077f6bf07f7055dcb8ce6381e3226a0e335d362809`。
 2. 发布/安装作品，用另一个账号读取 `installed-apps/{workId}`，确认程序摘要与作者端一致。
-3. 作者初始化赛季；第二账号加入，核对私人性别偏好只出现在双收件人加密保管箱。
+3. 作者初始化赛季；第二账号加入，核对私人性别偏好只存在本机缓存，评论区只新增领地地图变更。
 4. 分别完成挂机开采、练兵、跨格行军、未占领区攻打、敌方阻挡、部署/召回将领和将领对话。
-5. 确认每条评论分片不超过 1000 字符；部署将领的根评论、设定回复和记忆回复均能跨账号读到。
+5. 确认每条评论分片不超过 1000 字符；跨账号按平台评论时间归并 `fyow.map-delta/1` 后，格子归属、驻军和已部署将领完全一致，且看不到其他玩家当前位置。
 6. 发送一对一消息，确认接收端先从自己的玩家根评论发现 `DMWAKE`，随后只读取发送者对应私信会话并验签解密。
 7. 修改详细介绍程序包但不签名时，其他客户端应停止载入；作者签名启用后才切换到新摘要。

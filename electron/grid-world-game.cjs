@@ -531,6 +531,8 @@ function projectWorldState(state, viewerAccountId) {
     delete player.gold;
     delete player.fieldArmySoldiers;
     delete player.carriedGeneralIds;
+    delete player.position;
+    delete player.joinedAt;
   }
   const generals = {};
   for (const [id, general] of Object.entries(state.generals || {})) {
@@ -548,8 +550,7 @@ function projectWorldState(state, viewerAccountId) {
     cells: clone(state.cells),
     players,
     generals,
-    jobs: Object.fromEntries(Object.entries(state.jobs || {}).filter(([, job]) => job.accountId === viewer)),
-    processedIntents: clone(state.processedIntents || [])
+    jobs: Object.fromEntries(Object.entries(state.jobs || {}).filter(([, job]) => job.accountId === viewer))
   };
 }
 

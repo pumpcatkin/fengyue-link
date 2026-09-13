@@ -25,7 +25,8 @@ const {
   settleWorld,
   applyIntent,
   buildGeneralGenerationRequest,
-  projectWorldState
+  projectWorldState,
+  publicGeneralState
 } = require("./grid-world-game.cjs");
 
 const HISTORY_PAGE_SIZE = 50;
@@ -149,7 +150,7 @@ function publicCells(state) {
 function publicGenerals(state) {
   return Object.fromEntries(Object.entries(state?.generals || {})
     .filter(([, general]) => general?.status === "deployed")
-    .map(([id, general]) => [id, cloneJson(general)]));
+    .map(([id, general]) => [id, publicGeneralState(general)]));
 }
 
 function changedEntries(before, after) {
@@ -718,6 +719,7 @@ class OnlineWorldService {
     for (const general of Object.values(generals)) {
       if (general == null) continue;
       if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
+      if (Object.hasOwn(general, "memoryText") || Object.hasOwn(general, "memory") || Object.hasOwn(general, "intimacy")) return false;
       const x = Number(general.location.x);
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
@@ -732,13 +734,19 @@ class OnlineWorldService {
     if (this.appliedMapDeltaIds.has(String(record.mapDeltaId)) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     for (const [key, cell] of Object.entries(record.changes.cells)) {
       if (compareOrderValue(order, this.publicCellOrders[key] || this.publicMapBaselineOrder) <= 0) continue;
-      if (cell == null) delete this.world.cells[key];
+      if (cell == null) {
+        if (this.world.cells[key]?.ownerAccountId !== actorAccountId) continue;
+        delete this.world.cells[key];
+      }
       else this.world.cells[key] = cloneJson(cell);
       this.publicCellOrders[key] = order;
     }
     for (const [id, general] of Object.entries(record.changes.generals)) {
       if (compareOrderValue(order, this.publicGeneralOrders[id] || this.publicMapBaselineOrder) <= 0) continue;
-      if (general == null) delete this.world.generals[id];
+      if (general == null) {
+        if (this.world.generals[id]?.holderAccountId !== actorAccountId) continue;
+        delete this.world.generals[id];
+      }
       else this.world.generals[id] = cloneJson(general);
       this.publicGeneralOrders[id] = order;
     }

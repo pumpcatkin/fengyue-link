@@ -523,6 +523,22 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
   };
 }
 
+function publicGeneralState(general) {
+  return {
+    id: String(general?.id || ""),
+    name: String(general?.name || "无名将领").slice(0, 24),
+    gender: ["male", "female"].includes(general?.gender) ? general.gender : "female",
+    setting: String(general?.setting || "").slice(0, 1000),
+    power: Math.max(0, Math.trunc(Number(general?.power || 0))),
+    holderAccountId: String(general?.holderAccountId || ""),
+    status: "deployed",
+    location: {
+      x: Math.trunc(Number(general?.location?.x || 0)),
+      y: Math.trunc(Number(general?.location?.y || 0))
+    }
+  };
+}
+
 function projectWorldState(state, viewerAccountId) {
   const viewer = String(viewerAccountId || "");
   const players = clone(state.players || {});
@@ -536,7 +552,8 @@ function projectWorldState(state, viewerAccountId) {
   }
   const generals = {};
   for (const [id, general] of Object.entries(state.generals || {})) {
-    if (general.status === "deployed" || general.holderAccountId === viewer) generals[id] = clone(general);
+    if (general.status === "deployed") generals[id] = general.holderAccountId === viewer ? clone(general) : publicGeneralState(general);
+    else if (general.holderAccountId === viewer) generals[id] = clone(general);
   }
   return {
     schema: state.schema,
@@ -565,6 +582,7 @@ module.exports = {
   staticCell,
   createWorld,
   dynamicCell,
+  publicGeneralState,
   generalDiscoveryChance,
   resourceCycleMs,
   resourceYield,

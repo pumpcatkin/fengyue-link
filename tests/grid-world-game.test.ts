@@ -153,4 +153,19 @@ describe("grid conquest rules", () => {
     expect(ownState.generals["private-general"].name).toBe("青禾");
     expect(Object.keys(ownState.jobs)).toHaveLength(1);
   });
+
+  it("keeps deployed general memory private while exposing map battle data", () => {
+    const state = joined(1_000_000);
+    state.generals.deployed = game.createFallbackGeneral({ id: "deployed", name: "守城将", gender: "female", setting: "公开的守城设定。", power: 700, holderAccountId: "a", year: 1 });
+    state.generals.deployed.status = "deployed";
+    state.generals.deployed.location = { ...state.players.a.position };
+    state.generals.deployed.memoryText = "仅本人可见的交谈记忆。";
+    state.generals.deployed.memory = { intimacy: { a: 9 } };
+    const publicState = game.projectWorldState(state, null);
+    expect(publicState.generals.deployed).toMatchObject({ name: "守城将", setting: "公开的守城设定。", power: 700, status: "deployed" });
+    expect(publicState.generals.deployed.memoryText).toBeUndefined();
+    expect(publicState.generals.deployed.memory).toBeUndefined();
+    const ownState = game.projectWorldState(state, "a");
+    expect(ownState.generals.deployed.memoryText).toBe("仅本人可见的交谈记忆。");
+  });
 });

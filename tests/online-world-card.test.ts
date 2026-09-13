@@ -32,7 +32,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(8);
+    expect(card.version).toBe(9);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -44,6 +44,7 @@ describe("online world game cards", () => {
     expect(card.companion.configuration.pre_text).toContain("结构化任务引擎");
     expect(card.companion.configuration.pre_prompt).toContain("只有天生拥有“慧眼”");
     expect(card.companion.configuration.post_text).toContain("单个 JSON 对象");
+    expect(card.companion.configuration.post_text).toContain("合理补全");
     expect(card.companion.configuration.world_book).toHaveLength(5);
     expect(card.companion.configuration.world_book.map((entry: any) => entry.key)).toEqual([
       "_or_[[FYOW:TASK:general.generate:v1]]",
@@ -53,6 +54,8 @@ describe("online world game cards", () => {
       "_or_[[FYOW:TASK:general.memory.update:v1]]"
     ]);
     expect(card.companion.configuration.world_book.every((entry: any) => entry.key_region === 2 && entry.enable === true && entry.probability === 100)).toBe(true);
+    expect(card.companion.configuration.world_book[0].value).toContain("initialWish 是最高优先级");
+    expect(card.companion.configuration.world_book[1].value).toContain("禁止出现未提供");
   });
 
   it("rejects edits to either the creation snapshot or the whole package", () => {

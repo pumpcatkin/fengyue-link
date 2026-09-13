@@ -681,7 +681,7 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
       directionTags: effect.initial ? [] : normalizedCharacterTags(effect.directionTags).slice(0, 3),
       initialWish: effect.initial ? String(effect.initialWish || "").slice(0, 500) : "",
       instruction: effect.initial
-        ? "仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签；必须返回完整 setting 后才允许玩家入场。"
+        ? "initialWish 是最高优先级绑定要求，逐项落实用户明确特征；仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签。输入简短时围绕已有线索合理补全，setting 必须达到600～1000个汉字并包含出身、外貌、性格、志趣、军事能力、弱点、当前处境与关系倾向，禁止占位内容。"
         : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。",
       maximumChineseCharacters: 1000
     }
@@ -725,7 +725,7 @@ function buildPlayerProfileContextRequest(profile, idempotencyKey) {
       basicInfo: String(source.basicInfo || "").trim().slice(0, 6000),
       appearance: String(source.appearance || "").trim().slice(0, 3000),
       fullSetting: String(source.info || "").trim().slice(0, 9000),
-      instruction: "仅整理玩家已填写的人物设定，保留身份、外貌、性格、说话方式与关系倾向，不添加原设定中没有的事实。"
+      instruction: "用户明确内容均为不可违背的事实；在符合这些事实的前提下，结合世界观主动补全缺失的出身经历、性格、志趣、能力、缺点、立场、外貌、说话方式与关系倾向。四个输出字段都要有实质内容，禁止使用未提供、暂无、不详、未知、没有说明或待补充等占位措辞。"
     }
   };
 }

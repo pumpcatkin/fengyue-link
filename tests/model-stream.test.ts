@@ -37,6 +37,15 @@ describe("online world model event stream", () => {
     await expect(consumeModelEventStream(stream)).resolves.toMatchObject({ answer: "最终 JSON", finishEvent: "workflow_finished" });
   });
 
+  it("ignores plain-text stream heartbeat events during a long generation", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"event":"message","answer":"前半"}\n\ndata: ping\n\ndata: {"event":"message","answer":"后半","conversation_id":"c-heartbeat"}\n\ndata: {"event":"message_end"}\n\n'));
+      }
+    });
+    await expect(consumeModelEventStream(stream)).resolves.toMatchObject({ answer: "前半后半", conversationId: "c-heartbeat", finishEvent: "message_end" });
+  });
+
   it("accepts the protocol DONE sentinel as completion", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {

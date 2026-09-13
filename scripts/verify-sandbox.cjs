@@ -92,7 +92,7 @@ app.whenReady().then(async () => {
       loginVisible: true,
       securityCardAbsent: true,
       officialNoticeVisible: true,
-      officialNoticeTitle: "本工具始终完全免费",
+      officialNoticeTitle: "正在对照版本号",
       publicKeyHidden: true,
       authorName: "八爪毛米",
       githubEnabled: true,

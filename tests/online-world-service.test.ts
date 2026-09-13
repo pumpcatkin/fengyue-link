@@ -2,12 +2,18 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard } = require("../electron/online-world-card.cjs");
+
+const completePersona = "慧眼之主出身边境商旅之家，熟悉乱世中的人情与资源流向。性格沉稳果断，重视承诺，也愿意倾听不同立场；志在建立能让追随者安身的领地，擅长观察人才、统筹物资与化解内部矛盾。面对强敌时谨慎布局，缺点是对亲近之人过度保护，偶尔会独自承担风险。立场上珍视忠诚与互惠，但不会容忍背叛。";
+const completeAppearance = "一头柔软白发衬着醒目的猫耳，浅色眼眸在思考时显得专注。身形轻盈而挺拔，惯穿便于行动的深色短装与披风，腰间带着记录地图和物资的皮袋，整体气质安静、敏锐又带有亲和力。";
+const completeSpeech = "说话语速平稳，习惯先听完对方再作判断；下达命令时简洁明确，私下交流则会使用温和的玩笑缓和紧张。";
+const completeRelationship = "对愿意并肩承担风险的人逐步建立信任，重视长期陪伴、坦诚沟通与彼此尊重；会主动照顾亲近者，也希望对方保有独立意志。";
+const completeGeneralSetting = ("出身：初将生于北境关城的军户之家，自幼熟悉边地烽火与军粮转运。外貌：黑发束起，目光锐利，常穿轻便札甲并携长弓。性格：沉稳守信，遇事先观察后决断，对部下严厉却愿意承担责任。志趣：希望结束沿途百姓反复迁徙的生活，建立秩序稳定的领地。军事能力：擅长守城、斥候调度、夜间伏击和有限兵力下的物资统筹，能够根据地形迅速调整阵线。弱点：过分重视承诺，面对旧部求援时容易冒险；不善公开表达感情。当前处境：旧主战败后带着残部寻找拥有慧眼的新主公，急需粮草和可信赖的落脚处。关系倾向：对真诚且尊重部属的女性主公会逐步放下戒心，以行动表达忠诚，并愿意发展深厚而平等的羁绊。").repeat(4).slice(0, 760);
 
 function service(options: Record<string, unknown>) {
   let worldBook: any[] = [];
@@ -20,12 +26,12 @@ function service(options: Record<string, unknown>) {
     requestModel: async (request: any) => ({
       conversationId: `conversation-${++modelSequence}`,
       answer: request?.task === "player.profile-context"
-        ? "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"黑发军装\",\"speechStyle\":\"沉稳\",\"relationshipApproach\":\"重视忠诚\"}"
+        ? JSON.stringify({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })
         : request?.task === "general.memory.update"
           ? "{\"category\":\"speech\",\"summary\":\"与玩家谈论戏剧\",\"emotion\":\"愉快\",\"intimacyDelta\":1,\"compactMemory\":\"言谈：[1年]与玩家谈论戏剧\\n经历：暂无\"}"
           : request?.task === "general.dialogue" || request?.task === "general.captive-dialogue"
             ? "{\"reply\":\"愿与主公详谈。\",\"command\":null}"
-            : "{\"name\":\"初将\",\"gender\":\"female\",\"power\":320,\"setting\":\"善守城，重信义。\"}"
+            : JSON.stringify({ name: "初将", gender: "female", power: 320, setting: completeGeneralSetting })
     }),
     getOrigin: () => "https://aigirlfriend.baby",
     onChange: () => {},
@@ -34,6 +40,32 @@ function service(options: Record<string, unknown>) {
 }
 
 describe("online world platform service", () => {
+  it("rejects placeholder profile text and incomplete initial generals before committing them", () => {
+    expect(playerContextQualityIssue({
+      personaSummary: "名为茂密的猫亚人，除此之外玩家未提供更多信息。".repeat(6),
+      appearanceSummary: completeAppearance,
+      speechStyle: completeSpeech,
+      relationshipApproach: completeRelationship
+    })).toMatch(/占位措辞/);
+    expect(playerContextQualityIssue({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })).toBeNull();
+    expect(generalGenerationQualityIssue({ name: "短将", gender: "female", power: 300, setting: "善战。" }, { gender: "female" })).toMatch(/600～1000/);
+    expect(generalGenerationQualityIssue({ name: "初将", gender: "female", power: 320, setting: completeGeneralSetting }, { gender: "female" })).toBeNull();
+  });
+
+  it("repairs a legacy player's placeholder context without resetting their game", async () => {
+    const instance = service({ getAccount: () => ({ accountId: "author", username: "服主" }) });
+    instance.world = createWorld({ seed: "legacy", seasonId: "season", startedAt: 1_000_000, authorityAccountId: "author" });
+    instance.world.players.author = { accountId: "author", displayName: "茂密", gold: 1000, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [], joinedAt: 1_000_000 };
+    instance.world.privatePlayers.author = { playerContext: { personaSummary: "未提供", appearanceSummary: "暂无", speechStyle: "未知", relationshipApproach: "待补充" } };
+    instance.localPreferences.characterProfile = { id: "profile", displayName: "茂密", basicInfo: "猫亚人", appearance: "白色头发", info: "猫亚人，白色头发" };
+    instance.localPreferences.playerContext = null;
+    const repaired = await instance.ensureLocalPlayerContext();
+    expect(repaired.personaSummary).toContain("慧眼之主");
+    expect(playerContextQualityIssue(instance.localPreferences.playerContext)).toBeNull();
+    expect(instance.world.privatePlayers.author.playerContext).toEqual(instance.localPreferences.playerContext);
+    expect(instance.world.players.author.position).toEqual({ x: 1, y: 1 });
+  });
+
   it("serializes model requests while forcing every input into a fresh conversation", async () => {
     const calls: string[] = [];
     const sentRequests: any[] = [];
@@ -181,14 +213,19 @@ describe("online world platform service", () => {
     instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
 
-    const result = await instance.submitIntent({
+    const joinIntent = {
       type: "join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
       characterTags: ["傲娇", "勇敢", "冷静", "长发", "黑发", "红瞳", "高挑", "军装"],
       initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "join-author"
-    });
+    };
+    const [result, duplicateResult] = await Promise.all([
+      instance.submitIntent(joinIntent),
+      instance.submitIntent({ ...joinIntent, idempotencyKey: "join-author-duplicate" })
+    ]);
     const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
     const mapDelta = records.find((record: any) => record.schema === "fyow.map-delta/1");
     expect(result.mapDelta.schema).toBe("fyow.map-delta/1");
+    expect(duplicateResult.state.world.generals).toEqual(result.state.world.generals);
     expect(records).toHaveLength(1);
     expect(mapDelta).not.toHaveProperty("intent");
     expect(mapDelta).not.toHaveProperty("orientation");
@@ -200,10 +237,10 @@ describe("online world platform service", () => {
     expect(instance.localEvents[0].type).toBe("join");
     expect(instance.localEvents[1].type).toBe("grant-general");
     expect(instance.localPreferences.playerContext).toMatchObject({
-      personaSummary: "慧眼之主",
-      appearanceSummary: "黑发军装",
-      speechStyle: "沉稳",
-      relationshipApproach: "重视忠诚"
+      personaSummary: expect.stringContaining("慧眼之主"),
+      appearanceSummary: expect.stringContaining("猫耳"),
+      speechStyle: expect.stringContaining("语速平稳"),
+      relationshipApproach: expect.stringContaining("长期陪伴")
     });
     expect(instance.modelConversationIds.size).toBe(2);
   });
@@ -276,7 +313,7 @@ describe("online world platform service", () => {
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestModel: async (request: any) => request?.task === "player.profile-context"
-        ? { conversationId: `conversation-${++modelSequence}`, answer: "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"\",\"speechStyle\":\"\",\"relationshipApproach\":\"\"}" }
+        ? { conversationId: `conversation-${++modelSequence}`, answer: JSON.stringify({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship }) }
         : { conversationId: `conversation-${++modelSequence}`, answer: "模型暂时没有返回完整设定" },
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint.startsWith("/comments/") && options.method === "POST") return { id: "c1", account_id: "author", is_author: true, created_at: new Date(2_000).toISOString(), content: options.body.content };

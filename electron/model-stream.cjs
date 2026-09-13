@@ -52,6 +52,7 @@ async function consumeModelEventStream(body) {
       finishEvent = "done";
       return;
     }
+    if (["ping", "[ping]", "keepalive", "[keepalive]"].includes(payloadText.toLowerCase())) return;
     let data;
     try { data = JSON.parse(payloadText); } catch { throw modelStreamError("模型数据流包含无效事件"); }
     const event = String(data?.event || data?.type || "");

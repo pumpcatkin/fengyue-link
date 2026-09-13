@@ -276,6 +276,8 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toMatch(/const DEFAULT_VISIBLE_CELLS\s*=\s*12/);
     expect(gridGame).toMatch(/if \(event\.button !== 2\) return/);
     expect(gridGame).toContain('viewport.addEventListener("contextmenu"');
+    expect(gridGame).toContain("if (ownPlayer()) joinSubmitting = false");
+    expect(gridGame).toContain("payload = event.data.result.state");
     expect(gridStyles).toMatch(/aside\s*\{[^}]*overflow:\s*hidden auto/);
     expect(gridStyles).toMatch(/html, body\s*\{[^}]*overflow:\s*hidden/);
     expect(main).toContain("async platformServerTime()");

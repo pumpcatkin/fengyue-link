@@ -14,6 +14,25 @@ function joined(now = 1_000_000) {
 }
 
 describe("grid conquest rules", () => {
+  it("requires profile completion and makes the initial wish binding for generation", () => {
+    const profile = game.buildPlayerProfileContextRequest({
+      displayName: "茂密", basicInfo: "猫亚人", appearance: "白色头发"
+    }, "profile-request");
+    expect(profile.input.instruction).toContain("主动补全");
+    expect(profile.input.instruction).toContain("禁止使用未提供");
+
+    const state = game.createWorld({ seed: "prompt-seed", seasonId: "season", startedAt: 1_000_000, authorityAccountId: "a" });
+    state.privatePlayers.a = { orientation: "women", characterTags: ["无关标签"] };
+    const request = game.buildGeneralGenerationRequest(state, {
+      accountId: "a", gender: "female", population: 1000, resourceGrade: "B", x: 1, y: 2,
+      initial: true, initialWish: "白发猫亚人，善于守城"
+    }, "general-request");
+    expect(request.input.initialWish).toBe("白发猫亚人，善于守城");
+    expect(request.input.directionTags).toEqual([]);
+    expect(request.input.instruction).toContain("最高优先级绑定要求");
+    expect(request.input.instruction).toContain("600～1000");
+  });
+
   it("derives immutable 64x64 cell facts from seed and coordinates", () => {
     const first = game.staticCell("seed", 12, 31);
     const second = game.staticCell("seed", 12, 31);

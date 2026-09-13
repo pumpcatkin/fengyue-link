@@ -220,6 +220,38 @@ function parseJsonAnswer(value) {
   throw new Error("模型没有返回有效 JSON");
 }
 
+const MODEL_PLACEHOLDER_PATTERN = /未提供|暂无|不详|未知|没有(?:提供|说明|填写)|未说明|待补充|占位/i;
+
+function playerContextQualityIssue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "玩家角色设定不是 JSON 对象";
+  const fields = {
+    personaSummary: String(value.personaSummary || "").trim(),
+    appearanceSummary: String(value.appearanceSummary || "").trim(),
+    speechStyle: String(value.speechStyle || "").trim(),
+    relationshipApproach: String(value.relationshipApproach || "").trim()
+  };
+  if (fields.personaSummary.length < 120 || fields.personaSummary.length > 2000) return "玩家人物摘要需要完整补全到 120～2000 字";
+  if (fields.appearanceSummary.length < 50 || fields.appearanceSummary.length > 1000) return "玩家外貌摘要需要完整补全到 50～1000 字";
+  if (fields.speechStyle.length < 20 || fields.speechStyle.length > 500) return "玩家说话方式需要完整补全到 20～500 字";
+  if (fields.relationshipApproach.length < 30 || fields.relationshipApproach.length > 800) return "玩家关系倾向需要完整补全到 30～800 字";
+  if (Object.values(fields).some(text => MODEL_PLACEHOLDER_PATTERN.test(text))) return "玩家角色设定仍包含未补全的占位措辞";
+  return null;
+}
+
+function generalGenerationQualityIssue(value, effect) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "将领设定不是 JSON 对象";
+  const name = String(value.name || "").trim();
+  const setting = String(value.setting || "").trim();
+  const gender = String(value.gender || "").toLowerCase();
+  const power = Number(value.power);
+  if (name.length < 2 || name.length > 6) return "将领姓名必须为 2～6 个汉字";
+  if (!setting || setting.length < 600 || setting.length > 1000) return "将领设定需要完整补全到 600～1000 字";
+  if (MODEL_PLACEHOLDER_PATTERN.test(setting)) return "将领设定仍包含未补全的占位措辞";
+  if (!["male", "female"].includes(gender) || gender !== effect.gender) return "将领性别与玩家选择不一致";
+  if (!Number.isInteger(power) || power < 100 || power > 5000) return "将领战力必须为 100～5000 的整数";
+  return null;
+}
+
 function exportedConfig(payload) {
   return firstObject(payload, item => ["world_book", "wbook", "lore_bk", "world_bk", "wb"].some(key => Object.hasOwn(item, key))
     && ["prpt", "ppt", "pre_pt", "prompt_pre", "pre_prompt"].some(key => Object.hasOwn(item, key)))
@@ -358,6 +390,7 @@ class OnlineWorldService {
     this.publicParticipantOrders = {};
     this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
+    this.joinInFlight = null;
     this.pollTimer = null;
     this.mapFactsCache = null;
   }
@@ -684,6 +717,7 @@ class OnlineWorldService {
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
     await this.sync(true);
+    await this.ensureLocalPlayerContext();
     this.status = this.control && this.world ? "ready" : "needs-initialization";
     this.startPolling();
     this.notify();
@@ -1048,10 +1082,25 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
+    if (String(intent?.type || "") !== "join") return this.submitIntentNow(intent);
+    if (this.joinInFlight) return this.joinInFlight;
+    const joining = this.submitIntentNow(intent);
+    this.joinInFlight = joining;
+    try {
+      return await joining;
+    } finally {
+      if (this.joinInFlight === joining) this.joinInFlight = null;
+    }
+  }
+
+  async submitIntentNow(intent = {}) {
     if (!this.control || !this.world) throw new Error("本赛季尚未初始化");
     const account = this.account();
     if (this.world?.bans?.[account.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，所有游戏操作均会被忽略");
     if (this.recoverOwnLocalPlayerState()) this.saveCache();
+    if (String(intent?.type || "") === "join" && this.world.players?.[account.accountId]) {
+      return { duplicate: true, restored: true, state: this.state() };
+    }
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
     const previousPreferences = cloneJson(this.localPreferences);
     if (normalized.type === "join") {
@@ -1067,13 +1116,12 @@ class OnlineWorldService {
       if (normalized.type === "join") {
         const parsed = await this.requestStructuredModel(
           buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context:${normalized.idempotencyKey}`),
-          { attempts: 3, label: "玩家角色设定整理" }
+          { attempts: 3, label: "玩家角色设定整理", validate: playerContextQualityIssue }
         );
         const personaSummary = String(parsed?.personaSummary || "").trim();
         const appearanceSummary = String(parsed?.appearanceSummary || "").trim();
         const speechStyle = String(parsed?.speechStyle || "").trim();
         const relationshipApproach = String(parsed?.relationshipApproach || "").trim();
-        if (!personaSummary || personaSummary.length > 2000 || appearanceSummary.length > 1000 || speechStyle.length > 500 || relationshipApproach.length > 800) throw new Error("玩家角色设定世界书返回不完整");
         this.localPreferences.playerContext = {
           displayName: this.localPreferences.characterProfile.displayName,
           personaSummary,
@@ -1221,7 +1269,36 @@ class OnlineWorldService {
     return this.state();
   }
 
-  async requestStructuredModel(request, { attempts = 2, label = "模型请求" } = {}) {
+  async ensureLocalPlayerContext() {
+    const accountId = this.account().accountId;
+    if (!this.world?.players?.[accountId] || !this.localPreferences.characterProfile) return null;
+    const current = this.localPreferences.playerContext || this.world.privatePlayers?.[accountId]?.playerContext || null;
+    if (!playerContextQualityIssue(current)) {
+      this.localPreferences.playerContext = cloneJson(current);
+      this.world.privatePlayers[accountId] ||= {};
+      this.world.privatePlayers[accountId].playerContext = cloneJson(current);
+      return current;
+    }
+    const parsed = await this.requestStructuredModel(
+      buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context-repair:${crypto.randomUUID()}`),
+      { attempts: 3, label: "玩家角色设定修复", validate: playerContextQualityIssue }
+    );
+    const repaired = {
+      displayName: this.localPreferences.characterProfile.displayName,
+      personaSummary: String(parsed.personaSummary).trim(),
+      appearanceSummary: String(parsed.appearanceSummary).trim(),
+      speechStyle: String(parsed.speechStyle).trim(),
+      relationshipApproach: String(parsed.relationshipApproach).trim()
+    };
+    this.localPreferences.playerContext = repaired;
+    this.world.privatePlayers[accountId] ||= {};
+    this.world.privatePlayers[accountId].playerContext = cloneJson(repaired);
+    this.saveCache();
+    this.notify();
+    return repaired;
+  }
+
+  async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null } = {}) {
     const run = async () => {
       let lastError = null;
       for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
@@ -1234,7 +1311,10 @@ class OnlineWorldService {
           if (!conversationId) throw new Error("平台没有返回新会话编号");
           if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
           this.modelConversationIds.add(conversationId);
-          return parseJsonAnswer(answer?.answer ?? answer);
+          const parsed = parseJsonAnswer(answer?.answer ?? answer);
+          const issue = typeof validate === "function" ? validate(parsed) : null;
+          if (issue) throw new Error(String(issue));
+          return parsed;
         } catch (error) {
           lastError = error;
           if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
@@ -1317,14 +1397,15 @@ class OnlineWorldService {
     for (const effect of effects || []) {
       if (effect.type !== "general-generation-request") continue;
       const request = buildGeneralGenerationRequest(this.world, effect, crypto.randomUUID());
-      const parsed = await this.requestStructuredModel(request, { attempts: effect.initial ? 3 : 2, label: effect.initial ? "初始将领生成" : "将领生成" });
+      const parsed = await this.requestStructuredModel(request, {
+        attempts: effect.initial ? 3 : 2,
+        label: effect.initial ? "初始将领生成" : "将领生成",
+        validate: value => generalGenerationQualityIssue(value, effect)
+      });
       const name = String(parsed?.name || "").trim();
       const setting = String(parsed?.setting || "").trim();
       const gender = String(parsed?.gender || "").toLowerCase();
       const power = Number(parsed?.power);
-      if (!name || name.length > 24 || !setting || setting.length > 1000 || !["male", "female"].includes(gender) || gender !== effect.gender || !Number.isInteger(power) || power < 100 || power > 5000) {
-        throw new Error("模型返回的将领设定不完整或不符合性别、战力格式");
-      }
       await this.applyLocalIntent({
         type: "grant-general",
         generalId: crypto.randomUUID(),
@@ -1560,4 +1641,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

@@ -7,6 +7,9 @@ const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
 const { createBundledGridCard, configurationDigest } = require("../electron/online-world-card.cjs");
 const { FYOW_SCHEMAS, encodeCommentRecord, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
+const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
+const { createWorld, buildPlayerProfileContextRequest, buildGeneralGenerationRequest } = require("../electron/grid-world-game.cjs");
+const { parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue } = require("../electron/online-world-service.cjs");
 
 const ORIGIN = "https://staging.aiero.cc";
 const PROFILE_ID = String(process.env.FYOW_PROFILE_ID || "default").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80) || "default";
@@ -310,6 +313,78 @@ function readbackChecks(exported, desired) {
   };
 }
 
+async function requestStructuredModelProbe(window, workId, request, validate) {
+  const token = String(await window.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
+  const keyword = String(request.keyword || `[[FYOW:TASK:${request.task}:v1]]`);
+  const query = `${keyword}\n${JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} })}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180_000);
+  try {
+    const response = await window.webContents.session.fetch(new URL("/go/api/apps/chat-messages", ORIGIN).href, {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json", "X-Language": "zh-Hans" },
+      body: JSON.stringify(createModelRequestPayload({ workId, query }))
+    });
+    if (!response.ok || /json/i.test(String(response.headers.get("content-type") || ""))) {
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(failure?.message || failure?.msg || `模型探针失败：HTTP ${response.status}`);
+    }
+    const result = await consumeModelEventStream(response.body);
+    if (!String(result.conversationId || "").trim()) throw new Error("模型探针完成后没有新会话编号");
+    const parsed = parseJsonAnswer(result.answer);
+    const issue = validate(parsed);
+    if (issue) throw new Error(`模型探针质量校验失败：${issue}`);
+    return { parsed, conversationId: result.conversationId, finishEvent: result.finishEvent, answerCharacters: result.answer.length };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runModelProbe(window, workId) {
+  const profileRequest = buildPlayerProfileContextRequest({
+    displayName: "茂密",
+    basicInfo: "猫亚人",
+    appearance: "白色头发"
+  }, crypto.randomUUID());
+  const profile = await requestStructuredModelProbe(window, workId, profileRequest, playerContextQualityIssue);
+  const world = createWorld({ seed: "live-model-probe", seasonId: "probe", startedAt: Date.now(), authorityAccountId: "probe-player" });
+  world.privatePlayers["probe-player"] = { orientation: "women", characterTags: [] };
+  const effect = {
+    type: "general-generation-request",
+    accountId: "probe-player",
+    initial: true,
+    initialWish: "希望遇到一名白发猫亚人良将，善于守城，愿意与主公建立长期羁绊",
+    gender: "female",
+    population: 3200,
+    resourceGrade: "A",
+    x: 12,
+    y: 18
+  };
+  const generalRequest = buildGeneralGenerationRequest(world, effect, crypto.randomUUID());
+  const general = await requestStructuredModelProbe(window, workId, generalRequest, value => generalGenerationQualityIssue(value, effect));
+  if (profile.conversationId === general.conversationId) throw new Error("两个模型探针复用了同一会话");
+  return {
+    profile: {
+      conversationId: profile.conversationId,
+      finishEvent: profile.finishEvent,
+      lengths: Object.fromEntries(Object.entries(profile.parsed).map(([key, value]) => [key, String(value || "").length])),
+      sample: profile.parsed
+    },
+    general: {
+      conversationId: general.conversationId,
+      finishEvent: general.finishEvent,
+      name: general.parsed.name,
+      gender: general.parsed.gender,
+      power: general.parsed.power,
+      settingCharacters: String(general.parsed.setting || "").length,
+      settingSample: String(general.parsed.setting || "").slice(0, 180)
+    }
+  };
+}
+
 async function readAllComments(window, workId) {
   const comments = [];
   const seen = new Set();
@@ -434,6 +509,11 @@ async function main() {
         await sleep(100);
       }
       process.stdout.write(`${JSON.stringify({ roles:[...new Set(samples.map(value => JSON.stringify(roleKeys(value, desired))))].map(value => JSON.parse(value)), exported:shapeOf(samples[0]), app:shapeOf(samples[0]?.app) }, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_PROBE_MODEL === "1") {
+      const probe = await runModelProbe(window, workId);
+      process.stdout.write(`${JSON.stringify({ ok:true, workId, probe }, null, 2)}\n`);
       return;
     }
     if (process.env.FYOW_VERIFY_ONLY === "1") {

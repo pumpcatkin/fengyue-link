@@ -700,17 +700,22 @@ window.addEventListener("message", event => {
     payload = event.data.state;
     serverNow = Number(payload?.serverNow || Date.now());
     receivedAt = Date.now();
-    joinSubmitting = false;
+    if (ownPlayer()) joinSubmitting = false;
     renderAll();
   } else if (event.data.type === "error") {
     joinSubmitting = false;
     showToast(event.data.message || "行动失败");
     if (!ownPlayer()) renderJoinWizard();
   } else if (event.data.type === "result") {
-    if (event.data.result?.preferences) {
-      payload = event.data.result.state || payload;
-      document.querySelector("#preferences-modal").classList.add("hidden");
+    if (event.data.result?.state) {
+      payload = event.data.result.state;
+      serverNow = Number(payload?.serverNow || Date.now());
+      receivedAt = Date.now();
+      joinSubmitting = false;
       renderAll();
+    }
+    if (event.data.result?.preferences) {
+      document.querySelector("#preferences-modal").classList.add("hidden");
       showToast("性癖偏好已保存");
       return;
     }

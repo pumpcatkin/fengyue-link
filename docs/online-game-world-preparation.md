@@ -200,14 +200,15 @@ POST /console/api/installed-apps/{workId}/chat-messages/{taskId}/stop
 {
   "app_id": "WORK_ID",
   "inputs": {},
-  "conversation_id": "CONVERSATION_UUID_OR_EMPTY",
   "query": "[[FYOW:TASK:story.next:v1]]\n{\"schema\":\"fyow.model-request/1\",\"input\":{}}",
   "response_mode": "streaming",
   "files": []
 }
 ```
 
-SSE 解析器至少处理 `message`、`agent_message`、`message_end`、`message_replace`、`workflow_started`、`workflow_finished`、`text_chunk`、`text_replace`、`thinking`、`error`，并保存 `task_id`、`message_id`、`conversation_id` 和积分元数据。
+在线游戏世界的每次模型输入都必须省略 `conversation_id`，由平台创建一条全新的独立会话。上一次返回的会话编号不写入游戏缓存，也不进入下一次请求；自动重试同样创建新会话。SSE 解析器至少处理 `message`、`agent_message`、`message_end`、`message_replace`、`workflow_started`、`workflow_finished`、`text_chunk`、`text_replace`、`thinking`、`error`，并读取 `task_id`、`message_id`、`conversation_id` 和积分元数据。`conversation_id` 仅用于核对本次请求确实得到新的会话，不作为跨请求状态。
+
+固定功能世界书继续通过 `[[FYOW:TASK:...]]` 关键词触发。玩家设定、将领设定、将领记忆、历任主公和本次生成条件等动态资料必须完整放入当次结构化 `input`，不得依赖上一会话的个人世界书。
 
 ## 4. 单张作品内的数据模型
 
@@ -355,7 +356,7 @@ SDK 不暴露通用 `fetch`、`ipcRenderer`、文件路径、Token、Cookie、�
 
 主提示词保存世界观和共同输出规则；世界书条目只保存对应任务的职责、输入/输出 Schema 和错误格式。请求和返回都使用带版本 JSON，模型结果先经过 Schema 和本机业务规则校验；只有结果实际部署到领地时才随地图变更公开。模型文本永远不直接作为可执行 HTML/JS。
 
-模型请求由当前玩家工具发起，结果先保存在该玩家本地。重试复用相同幂等键，自动重试最多一次；未部署将领和私人对话不会广播到评论区。
+模型请求由当前玩家工具发起，结果先保存在该玩家本地。重试复用相同幂等键但仍创建全新会话，自动重试最多一次；未部署将领和私人对话不会广播到评论区。
 
 ## 8. 本轮真实测试
 

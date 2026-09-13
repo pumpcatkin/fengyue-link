@@ -6,12 +6,12 @@ const { consumeModelEventStream, createModelRequestPayload } = require("../elect
 const encoder = new TextEncoder();
 
 describe("online world model event stream", () => {
-  it("omits an empty conversation id for the first platform request", () => {
+  it("always omits the conversation id so every platform request creates a new session", () => {
     expect(createModelRequestPayload({ workId: "work", conversationId: "", query: "hello" })).toEqual({
       app_id: "work", inputs: {}, query: "hello", response_mode: "streaming", files: []
     });
-    expect(createModelRequestPayload({ workId: "work", conversationId: "conversation-1", query: "next" })).toMatchObject({
-      conversation_id: "conversation-1"
+    expect(createModelRequestPayload({ workId: "work", conversationId: "conversation-1", query: "next" })).toEqual({
+      app_id: "work", inputs: {}, query: "next", response_mode: "streaming", files: []
     });
   });
 

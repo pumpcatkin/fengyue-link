@@ -356,8 +356,7 @@ class OnlineWorldService {
     this.publicCellOrders = {};
     this.publicGeneralOrders = {};
     this.publicParticipantOrders = {};
-    this.worldBookFingerprint = null;
-    this.modelConversationId = "";
+    this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
     this.pollTimer = null;
     this.mapFactsCache = null;
@@ -577,7 +576,6 @@ class OnlineWorldService {
       publicCellOrders: this.publicCellOrders,
       publicGeneralOrders: this.publicGeneralOrders,
       publicParticipantOrders: this.publicParticipantOrders,
-      modelConversationId: this.modelConversationId,
       directInbox: this.directInbox.slice(-100),
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
@@ -650,7 +648,7 @@ class OnlineWorldService {
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
-    this.modelConversationId = String(cached?.modelConversationId || "").trim().slice(0, 200);
+    this.modelConversationIds.clear();
     this.localPreferences = {
       orientation: ["men", "women", "any"].includes(cached?.localPreferences?.orientation)
         ? cached.localPreferences.orientation
@@ -880,8 +878,7 @@ class OnlineWorldService {
     this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.directInbox = [];
     this.seenDirectMessageIds.clear();
-    this.worldBookFingerprint = null;
-    this.modelConversationId = "";
+    this.modelConversationIds.clear();
   }
 
   applyAuthorityDirective(item) {
@@ -1027,7 +1024,6 @@ class OnlineWorldService {
         if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
         if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
-        await this.reconcileOwnGeneralWorldBooks();
         await this.receiveDirectWakes().catch(() => []);
         const resets = history.assembled.records
           .filter(item => item.record?.schema === FYOW_SCHEMAS.reset && item.record.seasonId === this.control.seasonId && this.validAuthorSource(item))
@@ -1086,7 +1082,6 @@ class OnlineWorldService {
           relationshipApproach
         };
         normalized.playerContext = cloneJson(this.localPreferences.playerContext);
-        this.worldBookFingerprint = null;
       }
       return await this.applyLocalIntent(normalized, account.accountId, { rollbackPreferences: normalized.type === "join" ? previousPreferences : null });
     } catch (error) {
@@ -1156,7 +1151,6 @@ class OnlineWorldService {
     const localEventStart = this.localEvents.length;
     this.recordLocalEvent(localEvent);
     try {
-      await this.handleWorldBookTransition(intent, outcome, actorAccountId);
       let dialogue = null;
       if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
       // A join is committed only after its initial general has been returned
@@ -1174,7 +1168,6 @@ class OnlineWorldService {
         this.world = beforeWorld;
         if (options.rollbackPreferences) this.localPreferences = cloneJson(options.rollbackPreferences);
         this.localEvents.splice(localEventStart);
-        this.worldBookFingerprint = null;
         this.saveCache();
         this.notify();
       }
@@ -1233,9 +1226,14 @@ class OnlineWorldService {
       let lastError = null;
       for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
         try {
-          const answer = await this.requestModel({ ...request, conversationId: String(request?.conversationId || this.modelConversationId || "") });
+          const freshRequest = { ...request };
+          delete freshRequest.conversationId;
+          delete freshRequest.conversation_id;
+          const answer = await this.requestModel(freshRequest);
           const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
-          if (conversationId) this.modelConversationId = conversationId.slice(0, 200);
+          if (!conversationId) throw new Error("平台没有返回新会话编号");
+          if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
+          this.modelConversationIds.add(conversationId);
           return parseJsonAnswer(answer?.answer ?? answer);
         } catch (error) {
           lastError = error;
@@ -1280,7 +1278,6 @@ class OnlineWorldService {
     const sources = await this.postRecord(record);
     if (!this.applyAuthorityDirective({ record, sources })) throw new Error("服主指令发布后未通过作者身份与时间戳校验");
     await this.publishSnapshot();
-    await this.reconcileOwnGeneralWorldBooks();
     this.saveCache();
     this.notify();
     return { command: { type, targetAccountId, authorityId }, state: this.state() };
@@ -1346,7 +1343,7 @@ class OnlineWorldService {
   async completeDialogue(request, actorAccountId, intent) {
     const general = this.world.generals?.[intent.generalId];
     const player = this.world.players?.[actorAccountId];
-    const parsed = await this.requestModelWithGeneralWorldBook(request, general);
+    const parsed = await this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
     const reply = String(parsed.reply || "").trim().slice(0, 2000);
     if (!reply) throw new Error("将领互动未返回有效回答");
     const memory = await this.requestStructuredModel(
@@ -1377,112 +1374,6 @@ class OnlineWorldService {
       commandResult = await this.sendDirect(String(command.toAccountId || ""), "general-letter", { generalId: general?.id, text: String(command.text || "") }, { fromGeneralDialogue: true });
     }
     return { reply, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command || null, commandResult };
-  }
-
-  async requestModelWithGeneralWorldBook(request, general) {
-    if (!general) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    // Per-player world books belong to the current platform conversation. If
-    // the first request has not created one yet, the structured input still
-    // carries the complete general context and establishes that conversation.
-    const conversationId = String(this.modelConversationId || "").trim();
-    if (!conversationId) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    let payload;
-    try {
-      payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
-    } catch {
-      return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    }
-    const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
-    const original = Array.isArray(config.world_book) ? config.world_book : [];
-    const marker = `FYOW_GENERAL:${general.id}`;
-    const extras = [];
-    if (!original.some(entry => String(entry?.value || "").includes(marker))) extras.push(this.generalWorldBookEntry(general));
-    if (this.localPreferences.playerContext && !original.some(entry => String(entry?.value || "").includes("FYOW_PLAYER_CONTEXT:"))) extras.push(this.playerWorldBookEntry());
-    if (!extras.length) return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    let applied = false;
-    try {
-      await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: [...original, ...extras] }, timeout: 15000 });
-      applied = true;
-    } catch {
-      return this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    }
-    try {
-      return await this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    } finally {
-      if (applied) await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: original }, timeout: 15000 }).catch(() => {});
-    }
-  }
-
-  async handleWorldBookTransition(intent, outcome, actorAccountId) {
-    const generalId = String(intent.generalId || outcome.result?.generalId || "");
-    const general = this.world.generals?.[generalId];
-    if (!general) return;
-    if (intent.type === "deploy-general") {
-      if (String(actorAccountId) === this.account().accountId) {
-        this.worldBookFingerprint = null;
-        await this.reconcileOwnGeneralWorldBooks();
-      }
-    } else if ((intent.type === "recall-general" || intent.type === "grant-general") && String(actorAccountId) === this.account().accountId) {
-      this.worldBookFingerprint = null;
-      await this.reconcileOwnGeneralWorldBooks();
-    }
-  }
-
-  generalWorldBookEntry(general) {
-    const marker = `FYOW_GENERAL:${general.id}`;
-    return {
-      group: "在线游戏世界/随行将领",
-      match_type: 2,
-      key: `_or_${general.name}`,
-      key_region: 2,
-      value_type: 0,
-      value: `${marker}\n将领设定：${general.setting}\n将领记忆：${general.memoryText || "暂无"}`.slice(0, 6000),
-      value_configs: [], value_region: 1, sort: 0, depth: 0, probability: 100, enable: true
-    };
-  }
-
-  playerWorldBookEntry() {
-    const context = this.localPreferences.playerContext || {};
-    const marker = `FYOW_PLAYER_CONTEXT:${this.localPreferences.characterProfileId || "bound"}`;
-    return {
-      group: "在线游戏世界/玩家角色",
-      match_type: 2,
-      key: `_or_${String(context.displayName || "玩家").slice(0, 80)}`,
-      key_region: 2,
-      value_type: 0,
-      value: `${marker}\n角色摘要：${context.personaSummary || "暂无"}\n外貌：${context.appearanceSummary || "暂无"}\n说话方式：${context.speechStyle || "暂无"}\n关系倾向：${context.relationshipApproach || "暂无"}`.slice(0, 6000),
-      value_configs: [], value_region: 1, sort: -1, depth: 0, probability: 100, enable: true
-    };
-  }
-
-  async reconcileOwnGeneralWorldBooks() {
-    if (!this.world || !this.work) return;
-    const conversationId = String(this.modelConversationId || "").trim();
-    if (!conversationId) return;
-    const accountId = this.account().accountId;
-    const player = this.world.players?.[accountId];
-    if (!player) return;
-    const desired = (player.carriedGeneralIds || []).map(id => this.world.generals?.[id]).filter(Boolean);
-    const fingerprint = sha256(Buffer.from(canonicalJson({
-      playerContext: this.localPreferences.playerContext,
-      generals: desired.map(general => ({ id: general.id, name: general.name, setting: general.setting, memoryText: general.memoryText }))
-    })))
-    if (fingerprint === this.worldBookFingerprint) return;
-    const payload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
-    const config = payload?.data?.data ?? payload?.data ?? payload ?? {};
-    const worldBook = (Array.isArray(config.world_book) ? config.world_book : []).filter(entry => {
-      const value = String(entry?.value || "");
-      return !value.includes("FYOW_GENERAL:") && !value.includes("FYOW_PLAYER_CONTEXT:");
-    });
-    if (this.localPreferences.playerContext) worldBook.push(this.playerWorldBookEntry());
-    worldBook.push(...desired.map(general => this.generalWorldBookEntry(general)));
-    await this.requestGo("/apps/config", { method: "POST", body: { app_id: this.work.id, conversation_id: conversationId, is_global: false, world_book: worldBook }, timeout: 15000 });
-    const verifiedPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(this.work.id)}&conversation_id=${encodeURIComponent(conversationId)}`, { timeout: 15000 });
-    const verified = verifiedPayload?.data?.data ?? verifiedPayload?.data ?? verifiedPayload ?? {};
-    const persisted = new Set((Array.isArray(verified.world_book) ? verified.world_book : []).map(entry => String(entry?.value || "").match(/FYOW_GENERAL:([^\s]+)/)?.[1]).filter(Boolean));
-    const playerPersisted = !this.localPreferences.playerContext || (Array.isArray(verified.world_book) ? verified.world_book : []).some(entry => String(entry?.value || "").includes("FYOW_PLAYER_CONTEXT:"));
-    if (!playerPersisted || persisted.size !== desired.length || desired.some(general => !persisted.has(String(general.id)))) throw new Error("玩家与将领世界书保存后校验失败");
-    this.worldBookFingerprint = fingerprint;
   }
 
   async findPrivateChat(accountId) {
@@ -1662,7 +1553,6 @@ class OnlineWorldService {
     this.work = newWork;
     this.control = newControl;
     this.mapFactsCache = null;
-    this.worldBookFingerprint = null;
     this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configurationImported: true, oldWorkRenamed: true, redirectPublished: true, requiresConfigurationImport: false, requiresPublish: true };
     this.saveCache();
     this.notify();

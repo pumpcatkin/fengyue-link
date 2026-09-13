@@ -3519,7 +3519,7 @@ class AccountBackend {
     if (!token) throw new Error(`读取账号登录令牌失败：${tokenError?.message || "登录状态尚未就绪"}`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 180000);
-    this.appendSessionLog("online-world-model", { event: "request-started", task: String(request.task || "unknown"), conversationId: String(request.conversationId || "") || null });
+    this.appendSessionLog("online-world-model", { event: "request-started", task: String(request.task || "unknown"), newConversation: true });
     try {
       const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
         method: "POST",
@@ -3527,7 +3527,7 @@ class AccountBackend {
         cache: "no-store",
         signal: controller.signal,
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Language": "zh-Hans" },
-        body: JSON.stringify(createModelRequestPayload({ workId, conversationId: request.conversationId, query }))
+        body: JSON.stringify(createModelRequestPayload({ workId, query }))
       });
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}));
@@ -3538,6 +3538,7 @@ class AccountBackend {
         throw new Error(failure?.message || failure?.msg || "模型接口返回了业务错误");
       }
       const result = await consumeModelEventStream(response.body);
+      if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
       this.appendSessionLog("online-world-model", { event: "request-completed", task: String(request.task || "unknown"), conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });
       return result;
     } catch (error) {

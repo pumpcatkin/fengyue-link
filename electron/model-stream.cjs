@@ -16,12 +16,10 @@ function answerText(data) {
   return candidates.find(value => typeof value === "string" && value) || "";
 }
 
-function createModelRequestPayload({ workId, conversationId, query }) {
-  const normalizedConversationId = String(conversationId || "").trim();
+function createModelRequestPayload({ workId, query }) {
   return {
     app_id: String(workId || ""),
     inputs: {},
-    ...(normalizedConversationId ? { conversation_id: normalizedConversationId } : {}),
     query: String(query || ""),
     response_mode: "streaming",
     files: []

@@ -11,13 +11,14 @@ const { createBundledGridCard } = require("../electron/online-world-card.cjs");
 
 function service(options: Record<string, unknown>) {
   let worldBook: any[] = [];
+  let modelSequence = 0;
   return new OnlineWorldService({
     requestGo: async (_endpoint: string, request: any = {}) => {
       if (request.method === "POST" && Array.isArray(request.body?.world_book)) worldBook = request.body.world_book;
       return { data: { world_book: worldBook } };
     },
     requestModel: async (request: any) => ({
-      conversationId: "conversation-1",
+      conversationId: `conversation-${++modelSequence}`,
       answer: request?.task === "player.profile-context"
         ? "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"黑发军装\",\"speechStyle\":\"沉稳\",\"relationshipApproach\":\"重视忠诚\"}"
         : request?.task === "general.memory.update"
@@ -33,25 +34,37 @@ function service(options: Record<string, unknown>) {
 }
 
 describe("online world platform service", () => {
-  it("serializes every model request so one conversation cannot overlap generations", async () => {
+  it("serializes model requests while forcing every input into a fresh conversation", async () => {
     const calls: string[] = [];
+    const sentRequests: any[] = [];
     let releaseFirst: () => void = () => {};
     const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
     const instance = service({
       requestModel: async (request: any) => {
         calls.push(request.task);
+        sentRequests.push(request);
         if (request.task === "first") await firstGate;
-        return { conversationId: "conversation-queue", answer: JSON.stringify({ task: request.task }) };
+        return { conversationId: `conversation-queue-${calls.length}`, answer: JSON.stringify({ task: request.task }) };
       }
     });
-    const first = instance.requestStructuredModel({ task: "first" });
-    const second = instance.requestStructuredModel({ task: "second" });
+    const first = instance.requestStructuredModel({ task: "first", conversationId: "stale-conversation" });
+    const second = instance.requestStructuredModel({ task: "second", conversation_id: "stale-conversation" });
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(calls).toEqual(["first"]);
     releaseFirst();
     await expect(first).resolves.toEqual({ task: "first" });
     await expect(second).resolves.toEqual({ task: "second" });
     expect(calls).toEqual(["first", "second"]);
+    expect(sentRequests.every(request => !("conversationId" in request) && !("conversation_id" in request))).toBe(true);
+    expect(instance.modelConversationIds.size).toBe(2);
+  });
+
+  it("rejects a platform response that reuses an earlier model conversation", async () => {
+    const instance = service({
+      requestModel: async (request: any) => ({ conversationId: "reused-conversation", answer: JSON.stringify({ task: request.task }) })
+    });
+    await expect(instance.requestStructuredModel({ task: "first" }, { attempts: 1 })).resolves.toEqual({ task: "first" });
+    await expect(instance.requestStructuredModel({ task: "second" }, { attempts: 1 })).rejects.toThrow(/复用了已经使用过的模型会话/);
   });
 
   it("calibrates rule time from the platform response clock", async () => {
@@ -192,7 +205,7 @@ describe("online world platform service", () => {
       speechStyle: "沉稳",
       relationshipApproach: "重视忠诚"
     });
-    expect(instance.modelConversationId).toBe("conversation-1");
+    expect(instance.modelConversationIds.size).toBe(2);
   });
 
   it("restores a player position and private resources from a pre-overlay local save", () => {
@@ -238,15 +251,14 @@ describe("online world platform service", () => {
       getIdentity: async () => identity,
       requestModel: async (request: any) => {
         requestedTasks.push(request.task);
-        if (request.task === "general.dialogue") return { conversationId: "conversation-1", answer: '{"reply":"愿与主公谈谈北境。","command":null}' };
-        if (request.task === "general.memory.update") return { conversationId: "conversation-1", answer: '{"category":"speech","summary":"与主公甲谈论北境","emotion":"振奋","intimacyDelta":2,"compactMemory":"言谈：[1年]与主公甲谈论北境，感到振奋。\\n经历：[1年]被主公甲发掘并提拔为将领"}' };
+        if (request.task === "general.dialogue") return { conversationId: "conversation-dialogue", answer: '{"reply":"愿与主公谈谈北境。","command":null}' };
+        if (request.task === "general.memory.update") return { conversationId: "conversation-memory", answer: '{"category":"speech","summary":"与主公甲谈论北境","emotion":"振奋","intimacyDelta":2,"compactMemory":"言谈：[1年]与主公甲谈论北境，感到振奋。\\n经历：[1年]被主公甲发掘并提拔为将领"}' };
         throw new Error(`unexpected task ${request.task}`);
       }
     });
     instance.work = { id: "work", authorAccountId: "author" };
     instance.control = { seasonId: "season", authorityAccountId: "author" };
     instance.world = world;
-    instance.modelConversationId = "conversation-1";
     instance.localPreferences.characterProfileId = "profile-a";
     instance.localPreferences.playerContext = { displayName: "主公甲", personaSummary: "慧眼之主", appearanceSummary: "", speechStyle: "沉稳", relationshipApproach: "重视忠诚" };
     const result = await instance.submitIntent({ type: "talk-general", generalId: "g1", topic: "北境局势", idempotencyKey: "talk" });
@@ -259,12 +271,13 @@ describe("online world platform service", () => {
   it("does not commit a new player until the initial general model returns a complete setting", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000 });
+    let modelSequence = 0;
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestModel: async (request: any) => request?.task === "player.profile-context"
-        ? { conversationId: "conversation-1", answer: "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"\",\"speechStyle\":\"\",\"relationshipApproach\":\"\"}" }
-        : { conversationId: "conversation-1", answer: "模型暂时没有返回完整设定" },
+        ? { conversationId: `conversation-${++modelSequence}`, answer: "{\"personaSummary\":\"慧眼之主\",\"appearanceSummary\":\"\",\"speechStyle\":\"\",\"relationshipApproach\":\"\"}" }
+        : { conversationId: `conversation-${++modelSequence}`, answer: "模型暂时没有返回完整设定" },
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint.startsWith("/comments/") && options.method === "POST") return { id: "c1", account_id: "author", is_author: true, created_at: new Date(2_000).toISOString(), content: options.body.content };
         throw new Error(`unexpected ${endpoint}`);

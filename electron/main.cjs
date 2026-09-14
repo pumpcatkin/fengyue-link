@@ -2788,21 +2788,30 @@ class AccountBackend {
       return await target.executeJavaScript(`(async () => {
         const includeDetails = ${JSON.stringify(Boolean(includeDetails))};
         const token = localStorage.getItem('console_token') || '';
-        // A navigation or a slow storage restore can make the token briefly
-        // unreadable. Treat that as indeterminate instead of logging a live
-        // tool session out; a real rejection is confirmed by the profile API.
-        if (!token) return { authenticated:null, reason:'missing-token' };
-        const headers = { Authorization: 'Bearer ' + token, 'X-Language': 'zh-Hans' };
+        // Current Aiero nodes authenticate the web page with an HttpOnly
+        // cookie and remove the legacy localStorage console_token after login.
+        // Keep the old bearer token as an optional compatibility header, but
+        // never require it before probing the cookie session.
+        // Legacy builds returned authenticated:null, reason:'missing-token'
+        // here; that result is intentionally no longer used as a gate.
+        const headers = { 'X-Language': 'zh-Hans', Accept: 'application/json' };
+        if (token) headers.Authorization = 'Bearer ' + token;
         const unwrap = value => value && value.code === 100000 ? value.data : (value?.data ?? value);
         const request = url => fetch(url, { credentials:'include', cache:'no-store', headers, signal:AbortSignal.timeout(5000) });
         const profileResponse = await request('/go/api/account/profile');
         if (profileResponse.status === 401 || profileResponse.status === 403) return { authenticated:false, reason:'profile-rejected' };
         if (!profileResponse.ok) return null;
-        const profile = unwrap(await profileResponse.json()) || {};
+        const profilePayload = await profileResponse.json().catch(() => null);
+        if (profilePayload && typeof profilePayload.code === 'number' && profilePayload.code !== 100000) {
+          return { authenticated:false, reason:'profile-rejected' };
+        }
+        const profile = unwrap(profilePayload) || {};
         const accountId = profile.id ?? profile.account_id ?? profile.accountId ?? null;
+        const accountIdText = accountId == null ? '' : String(accountId).trim();
+        const trialAccount = profile.is_trial_account === true || profile.isTrialAccount === true;
         let point = {};
         let personalProfile = {};
-        if (includeDetails && accountId != null) {
+        if (includeDetails && accountIdText) {
           const readOptional = async url => {
             try {
               const response = await request(url);
@@ -2816,12 +2825,19 @@ class AccountBackend {
         }
         const username = profile.username ?? profile.user_name ?? profile.account_name ?? profile.name ?? profile.nickname ?? profile.email ?? null;
         const email = profile.email ?? profile.mail ?? profile.account_email ?? profile.accountEmail ?? (/^[^@\\s]+@[^@\\s]+$/.test(String(username || "")) ? username : null);
+        const guestName = /^(guest|游客)$/i.test(String(username || '').trim());
+        // The unauthenticated profile endpoint can return a Guest/trial
+        // profile with HTTP 200. Treat it as logged out rather than as a real
+        // account session.
+        if (trialAccount || guestName || !accountIdText) {
+          return { authenticated:false, reason: trialAccount || guestName ? 'guest-account' : 'missing-account-id' };
+        }
         const rawPoints = point.points ?? point.point ?? point.balance ?? profile.points ?? null;
         const personal = personalProfile?.personal_profile ?? personalProfile?.profile ?? personalProfile;
         const rawLevel = personal?.level_info?.current_level ?? personal?.current_level ?? profile?.level_info?.current_level ?? profile?.current_level ?? profile?.level ?? null;
         return {
           authenticated:true,
-          accountId: accountId == null ? null : String(accountId),
+          accountId: accountIdText,
           username: username == null ? null : String(username),
           email: email == null ? null : String(email).trim().toLocaleLowerCase(),
           points: rawPoints == null ? null : String(rawPoints),
@@ -3030,13 +3046,12 @@ class AccountBackend {
             .filter(text => text && text.length <= 240 && /错误|失败|无效|不存在|密码|频繁|验证|error|invalid|failed/i.test(text));
           return { hasToken:Boolean(token), error:errors[0] || null };
         })()`, true).catch(() => ({ hasToken: false, error: null }));
-        if (pageStatus?.error && !pageStatus?.hasToken) throw new Error(`平台登录失败：${pageStatus.error}`);
-        if (!pageStatus?.hasToken) continue;
         const snapshot = await this.readAccountSnapshot({ includeDetails: false });
         if (snapshot?.authenticated) {
           authenticatedSnapshot = snapshot;
           break;
         }
+        if (pageStatus?.error && !pageStatus?.hasToken) throw new Error(`平台登录失败：${pageStatus.error}`);
       }
       if (!authenticatedSnapshot) throw new Error("登录验证超时；当前节点响应较慢或连接不稳定，请重试或在设置中切换节点");
       this.loggedIn = true;
@@ -3368,7 +3383,6 @@ class AccountBackend {
     ]);
     return anchor.webContents.executeJavaScript(`(async () => {
       const token = localStorage.getItem('console_token') || '';
-      if (!token) throw new Error('账号登录令牌不存在');
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), ${JSON.stringify(Math.max(1000, Math.min(Number(timeout) || 12000, 30000)))});
       const options = {
@@ -3376,8 +3390,9 @@ class AccountBackend {
         credentials: 'include',
         cache: 'no-store',
         signal: controller.signal,
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
+        headers: { 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
       };
+      if (token) options.headers.Authorization = 'Bearer ' + token;
       const body = ${JSON.stringify(body ?? null)};
       if (body != null) options.body = JSON.stringify(body);
       try {
@@ -3402,7 +3417,9 @@ class AccountBackend {
     ]);
     return anchor.webContents.executeJavaScript(`(async () => {
       const token = localStorage.getItem('console_token') || '';
-      const response = await fetch('/go/api/account/profile', { method:'GET', credentials:'include', cache:'no-store', headers:{Authorization:'Bearer ' + token,'X-Language':'zh-Hans'} });
+      const headers = { 'X-Language':'zh-Hans', Accept:'application/json' };
+      if (token) headers.Authorization = 'Bearer ' + token;
+      const response = await fetch('/go/api/account/profile', { method:'GET', credentials:'include', cache:'no-store', headers });
       if (!response.ok) throw new Error('平台时间校准请求失败：' + response.status);
       const serverTime = Date.parse(response.headers.get('date') || '');
       if (!Number.isFinite(serverTime)) throw new Error('平台响应缺少服务器时间');
@@ -3418,7 +3435,6 @@ class AccountBackend {
     ]);
     return anchor.webContents.executeJavaScript(`(async () => {
       const token = localStorage.getItem('console_token') || '';
-      if (!token) throw new Error('账号登录令牌不存在');
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), ${JSON.stringify(Math.max(1000, Math.min(Number(timeout) || 12000, 30000)))});
       const options = {
@@ -3426,8 +3442,9 @@ class AccountBackend {
         credentials: 'include',
         cache: 'no-store',
         signal: controller.signal,
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
+        headers: { 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
       };
+      if (token) options.headers.Authorization = 'Bearer ' + token;
       const body = ${JSON.stringify(body ?? null)};
       if (body != null) options.body = JSON.stringify(body);
       try {
@@ -3539,7 +3556,7 @@ class AccountBackend {
     let anchor = null;
     let token = "";
     let tokenError = null;
-    for (let attempt = 1; attempt <= 3 && !token; attempt += 1) {
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         anchor = await this.ensureAnchor();
         if (anchor.webContents.isLoading()) await Promise.race([
@@ -3547,24 +3564,27 @@ class AccountBackend {
           new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
         ]);
         token = String(await anchor.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
+        break;
       } catch (error) {
         tokenError = error;
         await new Promise(resolve => setTimeout(resolve, attempt * 250));
       }
     }
-    if (!token) throw new Error(`读取账号登录令牌失败：${tokenError?.message || "登录状态尚未就绪"}`);
+    if (!anchor) throw new Error(`读取账号会话失败：${tokenError?.message || "登录状态尚未就绪"}`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 180000);
     let platformRequestStarted = false;
     this.appendSessionLog("online-world-model", { event: "request-started", task, newConversation: true });
     try {
       platformRequestStarted = true;
+      const requestHeaders = { "Content-Type": "application/json", "X-Language": "zh-Hans" };
+      if (token) requestHeaders.Authorization = `Bearer ${token}`;
       const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
         method: "POST",
         credentials: "include",
         cache: "no-store",
         signal: controller.signal,
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Language": "zh-Hans" },
+        headers: requestHeaders,
         body: JSON.stringify(createModelRequestPayload({ workId, query }))
       });
       if (!response.ok) {
@@ -6456,10 +6476,11 @@ class AccountBackend {
           const timeout = setTimeout(() => controller.abort(),700);
           try {
             const token = localStorage.getItem('console_token') || '';
-            if (!token) return null;
+            const headers = { 'X-Language':'zh-Hans' };
+            if (token) headers.Authorization = 'Bearer ' + token;
             const response = await nativeFetch('/console/api/installed-apps/' + encodeURIComponent(installedAppId) + '/conversations?limit=500', {
               method:'GET',credentials:'include',cache:'no-store',signal:controller.signal,
-              headers:{Authorization:'Bearer ' + token,'X-Language':'zh-Hans'}
+              headers
             });
             if (!response.ok) return null;
             const payload = await response.json().catch(() => ({}));

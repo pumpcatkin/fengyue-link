@@ -23,7 +23,7 @@ let generalDetailId = null;
 let dialogueGeneralId = null;
 let joinStep = 0;
 let joinSubmitting = false;
-const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: "" };
+const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: "", preview: null };
 const preferenceDraft = { orientation: "any", tags: new Map() };
 const pendingHostRequests = new Map();
 const pendingHostKeys = new Map();
@@ -724,7 +724,8 @@ function renderJoinWizard() {
     ["第一问 · 1 / 4", "选择角色设定作为游戏角色？", "绑定后无法修改。"],
     ["第二问 · 2 / 4", "选择性取向", "这会影响游戏内发现的将领性别。"],
     ["第三问 · 3 / 4", "添加标签", "请填写自己的性癖。标签大全仅供参考；每次发掘将领时会从你的标签中抽取 1～3 个方向。"],
-    ["第四问 · 4 / 4", "开疆扩土前，你会想要遇到一名怎样的良将？", "此题脱离词条，只保留性取向，并直接生成你的初始将领。"]
+    ["第四问 · 4 / 4", "开疆扩土前，你会想要遇到一名怎样的良将？", "此题脱离词条，只保留性取向，并直接生成你的初始将领。"],
+    ["初始将领 · 确认", "查看你的初始将领", "可以再次抽取，也可以自由编辑这份初始设定；点击确定进入游戏后便永久锁定。"]
   ];
   document.querySelector("#join-progress").textContent = questions[joinStep][0];
   document.querySelector("#join-title").textContent = questions[joinStep][1];
@@ -732,13 +733,53 @@ function renderJoinWizard() {
   document.querySelectorAll(".join-step").forEach((node, index) => node.classList.toggle("hidden", index !== joinStep));
   document.querySelector("#join-prev").classList.toggle("hidden", joinStep === 0 || joinSubmitting);
   const next = document.querySelector("#join-next");
-  next.textContent = joinSubmitting ? "正在生成初始将领…" : joinStep === 3 ? "踏入疆土" : "下一问";
+  next.textContent = joinSubmitting
+    ? (joinStep === 4 ? "正在确认…" : "正在生成初始将领…")
+    : joinStep === 3 ? "生成初始将领" : joinStep === 4 ? "确定并进入游戏" : "下一问";
   next.disabled = joinSubmitting;
   if (joinStep === 0) renderProfileOptions();
   if (joinStep === 2) {
     if (!joinDraft.tags.size) joinDraft.tags = mapTags(payload?.localPreferences?.characterTags);
     renderTagOptions();
   }
+  if (joinStep === 4) renderInitialGeneralPreview();
+}
+
+function renderInitialGeneralPreview() {
+  const preview = joinDraft.preview;
+  if (!preview?.general) return;
+  const root = document.querySelector(".join-general-preview");
+  if (root.dataset.previewId === preview.previewId) return;
+  const general = preview.general;
+  root.dataset.previewId = preview.previewId;
+  document.querySelector("#join-general-name").value = general.name || "";
+  document.querySelector("#join-general-gender").textContent = general.gender === "male" ? "男" : "女";
+  document.querySelector("#join-general-height").value = general.heightCm ?? "";
+  document.querySelector("#join-general-weight").value = general.weightKg ?? "";
+  document.querySelector("#join-general-chest").value = general.measurements?.chestCm ?? "";
+  document.querySelector("#join-general-waist").value = general.measurements?.waistCm ?? "";
+  document.querySelector("#join-general-hip").value = general.measurements?.hipCm ?? "";
+  document.querySelector("#join-general-appearance").value = general.appearanceSetting || "";
+  document.querySelector("#join-general-core").value = general.coreSetting || "";
+}
+
+function syncInitialGeneralEdits() {
+  if (!joinDraft.preview?.general) return null;
+  const general = joinDraft.preview.general;
+  joinDraft.preview.general = {
+    ...general,
+    name: document.querySelector("#join-general-name").value.trim(),
+    heightCm: document.querySelector("#join-general-height").value,
+    weightKg: document.querySelector("#join-general-weight").value,
+    measurements: {
+      chestCm: document.querySelector("#join-general-chest").value,
+      waistCm: document.querySelector("#join-general-waist").value,
+      hipCm: document.querySelector("#join-general-hip").value
+    },
+    appearanceSetting: document.querySelector("#join-general-appearance").value.trim(),
+    coreSetting: document.querySelector("#join-general-core").value.trim()
+  };
+  return joinDraft.preview.general;
 }
 function validateJoinStep() {
   if (joinStep === 0 && !joinDraft.profileId) return "请选择一份角色设定";
@@ -748,9 +789,12 @@ function validateJoinStep() {
   }
   if (joinStep === 2 && joinDraft.tags.size < 1) return "请至少添加一个性癖标签";
   if (joinStep === 3) {
-    joinDraft.wish = document.querySelector("#initial-general-wish").value.trim();
+    const wish = document.querySelector("#initial-general-wish").value.trim();
+    if (wish !== joinDraft.wish) joinDraft.preview = null;
+    joinDraft.wish = wish;
     if (!joinDraft.wish) return "请描述你想遇到的初始良将";
   }
+  if (joinStep === 4 && !joinDraft.preview?.previewId) return "请先生成初始将领";
   return "";
 }
 
@@ -762,15 +806,38 @@ document.querySelector("#join-next").addEventListener("click", () => {
   if (error) { showToast(error); return; }
   if (joinStep < 3) { joinStep += 1; renderJoinWizard(); return; }
   joinSubmitting = true; renderJoinWizard();
+  if (joinStep === 3) {
+    sendIntent({
+      type: "prepare-join",
+      characterProfileId: joinDraft.profileId,
+      orientation: joinDraft.orientation,
+      characterTags: tagPayload(joinDraft.tags),
+      initialGeneralWish: joinDraft.wish
+    });
+    return;
+  }
   sendIntent({
     type: "join",
+    previewId: joinDraft.preview.previewId,
+    initialGeneral: syncInitialGeneralEdits()
+  });
+});
+document.querySelector("#join-prev").addEventListener("click", () => {
+  if (joinStep === 4) syncInitialGeneralEdits();
+  if (joinStep > 0) { joinStep -= 1; renderJoinWizard(); }
+});
+document.querySelector("#join-reroll").addEventListener("click", () => {
+  if (joinSubmitting) return;
+  joinSubmitting = true;
+  renderJoinWizard();
+  sendIntent({
+    type: "prepare-join",
     characterProfileId: joinDraft.profileId,
     orientation: joinDraft.orientation,
     characterTags: tagPayload(joinDraft.tags),
     initialGeneralWish: joinDraft.wish
   });
 });
-document.querySelector("#join-prev").addEventListener("click", () => { if (joinStep > 0) { joinStep -= 1; renderJoinWizard(); } });
 document.querySelector("#tag-search").addEventListener("input", renderTagOptions);
 document.querySelector("#tag-category").addEventListener("change", renderTagOptions);
 document.querySelector("#add-custom-tag").addEventListener("click", () => {
@@ -872,6 +939,7 @@ document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListene
 
 function resultSound(result) {
   const effects = Array.isArray(result?.effects) ? result.effects : [];
+  if (result?.joinPreview) return "general";
   if (result?.deferredEffects?.length) return "notice";
   if (effects.some(effect => effect.type === "battle-lost")) return "defeat";
   if (effects.some(effect => effect.type === "battle-won")) return "victory";
@@ -901,6 +969,15 @@ window.addEventListener("message", event => {
       playSound("notice");
       showToast("已取消操作");
       if (!ownPlayer()) renderJoinWizard();
+      return;
+    }
+    if (event.data.result?.joinPreview) {
+      joinDraft.preview = event.data.result.joinPreview;
+      joinStep = 4;
+      joinSubmitting = false;
+      renderJoinWizard();
+      playSound("general");
+      showToast("初始将领已经生成，请查看、重抽或编辑后确认");
       return;
     }
     if (event.data.result?.state) {

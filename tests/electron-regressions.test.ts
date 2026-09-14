@@ -282,6 +282,8 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toContain('const HOST_PROTOCOL = "fyow-host/1"');
     expect(gridGame).toContain("event.source !== parent");
     expect(gridGame).toContain("pendingHostKeys.has(key)");
+    expect(gridGame).toContain('type: "prepare-join"');
+    expect(gridGame).toContain("joinDraft.preview = event.data.result.joinPreview");
     expect(gridGame).toContain('playSound("victory")');
     expect(gridGame).toContain('playSound("letter")');
     expect(gridHtml).toContain('id="sound-toggle"');
@@ -290,6 +292,8 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain("replyResult({cancelled:true})");
     expect(gridHtml).toContain('id="training-target"');
     expect(gridHtml).toContain('id="general-measurements"');
+    expect(gridHtml).toContain('id="join-reroll"');
+    expect(gridHtml).toContain('id="join-general-core"');
     expect(gridGame).toContain('type: "power-train"');
     expect(gridGame).toContain("TRAINING_COST_GROWTH = 1.15");
     expect(gridStyles).toMatch(/aside\s*\{[^}]*overflow:\s*hidden auto/);

@@ -1289,7 +1289,7 @@ window.addEventListener("message",async event=>{
   }
   if(event.data.type!=="intent")return;
   const intent={...(event.data.intent||{})};
-  if(intent.type==="join"){
+  if(["join","prepare-join"].includes(intent.type)){
     const profile=(state?.characterProfiles?.items||[]).find(item=>item.id===intent.characterProfileId)||selectedOnlineWorldProfile();
     if(!profile){replyError("请选择角色设定");return}
     onlineWorldEnteredProfileId=profile.id;

@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
@@ -42,7 +42,7 @@ function service(options: Record<string, unknown>) {
 }
 
 describe("online world platform service", () => {
-  it("rejects placeholder profile text and incomplete initial generals before committing them", () => {
+  it("rejects placeholder profile text but accepts any structured general length and model power", () => {
     expect(playerContextQualityIssue({
       personaSummary: "名为茂密的猫亚人，除此之外玩家未提供更多信息。".repeat(6),
       appearanceSummary: completeAppearance,
@@ -50,8 +50,11 @@ describe("online world platform service", () => {
       relationshipApproach: completeRelationship
     })).toMatch(/占位措辞/);
     expect(playerContextQualityIssue({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })).toBeNull();
-    expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。" }, { gender: "female" })).toMatch(/450～800/);
+    expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。", power: "任意" }, { gender: "female" })).toBeNull();
     expect(generalGenerationQualityIssue(completeGeneral, { gender: "female" })).toBeNull();
+    expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "善战。", power: 999999 }, { gender: "female" })).toMatchObject({ coreSetting: "善战。", power: 300 });
+    expect(normalizeGeneratedGeneral({ personaSummary: "名为“茂密”的猫亚人，善于领兵。", appearanceSummary: "白发猫耳。" }, { gender: "female" })).toMatchObject({ name: "茂密", appearanceSetting: "白发猫耳。", coreSetting: expect.stringContaining("善于领兵"), power: 300 });
+    expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "长设定".repeat(1200) }, { gender: "female" }).coreSetting.length).toBeGreaterThan(800);
   });
 
   it("validates every dialogue command and completed long-term memory before applying it", () => {
@@ -322,11 +325,17 @@ describe("online world platform service", () => {
     instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
 
-    const joinIntent = {
-      type: "join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
+    const previewIntent = {
+      type: "prepare-join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
       characterTags: ["傲娇", "勇敢", "冷静", "长发", "黑发", "红瞳", "高挑", "军装"],
-      initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "join-author"
+      initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "preview-author"
     };
+    const firstPreview = await instance.submitIntent(previewIntent);
+    expect(instance.world.players.author).toBeUndefined();
+    const preview = await instance.submitIntent({ ...previewIntent, idempotencyKey: "preview-author-reroll" });
+    expect(preview.joinPreview.previewId).not.toBe(firstPreview.joinPreview.previewId);
+    expect(instance.world.players.author).toBeUndefined();
+    const joinIntent = { type: "join", previewId: preview.joinPreview.previewId, initialGeneral: { ...preview.joinPreview.general, coreSetting: "由玩家在确认前自由改写的初始设定。" }, idempotencyKey: "join-author" };
     const [result, duplicateResult] = await Promise.all([
       instance.submitIntent(joinIntent),
       instance.submitIntent({ ...joinIntent, idempotencyKey: "join-author-duplicate" })
@@ -345,13 +354,14 @@ describe("online world platform service", () => {
     expect(instance.localEvents).toHaveLength(2);
     expect(instance.localEvents[0].type).toBe("join");
     expect(instance.localEvents[1].type).toBe("grant-general");
+    expect((Object.values(instance.world.generals)[0] as any).coreSetting).toBe("由玩家在确认前自由改写的初始设定。");
     expect(instance.localPreferences.playerContext).toMatchObject({
       personaSummary: expect.stringContaining("慧眼之主"),
       appearanceSummary: expect.stringContaining("猫耳"),
       speechStyle: expect.stringContaining("语速平稳"),
       relationshipApproach: expect.stringContaining("长期陪伴")
     });
-    expect(instance.modelConversationIds.size).toBe(2);
+    expect(instance.modelConversationIds.size).toBe(3);
   });
 
   it("restores a player position and private resources from a pre-overlay local save", () => {
@@ -450,7 +460,7 @@ describe("online world platform service", () => {
     expect(instance.world.generals.g1.memoryText).toContain("言谈：");
   });
 
-  it("does not commit a new player until the initial general model returns a complete setting", async () => {
+  it("does not commit a new player while initial-general preview generation has not produced JSON", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000 });
     let modelSequence = 0;
@@ -469,7 +479,7 @@ describe("online world platform service", () => {
     instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
     await expect(instance.submitIntent({
-      type: "join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
+      type: "prepare-join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
       characterTags: [{ tag: "成熟", note: "可靠" }], initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "failed-initial"
     })).rejects.toThrow(/初始将领生成/);
     expect(instance.world.players.author).toBeUndefined();

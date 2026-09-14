@@ -45,6 +45,8 @@ const PUBLIC_LEDGER_COMPACTION_DELTAS = 32;
 const COMMENT_POST_ATTEMPTS = 3;
 const PENDING_EFFECT_RETRY_BASE_MS = 30 * 1000;
 const PENDING_EFFECT_RETRY_MAX_MS = 15 * 60 * 1000;
+const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
+const INITIAL_GENERAL_BASE_POWER = 300;
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -246,22 +248,52 @@ function playerContextQualityIssue(value) {
 
 function generalGenerationQualityIssue(value, effect) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "将领设定不是 JSON 对象";
-  const name = String(value.name || "").trim();
-  const appearanceSetting = String(value.appearanceSetting || "").trim();
-  const coreSetting = String(value.coreSetting || "").trim();
-  const gender = String(value.gender || "").toLowerCase();
-  const power = Number(value.power);
-  if (name.length < 2 || name.length > 6) return "将领姓名必须为 2～6 个汉字";
-  if (!Number.isInteger(Number(value.heightCm)) || Number(value.heightCm) < 120 || Number(value.heightCm) > 230) return "将领身高必须为 120～230 厘米的整数";
-  if (!Number.isFinite(Number(value.weightKg)) || Number(value.weightKg) < 30 || Number(value.weightKg) > 250) return "将领体重必须为 30～250 千克";
-  const measurements = value.measurements;
-  if (!measurements || [measurements.chestCm, measurements.waistCm, measurements.hipCm].some(item => !Number.isFinite(Number(item)) || Number(item) < 30 || Number(item) > 200)) return "将领三围必须完整填写胸围、腰围与臀围厘米数";
-  if (appearanceSetting.length < 80 || appearanceSetting.length > 350) return "将领外观设定需要完整补全到 80～350 字";
-  if (coreSetting.length < 450 || coreSetting.length > 800) return "将领核心设定需要完整补全到 450～800 字";
-  if (MODEL_PLACEHOLDER_PATTERN.test(`${appearanceSetting}\n${coreSetting}`)) return "将领设定仍包含未补全的占位措辞";
-  if (!["male", "female"].includes(gender) || gender !== effect.gender) return "将领性别与玩家选择不一致";
-  if (!Number.isInteger(power) || power < 100 || power > 5000) return "将领战力必须为 100～5000 的整数";
   return null;
+}
+
+function normalizeGeneratedGeneral(value, effect = {}, edits = null) {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const legacyPersona = String(raw.personaSummary || "").trim();
+  const inferredName = legacyPersona.match(/名为[“"「『]?([^”"」』，。；\s]{1,12})/)?.[1] || "";
+  const source = {
+    ...raw,
+    name: raw.name || inferredName,
+    appearanceSetting: raw.appearanceSetting || raw.appearanceSummary,
+    coreSetting: raw.coreSetting || raw.setting || [legacyPersona, raw.speechStyle, raw.relationshipApproach].filter(item => item != null && String(item).trim()).map(item => String(item).trim()).join("\n")
+  };
+  const edited = edits && typeof edits === "object" && !Array.isArray(edits) ? edits : {};
+  const gender = effect.gender === "male" ? "male" : "female";
+  const fallbackMeasurements = gender === "female"
+    ? { chestCm: 86, waistCm: 60, hipCm: 88 }
+    : { chestCm: 98, waistCm: 78, hipCm: 96 };
+  const bounded = (candidate, fallback, minimum, maximum, integer = false) => {
+    const number = Number(candidate);
+    const normalized = Number.isFinite(number) ? number : fallback;
+    const limited = Math.max(minimum, Math.min(maximum, normalized));
+    return integer ? Math.round(limited) : Math.round(limited * 10) / 10;
+  };
+  const text = (field, fallback, maximum) => {
+    const candidate = Object.hasOwn(edited, field) ? edited[field] : source[field];
+    return String(candidate || fallback).trim().slice(0, maximum);
+  };
+  const measurements = edited.measurements && typeof edited.measurements === "object"
+    ? edited.measurements
+    : (source.measurements && typeof source.measurements === "object" ? source.measurements : {});
+  const wish = String(effect.initialWish || "").trim();
+  return {
+    name: text("name", gender === "female" ? "无名女将" : "无名良将", 24),
+    gender,
+    heightCm: bounded(Object.hasOwn(edited, "heightCm") ? edited.heightCm : source.heightCm, gender === "female" ? 166 : 178, 120, 230, true),
+    weightKg: bounded(Object.hasOwn(edited, "weightKg") ? edited.weightKg : source.weightKg, gender === "female" ? 55 : 72, 30, 250),
+    measurements: {
+      chestCm: bounded(measurements.chestCm, fallbackMeasurements.chestCm, 30, 200),
+      waistCm: bounded(measurements.waistCm, fallbackMeasurements.waistCm, 30, 200),
+      hipCm: bounded(measurements.hipCm, fallbackMeasurements.hipCm, 30, 200)
+    },
+    appearanceSetting: text("appearanceSetting", gender === "female" ? "她衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。" : "他衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。", 350),
+    coreSetting: text("coreSetting", wish || "此人出身乱世，具备成为良将的才能与抱负，愿追随拥有慧眼的主公开疆扩土。", MAX_GENERAL_CORE_SETTING_LENGTH),
+    power: INITIAL_GENERAL_BASE_POWER
+  };
 }
 
 function dialogueQualityIssue(value, { captive = false, allowedRecipientKeys = [] } = {}) {
@@ -443,6 +475,7 @@ class OnlineWorldService {
     this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
     this.joinInFlight = null;
+    this.pendingJoinPreview = null;
     this.intentInFlight = null;
     this.intentInFlightKey = "";
     this.pendingModelEffects = [];
@@ -700,6 +733,7 @@ class OnlineWorldService {
   close() {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    this.pendingJoinPreview = null;
     this.saveCache();
     this.status = "closed";
     this.notify();
@@ -731,6 +765,7 @@ class OnlineWorldService {
     if (normalizedCard && reference.workId !== normalizedCard.companion.workId) throw new Error("游戏卡绑定的伴生作品编号不一致");
     this.status = "opening";
     this.error = null;
+    this.pendingJoinPreview = null;
     this.notify();
     await this.calibrateClock().catch(() => null);
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
@@ -1050,7 +1085,7 @@ class OnlineWorldService {
     for (const general of Object.values(generals)) {
       if (general == null) continue;
       if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
-      if (JSON.stringify(general).length > 30000 || String(general.appearanceSetting || "").length > 350 || String(general.coreSetting || general.setting || "").length > 800 || String(general.memoryText || "").length > 1000) return false;
+      if (JSON.stringify(general).length > 30000 || String(general.appearanceSetting || "").length > 350 || String(general.coreSetting || general.setting || "").length > MAX_GENERAL_CORE_SETTING_LENGTH || String(general.memoryText || "").length > 1000) return false;
       if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 40) return false;
       if (Array.isArray(general.masterHistory) && general.masterHistory.length > 20) return false;
       if (Array.isArray(general.captivityHistory) && general.captivityHistory.length > 20) return false;
@@ -1077,6 +1112,7 @@ class OnlineWorldService {
     this.directInbox = [];
     this.seenDirectMessageIds.clear();
     this.modelConversationIds.clear();
+    this.pendingJoinPreview = null;
   }
 
   applyAuthorityDirective(item) {
@@ -1262,6 +1298,82 @@ class OnlineWorldService {
     }
   }
 
+  applyJoinPreferences(intent = {}) {
+    const orientation = ["men", "women", "any"].includes(String(intent.orientation || ""))
+      ? String(intent.orientation)
+      : this.pendingJoin?.orientation;
+    this.localPreferences.orientation = orientation;
+    this.localPreferences.characterProfileId = String(intent.characterProfileId || "").slice(0, 100);
+    this.localPreferences.characterTags = normalizedCharacterTags(intent.characterTags);
+    this.localPreferences.initialGeneralWish = String(intent.initialGeneralWish || "").slice(0, 500);
+    this.localPreferences.characterProfile = normalizeCharacterProfile(intent.characterProfile || { id: intent.characterProfileId, displayName: intent.displayName });
+    return { ...intent, orientation };
+  }
+
+  async prepareJoin(intent, account) {
+    if (this.world.players?.[account.accountId]) return { duplicate: true, restored: true, state: this.state() };
+    const normalized = this.applyJoinPreferences(intent);
+    const contextSignature = sha256(Buffer.from(canonicalJson({
+      accountId: account.accountId,
+      characterProfile: this.localPreferences.characterProfile
+    })));
+    let playerContext = this.pendingJoinPreview?.contextSignature === contextSignature
+      ? cloneJson(this.pendingJoinPreview.playerContext)
+      : null;
+    if (playerContextQualityIssue(playerContext)) {
+      const parsed = await this.requestStructuredModel(
+        buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context:${normalized.idempotencyKey}`),
+        { attempts: 3, label: "玩家角色设定整理", validate: playerContextQualityIssue }
+      );
+      playerContext = {
+        displayName: this.localPreferences.characterProfile.displayName,
+        personaSummary: String(parsed?.personaSummary || "").trim(),
+        appearanceSummary: String(parsed?.appearanceSummary || "").trim(),
+        speechStyle: String(parsed?.speechStyle || "").trim(),
+        relationshipApproach: String(parsed?.relationshipApproach || "").trim()
+      };
+    }
+    this.localPreferences.playerContext = cloneJson(playerContext);
+    const previewId = crypto.randomUUID();
+    const joinIntent = {
+      type: "join",
+      displayName: String(normalized.displayName || this.pendingJoin?.displayName || account.username || "玩家").slice(0, 40),
+      characterProfileId: this.localPreferences.characterProfileId,
+      orientation: this.localPreferences.orientation,
+      characterTags: cloneJson(this.localPreferences.characterTags),
+      initialGeneralWish: this.localPreferences.initialGeneralWish,
+      playerContext: cloneJson(playerContext),
+      idempotencyKey: `preview:${previewId}`
+    };
+    const previewOutcome = applyIntent(this.world, joinIntent, {
+      actorAccountId: account.accountId,
+      actorAccountName: account.username,
+      authorityAccountId: this.control.authorityAccountId,
+      now: this.now()
+    });
+    const effect = previewOutcome.effects.find(item => item.type === "general-generation-request" && item.initial);
+    if (!effect) throw new Error("没有建立初始将领生成任务");
+    const request = buildGeneralGenerationRequest(previewOutcome.state, effect, `preview-general:${previewId}`);
+    const parsed = await this.requestStructuredModel(request, {
+      attempts: 3,
+      label: "初始将领生成",
+      validate: value => generalGenerationQualityIssue(value, effect)
+    });
+    const general = normalizeGeneratedGeneral(parsed, effect);
+    this.pendingJoinPreview = {
+      previewId,
+      accountId: account.accountId,
+      contextSignature,
+      playerContext: cloneJson(playerContext),
+      joinIntent,
+      effect: cloneJson(effect),
+      general: cloneJson(general),
+      createdAt: this.now()
+    };
+    this.saveCache();
+    return { joinPreview: { previewId, general: cloneJson(general) } };
+  }
+
   async submitIntent(intent = {}) {
     if (this.syncInFlight) await this.syncInFlight;
     if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
@@ -1292,45 +1404,36 @@ class OnlineWorldService {
     const account = this.account();
     if (this.world?.bans?.[account.accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁，所有游戏操作均会被忽略");
     if (this.recoverOwnLocalPlayerState()) this.saveCache();
-    if (String(intent?.type || "") === "join" && this.world.players?.[account.accountId]) {
+    if (["join", "prepare-join"].includes(String(intent?.type || "")) && this.world.players?.[account.accountId]) {
       return { duplicate: true, restored: true, state: this.state() };
     }
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
     const previousPreferences = cloneJson(this.localPreferences);
-    if (normalized.type === "join") {
-      const orientation = ["men", "women", "any"].includes(normalized.orientation) ? normalized.orientation : this.pendingJoin?.orientation;
-      this.localPreferences.orientation = orientation;
-      this.localPreferences.characterProfileId = String(normalized.characterProfileId || "").slice(0, 100);
-      this.localPreferences.characterTags = normalizedCharacterTags(normalized.characterTags);
-      this.localPreferences.initialGeneralWish = String(normalized.initialGeneralWish || "").slice(0, 500);
-      this.localPreferences.characterProfile = normalizeCharacterProfile(normalized.characterProfile || { id: normalized.characterProfileId, displayName: normalized.displayName });
-      normalized.orientation = orientation;
-    }
-    try {
-      if (normalized.type === "join") {
-        const parsed = await this.requestStructuredModel(
-          buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context:${normalized.idempotencyKey}`),
-          { attempts: 3, label: "玩家角色设定整理", validate: playerContextQualityIssue }
-        );
-        const personaSummary = String(parsed?.personaSummary || "").trim();
-        const appearanceSummary = String(parsed?.appearanceSummary || "").trim();
-        const speechStyle = String(parsed?.speechStyle || "").trim();
-        const relationshipApproach = String(parsed?.relationshipApproach || "").trim();
-        this.localPreferences.playerContext = {
-          displayName: this.localPreferences.characterProfile.displayName,
-          personaSummary,
-          appearanceSummary,
-          speechStyle,
-          relationshipApproach
-        };
-        normalized.playerContext = cloneJson(this.localPreferences.playerContext);
-      }
-      return await this.applyLocalIntent(normalized, account.accountId, { rollbackPreferences: normalized.type === "join" ? previousPreferences : null });
-    } catch (error) {
-      if (normalized.type === "join") {
+    if (normalized.type === "prepare-join") {
+      try {
+        return await this.prepareJoin(normalized, account);
+      } catch (error) {
         this.localPreferences = previousPreferences;
         this.saveCache();
+        throw error;
       }
+    }
+    if (normalized.type !== "join") return await this.applyLocalIntent(normalized, account.accountId);
+    const pending = this.pendingJoinPreview;
+    if (!pending || pending.accountId !== account.accountId || String(normalized.previewId || "") !== pending.previewId) {
+      throw new Error("请先生成并查看初始将领，再点击确定进入游戏");
+    }
+    const preparedGeneral = normalizeGeneratedGeneral(pending.general, pending.effect, normalized.initialGeneral);
+    const commitIntent = {
+      ...cloneJson(pending.joinIntent),
+      idempotencyKey: normalized.idempotencyKey
+    };
+    try {
+      const result = await this.applyLocalIntent(commitIntent, account.accountId, { rollbackPreferences: previousPreferences, preparedGeneral });
+      this.pendingJoinPreview = null;
+      return result;
+    } catch (error) {
+      this.saveCache();
       throw error;
     }
   }
@@ -1397,9 +1500,31 @@ class OnlineWorldService {
       let dialogue = null;
       let deferredEffects = [];
       if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
-      // A join is committed only after its initial general has been returned
-      // and validated by the companion model.
-      if (intent.type === "join") await this.handleEffects(outcome.effects, identity);
+      // Joining is a two-phase commit: the model result is previewed and may be
+      // edited or rerolled before this branch creates the player and general.
+      if (intent.type === "join" && options.preparedGeneral) {
+        const effect = outcome.effects.find(item => item.type === "general-generation-request" && item.initial);
+        if (!effect) throw new Error("初始将领确认任务缺少出生位置");
+        const general = options.preparedGeneral;
+        await this.applyLocalIntent({
+          type: "grant-general",
+          generalId: crypto.randomUUID(),
+          discoveryId: `confirmed:${intent.idempotencyKey}`,
+          name: general.name,
+          gender: general.gender,
+          heightCm: general.heightCm,
+          weightKg: general.weightKg,
+          measurements: cloneJson(general.measurements),
+          appearanceSetting: general.appearanceSetting,
+          coreSetting: general.coreSetting,
+          location: { x: effect.x, y: effect.y },
+          power: INITIAL_GENERAL_BASE_POWER,
+          initial: true,
+          idempotencyKey: `general:confirmed:${intent.idempotencyKey}`
+        }, actorAccountId, { internal: true });
+      } else if (intent.type === "join") {
+        throw new Error("请先确认初始将领再进入游戏");
+      }
       const changes = createPublicMapChanges(beforeWorld, this.world);
       mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity);
       if (!options.internal && dialogue?.pendingLetter) {
@@ -1687,22 +1812,20 @@ class OnlineWorldService {
           label: effect.initial ? "初始将领生成" : "将领生成",
           validate: value => generalGenerationQualityIssue(value, effect)
         });
-        const name = String(parsed?.name || "").trim();
-        const gender = String(parsed?.gender || "").toLowerCase();
-        const power = Number(parsed?.power);
+        const general = normalizeGeneratedGeneral(parsed, effect);
         await this.applyLocalIntent({
           type: "grant-general",
           generalId: crypto.randomUUID(),
           discoveryId: request.idempotencyKey,
-          name: name.slice(0, 24),
-          gender,
-          heightCm: Number(parsed.heightCm),
-          weightKg: Number(parsed.weightKg),
-          measurements: cloneJson(parsed.measurements),
-          appearanceSetting: String(parsed.appearanceSetting).trim(),
-          coreSetting: String(parsed.coreSetting).trim(),
+          name: general.name,
+          gender: general.gender,
+          heightCm: general.heightCm,
+          weightKg: general.weightKg,
+          measurements: cloneJson(general.measurements),
+          appearanceSetting: general.appearanceSetting,
+          coreSetting: general.coreSetting,
           location: { x: effect.x, y: effect.y },
-          power,
+          power: general.power,
           initial: Boolean(effect.initial),
           idempotencyKey: `general:${request.idempotencyKey}`
         }, effect.accountId, { internal: true });
@@ -1945,4 +2068,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

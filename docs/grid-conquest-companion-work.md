@@ -16,10 +16,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 34,594 个字符，解码后 HTML 106,683 字节，gzip 压缩包 25,882 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 36,080 个字符，解码后 HTML 113,018 字节，gzip 压缩包 26,997 字节，程序 SHA-256：
 
 ```text
-0540f0932ef25e6904499566053563fb1196e14d44c61c6d2a2106209b7c1586
+9544c0ec84564f56da5112733a2998ef77b2bf8356e5796e1ef2b30f655117e9
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。
@@ -71,7 +71,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息严格分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；heightCm 为 120～230 的整数；weightKg 为 30～250 的数字；measurements 必须完整给出 chestCm、waistCm、hipCm，均为 30～200 的数字；appearanceSetting 为 80～350 个汉字，只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 为 450～800 个汉字，承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向；power 为 100～5000 的整数。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。
+任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名应鲜明易记；heightCm、weightKg 与 measurements 应符合人物体型；appearanceSetting 只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向，长度自由，以完整、具体且不重复为准；power 只是兼容字段，游戏会统一分配初始战力，任何数值都不会影响生成是否成功。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。
 输出 Schema：{"name":"姓名","gender":"male|female","heightCm":168,"weightKg":54.5,"measurements":{"chestCm":88,"waistCm":60,"hipCm":90},"appearanceSetting":"外观设定","coreSetting":"核心设定","power":300}
 ```
 
@@ -135,7 +135,7 @@ npm run game:bundle
 输出 Schema：{"category":"speech|deed","summary":"事件摘要","emotion":"情绪与关系感受","intimacyDelta":1,"compactMemory":"言谈：……\n经历：……"}
 ```
 
-工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；两次都必须等到平台完成事件，并通过内容长度、占位词、姓名、性别、身高、体重、三围、外观、核心设定、战力和 Schema 校验后才一次性提交玩家与初始将领。五类任务的任何失败重试都使用新的平台会话，最多三次。对话请求同时携带玩家上下文与分栏后的将领上下文，但账号 UUID、将领内部 ID 和真实私信目标不会发送给模型；历任主公用设定名与一次性 `recipientKey` 表示，模型返回书信后再由宿主本机映射。完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。记忆、降服和部署档案变更在一次玩家行动中合并，只发布一份地图增量。部署时把将领七类资料、基础战力、修炼等级、当前战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。旧版单段 `setting` 存档会自动迁入“核心设定”，同时补齐兼容身体资料和外观摘要，不重置已有将领。
+工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；每次请求都建立新的平台会话并等待完整结束事件。生成结果只形成本地预览，不创建玩家、不占领格子，也不写评论。玩家可不限次数再次抽取，或在预览页自由调整姓名、身体资料、外观与核心设定；点击“确定并进入游戏”后才一次性提交玩家与初始将领，确认后游戏内不再提供修改入口。初始将领只要求模型返回 JSON 对象，宿主会补齐缺项、兼容误返的玩家摘要字段，核心设定不设业务字数门槛，模型 `power` 被忽略并统一使用基础战力 300。对话请求同时携带玩家上下文与分栏后的将领上下文，但账号 UUID、将领内部 ID 和真实私信目标不会发送给模型；历任主公用设定名与一次性 `recipientKey` 表示，模型返回书信后再由宿主本机映射。完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。记忆、降服和部署档案变更在一次玩家行动中合并，只发布一份地图增量。部署时把将领七类资料、基础战力、修炼等级、当前战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。旧版单段 `setting` 存档会自动迁入“核心设定”，同时补齐兼容身体资料和外观摘要，不重置已有将领。
 
 ## 4. 宿主通讯约定
 
@@ -147,7 +147,7 @@ parent.postMessage({
   source: "fyow-grid-conquest",
   type: "intent",
   intent: {
-    type: "join",
+    type: "prepare-join",
     characterProfileId: "LOCAL_PROFILE_ID",
     orientation: "women",
     characterTags: [{ "tag": "自定义性癖", "note": "可选的单标签注释" }],
@@ -156,6 +156,21 @@ parent.postMessage({
   }
 }, "*");
 parent.postMessage({ source: "fyow-grid-conquest", type: "library" }, "*");
+```
+
+宿主返回 `joinPreview` 后，前端可再次发送 `prepare-join` 重新抽取，或把确认前的编辑结果随 `join` 提交：
+
+```js
+parent.postMessage({
+  source: "fyow-grid-conquest",
+  type: "intent",
+  intent: {
+    type: "join",
+    previewId: "HOST_PREVIEW_ID",
+    initialGeneral: { name, heightCm, weightKg, measurements, appearanceSetting, coreSetting },
+    idempotencyKey: crypto.randomUUID()
+  }
+}, "*");
 ```
 
 宿主向程序发送：
@@ -205,7 +220,7 @@ parent.postMessage({
 
 本轮参考 Cookie Clicker 作者 Orteil 的 Idle Game Maker 手册中建筑价格默认按 115% 递增的做法，以及《The Math of Idle Games》对“产出与成本跷跷板、指数成长和升级回本时间”的分析，把同一套永久成长规则用于玩家本人和将领：
 
-- 玩家基础战力固定为 300；新将领生成的 `power` 作为其基础战力，范围 100～5000。
+- 玩家与新将领的初始基础战力统一为 300；模型返回的 `power` 只为兼容旧 Schema，不参与校验或数值分配。
 - 修炼等级为 0～100，一次可连续修炼 1～10 级。第 `L` 级的单级费用为 `ceil(max(50, 基础战力 × 0.2) × 1.15^L)`，开始时立即扣除金币。
 - 当前战力为 `floor(基础战力 × (1 + 0.06 × L) × 1.25^floor(L/10))`。每一级稳定增长，每 10 级再出现一个明显里程碑增幅。
 - 每一级耗时 `1 + floor(L/10)` 分钟；批量任务总时长最低 1 分钟、最高 1 小时，继续使用宿主校准后的真实时间结算。

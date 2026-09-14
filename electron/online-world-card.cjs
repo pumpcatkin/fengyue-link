@@ -31,7 +31,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.generate:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息严格分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名 2～6 个汉字；heightCm 为 120～230 的整数；weightKg 为 30～250 的数字；measurements 必须完整给出 chestCm、waistCm、hipCm，均为 30～200 的数字；appearanceSetting 为 80～350 个汉字，只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 为 450～800 个汉字，承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向；power 为 100～5000 的整数。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"heightCm\":168,\"weightKg\":54.5,\"measurements\":{\"chestCm\":88,\"waistCm\":60,\"hipCm\":90},\"appearanceSetting\":\"外观设定\",\"coreSetting\":\"核心设定\",\"power\":300}",
+      value: "任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名应鲜明易记；heightCm、weightKg 与 measurements 应符合人物体型；appearanceSetting 只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向，长度自由，以完整、具体且不重复为准；power 只是兼容字段，游戏会统一分配初始战力，任何数值都不会影响生成是否成功。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。\n输出 Schema：{\"name\":\"姓名\",\"gender\":\"male|female\",\"heightCm\":168,\"weightKg\":54.5,\"measurements\":{\"chestCm\":88,\"waistCm\":60,\"hipCm\":90},\"appearanceSetting\":\"外观设定\",\"coreSetting\":\"核心设定\",\"power\":300}",
       value_configs: [], value_region: 1, sort: 0, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -165,7 +165,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 12,
+    version: 13,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null

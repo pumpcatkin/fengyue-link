@@ -109,6 +109,20 @@
             <textarea id="initial-general-wish" maxlength="500" placeholder="自由描述性格、经历、能力、与你相遇的方式……此题不受词条影响。"></textarea>
           </label>
         </div>
+        <div class="join-step join-general-preview hidden" data-step="4">
+          <div class="preview-banner"><span><small>初始将领</small><b>确认前可自由调整，确认后永久锁定</b></span><button id="join-reroll" type="button">再次抽取</button></div>
+          <div class="preview-fields">
+            <label class="preview-name">姓名<input id="join-general-name" maxlength="24"></label>
+            <span><small>性别</small><b id="join-general-gender">—</b></span>
+            <label>身高（cm）<input id="join-general-height" type="number" min="120" max="230"></label>
+            <label>体重（kg）<input id="join-general-weight" type="number" min="30" max="250" step="0.1"></label>
+            <label>胸围（cm）<input id="join-general-chest" type="number" min="30" max="200" step="0.1"></label>
+            <label>腰围（cm）<input id="join-general-waist" type="number" min="30" max="200" step="0.1"></label>
+            <label>臀围（cm）<input id="join-general-hip" type="number" min="30" max="200" step="0.1"></label>
+          </div>
+          <label class="preview-setting">外观设定<textarea id="join-general-appearance" maxlength="350"></textarea></label>
+          <label class="preview-setting">核心设定<textarea id="join-general-core" placeholder="核心设定长度自由，可在确认前完整改写。"></textarea></label>
+        </div>
         <footer><button id="join-prev" class="hidden" type="button">上一问</button><span></span><button id="join-next" class="primary" type="button">下一问</button></footer>
       </form>
     </section>

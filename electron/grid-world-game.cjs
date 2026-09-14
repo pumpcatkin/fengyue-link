@@ -11,6 +11,7 @@ const TRAINING_COST_GROWTH = 1.15;
 const TRAINING_BATCH_MAX = 10;
 const MAX_TRAINING_LEVEL = 100;
 const DEFAULT_PLAYER_BASE_POWER = 300;
+const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 
 function clone(value) {
   return typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value));
@@ -365,14 +366,14 @@ function ensureGeneralProfile(general) {
     ? "她保持着便于长途行军的利落装束，发式、衣甲与随身物件都收拾得井然有序；长期征战让她的姿态显得沉稳警觉，举手投足带着鲜明的军旅气质。"
     : "他保持着便于长途行军的利落装束，发式、衣甲与随身物件都收拾得井然有序；长期征战让他的姿态显得沉稳警觉，举手投足带着鲜明的军旅气质。"
   )).slice(0, 350);
-  general.coreSetting = String(general.coreSetting || general.setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。开局之后会根据效忠、征战与交往逐步形成更鲜明的经历和立场。" ).slice(0, 800);
+  general.coreSetting = String(general.coreSetting || general.setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。开局之后会根据效忠、征战与交往逐步形成更鲜明的经历和立场。" ).slice(0, MAX_GENERAL_CORE_SETTING_LENGTH);
   general.setting = general.coreSetting;
   ensurePowerProgress(general, general.power || 300);
   return general;
 }
 
 function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, heightCm, weightKg, measurements, appearanceSetting, coreSetting, setting, power, holderAccountId, holderName, year = 1 }) {
-  const normalizedCore = String(coreSetting || setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。").slice(0, 800);
+  const normalizedCore = String(coreSetting || setting || "此人出身乱世，善于整军与守土，等待慧眼之主发现其才干。").slice(0, MAX_GENERAL_CORE_SETTING_LENGTH);
   const general = {
     id: String(id),
     name: String(name || (gender === "female" ? "无名女将" : "无名将领")).slice(0, 24),
@@ -874,9 +875,8 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
       directionTags: effect.initial ? [] : normalizedCharacterTags(effect.directionTags).slice(0, 3),
       initialWish: effect.initial ? String(effect.initialWish || "").slice(0, 500) : "",
       instruction: effect.initial
-        ? "initialWish 是最高优先级绑定要求，逐项落实用户明确特征；仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签。输入简短时围绕已有线索合理补全。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting；除这些外的出身、性格、志趣、军事能力、弱点、当前处境与关系倾向全部写入 coreSetting。appearanceSetting 80～300字，coreSetting 450～800字，禁止占位内容。"
-        : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting，其余完整人物背景全部写入 coreSetting。",
-      maximumChineseCharacters: 1000
+        ? "initialWish 是最高优先级绑定要求，逐项落实用户明确特征；仅依据 orientation、gender 与 initialWish 生成初始良将，不使用人物设定标签。输入简短时围绕已有线索主动补全，写成鲜明、自洽、可长期互动的完整人物。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting；除这些外的出身、性格、志趣、军事能力、弱点、当前处境与关系倾向全部写入 coreSetting。核心设定长度自由，不要为凑字数重复内容；power 只是兼容字段，实际初始战力由游戏规则统一分配。"
+        : "将 directionTags（标签及其可选注释）全部作为本次人物生成方向，并保证人物性别严格符合 gender。外貌信息必须拆入 heightCm、weightKg、measurements 和 appearanceSetting，其余完整人物背景全部写入 coreSetting。"
     }
   };
 }
@@ -972,8 +972,8 @@ function publicGeneralState(general) {
     weightKg: clamp(Math.round((Number(general?.weightKg) || (general?.gender === "female" ? 55 : 72)) * 10) / 10, 30, 250),
     measurements: normalizedMeasurements(general?.measurements, general?.gender),
     appearanceSetting: String(general?.appearanceSetting || "").slice(0, 350),
-    coreSetting: String(general?.coreSetting || general?.setting || "").slice(0, 800),
-    setting: String(general?.coreSetting || general?.setting || "").slice(0, 800),
+    coreSetting: String(general?.coreSetting || general?.setting || "").slice(0, MAX_GENERAL_CORE_SETTING_LENGTH),
+    setting: String(general?.coreSetting || general?.setting || "").slice(0, MAX_GENERAL_CORE_SETTING_LENGTH),
     basePower: Math.max(1, Math.trunc(Number(general?.basePower || general?.power || 300))),
     trainingLevel: clamp(Math.trunc(Number(general?.trainingLevel) || 0), 0, MAX_TRAINING_LEVEL),
     power: Math.max(0, Math.trunc(Number(general?.power || 0))),

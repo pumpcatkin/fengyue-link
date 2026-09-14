@@ -172,6 +172,20 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .tag-options button.selected { background: var(--red); color: #fff; }
 .wish-field { display: grid; gap: 9px; font-family: Georgia, "Noto Serif SC", serif; font-size: 18px; font-weight: 900; }
 .wish-field textarea { min-height: 230px; resize: vertical; font-family: "Trebuchet MS", "Noto Sans SC", sans-serif; font-size: 12px; font-weight: 500; line-height: 1.6; }
+.join-general-preview { display: grid; min-height: 0; gap: 10px; }
+.join-general-preview.hidden { display: none; }
+.preview-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 2px solid var(--red-dark); border-radius: 10px; background: #f3c995; padding: 9px; box-shadow: 2px 2px 0 #9d7e50; }
+.preview-banner span small, .preview-banner span b { display: block; }
+.preview-banner small { color: var(--red-dark); font-size: 9px; font-weight: 900; }
+.preview-banner b { margin-top: 2px; font-size: 12px; }
+.preview-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.preview-fields label, .preview-setting { display: grid; gap: 4px; color: var(--red-dark); font-size: 9px; font-weight: 900; }
+.preview-fields span { display: grid; align-content: center; gap: 3px; border: 2px solid var(--line); border-radius: 7px; background: var(--paper-light); padding: 7px; }
+.preview-fields span small { color: var(--muted); font-size: 8px; }
+.preview-fields input, .preview-setting textarea { min-width: 0; border: 2px solid var(--line); border-radius: 7px; background: #fff6dc; color: var(--ink); padding: 7px; outline: none; }
+.preview-fields input:focus, .preview-setting textarea:focus { border-color: var(--red-dark); box-shadow: 0 0 0 2px #d3923466; }
+.preview-setting textarea { min-height: 82px; resize: vertical; font-family: "Trebuchet MS", "Noto Sans SC", sans-serif; font-size: 11px; line-height: 1.55; }
+#join-general-core { min-height: 170px; }
 .preference-button { width: 100%; margin: 0 0 8px; padding: 5px 8px; font-size: 9px; }
 .preferences-modal { width: min(780px, 96vw); }
 .preference-orientation { margin-bottom: 10px; }

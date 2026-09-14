@@ -177,6 +177,23 @@ describe("grid conquest rules", () => {
     expect(remembered.state.generals.g.memoryText.length).toBeLessThanOrEqual(1000);
   });
 
+  it("keeps platform account identifiers out of every model-facing dialogue and memory payload", () => {
+    const now = 1_000_000;
+    const formerId = "11111111-2222-4333-8444-555555555555";
+    let state = joined(now);
+    state.players[formerId] = { accountId: formerId, displayName: "旧主乙" };
+    state = game.applyIntent(state, { type: "grant-general", generalId: "g", name: "青禾", gender: "female", setting: "善守城，重信义。", power: 500, discoveryId: "grant", idempotencyKey: "grant" }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
+    state.generals.g.masterHistory.unshift({ accountId: formerId, fromYear: 1, toYear: 2, reason: "旧部" });
+    state.generals.g.captivityHistory.push({ captorAccountId: "a", formerMasterAccountId: formerId, year: 2 });
+    state.generals.g.interactionHistory.push({ year: 2, accountId: formerId, speakerName: "旧主乙", kind: "ordinary", category: "speech", summary: "谈论旧事", emotion: "怀念", userText: "近来如何", reply: "尚好" });
+    const dialogue = game.buildGeneralDialogueRequest(state, state.generals.g, state.players.a, "谈谈旧主", now + 1);
+    const memory = game.buildGeneralMemoryUpdateRequest(state, state.generals.g, state.players.a, { userText: "谈谈旧主", reply: "我仍记得她。", idempotencyKey: "memory" }, now + 1);
+    expect(JSON.stringify(dialogue.input)).not.toContain(formerId);
+    expect(JSON.stringify(memory.input)).not.toContain(formerId);
+    expect(dialogue.input.allowedFormerLords).toEqual([{ recipientKey: "former-lord-1", displayName: "旧主乙" }]);
+    expect(dialogue.routing.formerLords).toEqual([{ recipientKey: "former-lord-1", accountId: formerId }]);
+  });
+
   it("stores the player's display name in general memories and accepts annotated custom tags", () => {
     const now = 1_000_000;
     const base = game.createWorld({ seed: "tag-seed", seasonId: "season", startedAt: now, authorityAccountId: "a" });

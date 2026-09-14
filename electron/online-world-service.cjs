@@ -226,6 +226,7 @@ function parseJsonAnswer(value) {
 }
 
 const MODEL_PLACEHOLDER_PATTERN = /未提供|暂无|不详|未知|没有(?:提供|说明|填写)|未说明|待补充|占位/i;
+const ACCOUNT_IDENTIFIER_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 function playerContextQualityIssue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "玩家角色设定不是 JSON 对象";
@@ -260,6 +261,40 @@ function generalGenerationQualityIssue(value, effect) {
   if (MODEL_PLACEHOLDER_PATTERN.test(`${appearanceSetting}\n${coreSetting}`)) return "将领设定仍包含未补全的占位措辞";
   if (!["male", "female"].includes(gender) || gender !== effect.gender) return "将领性别与玩家选择不一致";
   if (!Number.isInteger(power) || power < 100 || power > 5000) return "将领战力必须为 100～5000 的整数";
+  return null;
+}
+
+function dialogueQualityIssue(value, { captive = false, allowedRecipientKeys = [] } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "将领互动结果不是 JSON 对象";
+  const reply = String(value.reply || "").trim();
+  if (!reply || reply.length > 2000) return "将领回答必须为 1～2000 字";
+  if (ACCOUNT_IDENTIFIER_PATTERN.test(reply)) return "将领回答包含内部账号编号";
+  if (value.command == null) return null;
+  if (typeof value.command !== "object" || Array.isArray(value.command)) return "将领互动指令格式无效";
+  const type = String(value.command.type || "");
+  if (type === "surrender") return captive ? null : "普通将领不能返回降服指令";
+  if (type !== "send-letter") return "将领互动返回了未知指令";
+  const recipientKey = String(value.command.recipientKey || "");
+  if (!recipientKey || !allowedRecipientKeys.includes(recipientKey)) return "将领书信目标不在历任主公名单中";
+  const text = String(value.command.text || "").trim();
+  if (!text || text.length > 500) return "将领书信必须为 1～500 字";
+  if (ACCOUNT_IDENTIFIER_PATTERN.test(text)) return "将领书信包含内部账号编号";
+  return null;
+}
+
+function generalMemoryQualityIssue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "将领记忆结果不是 JSON 对象";
+  const category = String(value.category || "");
+  const summary = String(value.summary || "").trim();
+  const emotion = String(value.emotion || "").trim();
+  const compactMemory = String(value.compactMemory || "").trim();
+  const intimacyDelta = Number(value.intimacyDelta);
+  if (!["speech", "deed"].includes(category)) return "将领记忆分类必须为 speech 或 deed";
+  if (!summary || summary.length > 120) return "将领记忆摘要必须为 1～120 字";
+  if (!emotion || emotion.length > 40) return "将领记忆情绪必须为 1～40 字";
+  if (!Number.isInteger(intimacyDelta) || intimacyDelta < -5 || intimacyDelta > 5) return "将领亲密度变化必须为 -5～5 的整数";
+  if (!compactMemory || compactMemory.length > 1000 || !compactMemory.includes("言谈：") || !compactMemory.includes("经历：")) return "将领长期记忆必须同时包含言谈和经历且不超过 1000 字";
+  if (ACCOUNT_IDENTIFIER_PATTERN.test(`${summary}\n${emotion}\n${compactMemory}`)) return "将领记忆包含内部账号编号";
   return null;
 }
 
@@ -367,6 +402,7 @@ class OnlineWorldService {
     this.getIdentity = options.getIdentity;
     this.getOrigin = options.getOrigin;
     this.onChange = options.onChange || (() => {});
+    this.onDiagnostic = options.onDiagnostic || (() => {});
     this.cacheFile = options.cacheFile;
     this.rawNow = options.now || (() => Date.now());
     this.monotonicNow = options.monotonicNow || (() => performance.now());
@@ -382,10 +418,13 @@ class OnlineWorldService {
     this.world = null;
     this.status = "closed";
     this.syncing = false;
+    this.syncInFlight = null;
     this.error = null;
     this.lastSyncAt = null;
     this.knownCommentIds = new Set();
-    this.history = { pagesRead: 0, commentsRead: 0, stoppedBy: null, incomplete: 0, invalid: 0 };
+    this.historyTailPage = 1;
+    this.historyPageOrder = "unknown";
+    this.history = { pagesRead: 0, commentsRead: 0, stoppedBy: null, incomplete: 0, invalid: 0, tailPage: 1, pageOrder: "unknown" };
     this.pendingMigration = null;
     this.directInbox = [];
     this.seenDirectMessageIds = new Set();
@@ -477,6 +516,10 @@ class OnlineWorldService {
 
   notify() {
     try { this.onChange(this.state()); } catch {}
+  }
+
+  diagnostic(detail) {
+    try { this.onDiagnostic({ ...detail, workId: this.work?.id || null }); } catch {}
   }
 
   recordLocalEvent(event) {
@@ -641,6 +684,9 @@ class OnlineWorldService {
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
       pendingModelEffects: cloneJson(this.pendingModelEffects.slice(-50)),
+      knownCommentIds: [...this.knownCommentIds].slice(-500),
+      historyTailPage: this.historyTailPage,
+      historyPageOrder: this.historyPageOrder,
       updatedAt: this.now()
     };
     atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
@@ -695,6 +741,9 @@ class OnlineWorldService {
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
     this.mapFactsCache = null;
     const cached = this.loadCache(this.work.id);
+    this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
+    this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
+    this.historyPageOrder = ["oldest-first", "newest-first"].includes(cached?.historyPageOrder) ? cached.historyPageOrder : "unknown";
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
     this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
@@ -746,10 +795,10 @@ class OnlineWorldService {
       orientation: this.localPreferences.orientation,
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
+    this.startPolling();
     await this.sync(true);
     await this.ensureLocalPlayerContext();
     this.status = this.control && this.world ? "ready" : "needs-initialization";
-    this.startPolling();
     this.notify();
     return this.state();
   }
@@ -868,15 +917,78 @@ class OnlineWorldService {
     throw lastError;
   }
 
+  async readHistoryPage(page) {
+    const payload = await this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`, { timeout: 20000 });
+    return extractCommentItems(payload);
+  }
+
+  async locateHistoryTailPage(readPage) {
+    const hintedPage = Math.max(1, Math.trunc(Number(this.historyTailPage || 1)));
+    const hinted = await readPage(hintedPage);
+    if (!hinted.length && hintedPage > 1) {
+      this.historyTailPage = 1;
+      return this.locateHistoryTailPage(readPage);
+    }
+    if (hinted.length < HISTORY_PAGE_SIZE) return hintedPage;
+    let lower = hintedPage;
+    let upper = null;
+    let step = 1;
+    while (lower < MAX_HISTORY_PAGES) {
+      const candidate = Math.min(MAX_HISTORY_PAGES, hintedPage + step);
+      const comments = await readPage(candidate);
+      if (!comments.length) {
+        upper = candidate;
+        break;
+      }
+      lower = candidate;
+      if (comments.length < HISTORY_PAGE_SIZE || candidate === MAX_HISTORY_PAGES) return candidate;
+      step *= 2;
+    }
+    if (upper == null) return lower;
+    while (lower + 1 < upper) {
+      const middle = Math.floor((lower + upper) / 2);
+      const comments = await readPage(middle);
+      if (!comments.length) upper = middle;
+      else {
+        lower = middle;
+        if (comments.length < HISTORY_PAGE_SIZE) return middle;
+      }
+    }
+    return lower;
+  }
+
   async readHistory(fullScan) {
     const all = [];
     const seen = new Set();
+    const pages = new Map();
     let stoppedBy = null;
     let pagesRead = 0;
-    for (let page = 1; page <= MAX_HISTORY_PAGES; page += 1) {
-      const payload = await this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`, { timeout: 20000 });
-      const comments = extractCommentItems(payload);
-      pagesRead = page;
+    const readPage = async page => {
+      if (pages.has(page)) return pages.get(page);
+      const comments = await this.readHistoryPage(page);
+      pages.set(page, comments);
+      pagesRead += 1;
+      return comments;
+    };
+    const tailPage = await this.locateHistoryTailPage(readPage);
+    this.historyTailPage = tailPage;
+    const newestTimestamp = comments => Math.max(0, ...comments.map(commentTimestamp));
+    // The platform currently ignores order=desc and returns oldest-first pages.
+    // Detect the direction as well, so a future platform fix cannot reverse our scan.
+    let pageOrder = this.historyPageOrder;
+    if (fullScan || !["oldest-first", "newest-first"].includes(pageOrder)) {
+      const firstPageComments = await readPage(1);
+      const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
+      pageOrder = tailPage > 1 && newestTimestamp(firstPageComments) > newestTimestamp(tailPageComments)
+        ? "newest-first"
+        : "oldest-first";
+      this.historyPageOrder = pageOrder;
+    }
+    const scanPages = pageOrder === "newest-first"
+      ? Array.from({ length: tailPage }, (_, index) => index + 1)
+      : Array.from({ length: tailPage }, (_, index) => tailPage - index);
+    for (const page of scanPages) {
+      const comments = await readPage(page);
       for (const comment of comments) {
         const id = commentId(comment);
         if (!id || seen.has(id)) continue;
@@ -884,15 +996,24 @@ class OnlineWorldService {
         all.push(comment);
       }
       const assembled = assembleCommentRecords(all);
-      const decision = historyPageDecision({ pageComments: comments, assembled, knownCommentIds: [...this.knownCommentIds], fullScan, requireControl: !this.control });
-      if (decision.stop || comments.length < HISTORY_PAGE_SIZE) {
-        stoppedBy = decision.stop ? decision.reason : "last-partial-page";
+      const decision = historyPageDecision({
+        pageComments: comments,
+        assembled,
+        knownCommentIds: [...this.knownCommentIds],
+        fullScan,
+        requireControl: Boolean(fullScan || !this.control)
+      });
+      if (decision.stop) {
+        stoppedBy = decision.reason;
         break;
       }
     }
     const assembled = assembleCommentRecords(all);
-    this.history = { pagesRead, commentsRead: all.length, stoppedBy: stoppedBy || "page-limit", incomplete: assembled.incomplete.length, invalid: assembled.invalid.length };
-    for (const comment of all.slice(0, HISTORY_PAGE_SIZE * 2)) this.knownCommentIds.add(commentId(comment));
+    this.history = { pagesRead, commentsRead: all.length, stoppedBy: stoppedBy || "oldest-page", incomplete: assembled.incomplete.length, invalid: assembled.invalid.length, tailPage, pageOrder };
+    const newestComments = [...all]
+      .sort((left, right) => commentTimestamp(left) - commentTimestamp(right) || commentId(left).localeCompare(commentId(right)))
+      .slice(-500);
+    for (const comment of newestComments) this.knownCommentIds.add(commentId(comment));
     if (this.knownCommentIds.size > 500) this.knownCommentIds = new Set([...this.knownCommentIds].slice(-500));
     return { comments: all, assembled };
   }
@@ -1058,7 +1179,19 @@ class OnlineWorldService {
   }
 
   async sync(fullScan = false) {
-    if (!this.work || this.syncing || this.intentInFlight) return this.state();
+    if (!this.work || this.intentInFlight) return this.state();
+    if (this.syncInFlight) return this.syncInFlight;
+    const running = this.syncNow(fullScan);
+    this.syncInFlight = running;
+    try {
+      return await running;
+    } finally {
+      if (this.syncInFlight === running) this.syncInFlight = null;
+    }
+  }
+
+  async syncNow(fullScan = false) {
+    const previousControlId = String(this.control?.id || "");
     this.syncing = true;
     this.error = null;
     this.notify();
@@ -1069,7 +1202,7 @@ class OnlineWorldService {
         .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === this.work.id && item.record.gameId === GRID_GAME_ID && this.validAuthorSource(item))
         .filter(item => String(item.record.authorityAccountId || "") === this.work.authorAccountId)
         .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
-        .sort((left, right) => Number(right.record.updatedAt || right.record.startedAt || 0) - Number(left.record.updatedAt || left.record.startedAt || 0));
+        .sort((left, right) => comparePlatformOrder(right, left));
       if (controls[0]) this.control = controls[0].record;
       if (this.control) {
         if (this.control.programHash !== this.currentProgramHash()) await this.refreshWorkProgram();
@@ -1106,17 +1239,21 @@ class OnlineWorldService {
         const resets = history.assembled.records
           .filter(item => item.record?.schema === FYOW_SCHEMAS.reset && item.record.seasonId === this.control.seasonId && this.validAuthorSource(item))
           .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
-          .sort((left, right) => Number(right.record.issuedAt || 0) - Number(left.record.issuedAt || 0));
+          .sort((left, right) => comparePlatformOrder(right, left));
         if (resets[0]) this.pendingMigration = { workId: resets[0].record.newWorkId, url: resets[0].record.newWorkUrl, issuedAt: resets[0].record.issuedAt };
       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
       this.lastSyncAt = this.now();
       this.saveCache();
+      if (fullScan || previousControlId !== String(this.control?.id || "")) {
+        this.diagnostic({ event: "sync-completed", fullScan: Boolean(fullScan), status: this.status, history: { ...this.history }, controlId: this.control?.id || null, programHash: this.control?.programHash || null });
+      }
       this.notify();
       return this.state();
     } catch (error) {
       this.error = error?.message || String(error);
       this.status = this.world ? "degraded" : "error";
+      this.diagnostic({ event: "sync-failed", fullScan: Boolean(fullScan), status: this.status, error: this.error, history: { ...this.history } });
       this.notify();
       throw error;
     } finally {
@@ -1126,6 +1263,9 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
+    if (this.syncInFlight) await this.syncInFlight;
+    if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
+    if (this.control?.programHash && this.control.programHash !== this.currentProgramHash()) throw new Error("伴生作品程序版本尚未同步到当前客户端");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
     if (this.intentInFlight) {
@@ -1261,25 +1401,41 @@ class OnlineWorldService {
       // and validated by the companion model.
       if (intent.type === "join") await this.handleEffects(outcome.effects, identity);
       const changes = createPublicMapChanges(beforeWorld, this.world);
-      mapDelta = await this.publishMapChanges(changes, identity);
+      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity);
+      if (!options.internal && dialogue?.pendingLetter) {
+        const pendingLetter = dialogue.pendingLetter;
+        delete dialogue.pendingLetter;
+        try {
+          dialogue.commandResult = await this.sendDirect(pendingLetter.toAccountId, "general-letter", {
+            generalId: pendingLetter.generalId,
+            text: pendingLetter.text
+          }, { fromGeneralDialogue: true });
+        } catch (error) {
+          dialogue.commandError = String(error?.message || error || "书信发送失败");
+        }
+      }
       if (intent.type !== "join") {
         const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: Boolean(mapDelta) });
         deferredEffects = handled.deferred;
       }
       let snapshotWarning = null;
-      if (this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) {
+      if (!options.internal && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) {
         try { await this.publishSnapshot(); } catch (error) { snapshotWarning = String(error?.message || error || "公共地图快照整理失败"); }
       }
-      this.saveCache();
-      this.notify();
+      if (!options.internal) {
+        this.saveCache();
+        this.notify();
+      }
       return { event: localEvent, mapDelta, effects: outcome.effects, deferredEffects, snapshotWarning, dialogue, state: this.state() };
     } catch (error) {
       if (!mapDelta) {
         this.world = beforeWorld;
         if (options.rollbackPreferences) this.localPreferences = cloneJson(options.rollbackPreferences);
         this.localEvents.splice(localEventStart);
-        this.saveCache();
-        this.notify();
+        if (!options.internal) {
+          this.saveCache();
+          this.notify();
+        }
       }
       throw error;
     }
@@ -1390,6 +1546,7 @@ class OnlineWorldService {
           return parsed;
         } catch (error) {
           lastError = error;
+          this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, attempts, error: error?.message || String(error) });
           if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
         }
       }
@@ -1526,7 +1683,7 @@ class OnlineWorldService {
         const effectKey = this.effectKey(effect);
         const request = buildGeneralGenerationRequest(this.world, effect, effectKey);
         const parsed = await this.requestStructuredModel(request, {
-          attempts: effect.initial ? 3 : 2,
+          attempts: 3,
           label: effect.initial ? "初始将领生成" : "将领生成",
           validate: value => generalGenerationQualityIssue(value, effect)
         });
@@ -1548,7 +1705,7 @@ class OnlineWorldService {
           power,
           initial: Boolean(effect.initial),
           idempotencyKey: `general:${request.idempotencyKey}`
-        }, effect.accountId);
+        }, effect.accountId, { internal: true });
         completed.push(effectKey);
       } catch (error) {
         if (!options.deferOnFailure) throw error;
@@ -1561,19 +1718,24 @@ class OnlineWorldService {
   async completeDialogue(request, actorAccountId, intent) {
     const general = this.world.generals?.[intent.generalId];
     const player = this.world.players?.[actorAccountId];
-    const parsed = await this.requestStructuredModel(request, { attempts: 2, label: "将领互动" });
-    const reply = String(parsed.reply || "").trim().slice(0, 2000);
-    if (!reply) throw new Error("将领互动未返回有效回答");
+    const captive = general?.status === "captured" && general?.loyalToAccountId !== player?.accountId;
+    const routes = Array.isArray(request?.routing?.formerLords) ? request.routing.formerLords : [];
+    const allowedRecipientKeys = routes.map(item => String(item.recipientKey || "")).filter(Boolean);
+    const parsed = await this.requestStructuredModel(request, {
+      attempts: 3,
+      label: captive ? "俘虏将领互动" : "普通将领互动",
+      validate: value => dialogueQualityIssue(value, { captive, allowedRecipientKeys })
+    });
+    const reply = String(parsed.reply).trim();
     const memory = await this.requestStructuredModel(
       buildGeneralMemoryUpdateRequest(this.world, general, player, { userText: intent.topic, reply, idempotencyKey: `memory:${intent.idempotencyKey}` }, this.now()),
-      { attempts: 2, label: "将领记忆整理" }
+      { attempts: 3, label: "将领记忆整理", validate: generalMemoryQualityIssue }
     );
-    const category = memory?.category === "deed" ? "deed" : memory?.category === "speech" ? "speech" : "";
-    const summary = String(memory?.summary || "").trim();
-    const emotion = String(memory?.emotion || "").trim();
-    const compactMemory = String(memory?.compactMemory || "").trim();
+    const category = memory.category;
+    const summary = String(memory.summary).trim();
+    const emotion = String(memory.emotion).trim();
+    const compactMemory = String(memory.compactMemory).trim();
     const intimacyDelta = Number(memory?.intimacyDelta);
-    if (!category || !summary || summary.length > 120 || emotion.length > 40 || !compactMemory || compactMemory.length > 1000 || !Number.isInteger(intimacyDelta) || intimacyDelta < -5 || intimacyDelta > 5) throw new Error("将领记忆世界书返回格式不完整");
     await this.applyLocalIntent({
       type: "record-general-dialogue",
       generalId: intent.generalId,
@@ -1583,15 +1745,21 @@ class OnlineWorldService {
       intimacyDelta,
       memoryUpdate: { category, summary, emotion, intimacyDelta, compactMemory },
       idempotencyKey: `dialogue:${intent.idempotencyKey}`
-    }, actorAccountId);
+    }, actorAccountId, { internal: true });
     const command = parsed.command && typeof parsed.command === "object" ? parsed.command : null;
-    let commandResult = null;
     if (command?.type === "surrender" && general?.status === "captured") {
-      commandResult = await this.applyLocalIntent({ type: "surrender-general", generalId: general.id, idempotencyKey: `surrender:${intent.idempotencyKey}` }, actorAccountId);
+      await this.applyLocalIntent({ type: "surrender-general", generalId: general.id, idempotencyKey: `surrender:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
     } else if (command?.type === "send-letter") {
-      commandResult = await this.sendDirect(String(command.toAccountId || ""), "general-letter", { generalId: general?.id, text: String(command.text || "") }, { fromGeneralDialogue: true });
+      const route = routes.find(item => String(item.recipientKey || "") === String(command.recipientKey || ""));
+      return {
+        reply,
+        memory: { category, summary, emotion, intimacyDelta, compactMemory },
+        intimacyDelta,
+        command: { type: "send-letter" },
+        pendingLetter: { toAccountId: String(route.accountId), generalId: general.id, text: String(command.text).trim() }
+      };
     }
-    return { reply, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command || null, commandResult };
+    return { reply, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command ? { type: command.type } : null, commandResult: null };
   }
 
   async findPrivateChat(accountId) {
@@ -1777,4 +1945,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

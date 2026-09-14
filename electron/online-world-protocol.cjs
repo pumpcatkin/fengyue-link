@@ -174,7 +174,10 @@ function historyPageDecision({ pageComments = [], assembled, knownCommentIds = [
   if (!pageComments.length) return { stop: true, reason: "empty-page" };
   const snapshot = newestCompleteSnapshot(assembled);
   if (!snapshot || (assembled?.incomplete || []).length) return { stop: false, reason: "need-older-pages" };
-  if (requireControl && !(assembled?.records || []).some(item => item.record?.schema === FYOW_SCHEMAS.control)) return { stop: false, reason: "need-control-record", snapshotRevision: Number(snapshot.revision) };
+  const controls = (assembled?.records || []).map(item => item.record).filter(record => record?.schema === FYOW_SCHEMAS.control);
+  if (requireControl && !controls.some(record => !snapshot.seasonId || record.seasonId === snapshot.seasonId)) {
+    return { stop: false, reason: "need-control-record", snapshotRevision: Number(snapshot.revision) };
+  }
   return { stop: true, reason: "covered-by-snapshot", snapshotRevision: Number(snapshot.revision) };
 }
 

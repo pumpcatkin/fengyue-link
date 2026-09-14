@@ -606,6 +606,7 @@ class AccountBackend {
       getOrigin: () => this.origin,
       readPlatformTime: () => this.platformServerTime(),
       cacheFile: onlineWorldCachePath(this.profileId),
+      onDiagnostic: detail => this.appendSessionLog("online-world", detail),
       onChange: worldState => {
         if (!this.destroying && this.window && !this.window.isDestroyed()) this.window.webContents.send("online-world:state", worldState);
       }
@@ -3498,8 +3499,15 @@ class AccountBackend {
     this.assertToolLoggedIn();
     const workId = this.onlineWorldService?.work?.id;
     if (!workId) throw new Error("在线世界尚未绑定伴生作品");
-    const keyword = String(request.keyword || `[[FYOW:TASK:${request.task || "unknown"}:v1]]`).slice(0, 200);
-    const query = `${keyword}\n${JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} })}`;
+    const task = String(request.task || "");
+    const allowedTasks = new Set(["player.profile-context", "general.generate", "general.dialogue", "general.captive-dialogue", "general.memory.update"]);
+    if (!allowedTasks.has(task)) throw new Error(`在线世界模型任务未登记：${task || "unknown"}`);
+    const taskMarker = `[[FYOW:TASK:${task}:v1]]`;
+    const keyword = String(request.keyword || taskMarker).slice(0, 200);
+    if (!keyword.startsWith(taskMarker)) throw new Error("在线世界模型任务关键词与调用类型不一致");
+    const structuredInput = JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} });
+    if (structuredInput.length > 60000) throw new Error("在线世界模型输入超过 60000 字符限制");
+    const query = `${keyword}\n${structuredInput}`;
     let anchor = null;
     let token = "";
     let tokenError = null;
@@ -3519,7 +3527,7 @@ class AccountBackend {
     if (!token) throw new Error(`读取账号登录令牌失败：${tokenError?.message || "登录状态尚未就绪"}`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 180000);
-    this.appendSessionLog("online-world-model", { event: "request-started", task: String(request.task || "unknown"), newConversation: true });
+    this.appendSessionLog("online-world-model", { event: "request-started", task, newConversation: true });
     try {
       const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
         method: "POST",
@@ -3539,11 +3547,11 @@ class AccountBackend {
       }
       const result = await consumeModelEventStream(response.body);
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
-      this.appendSessionLog("online-world-model", { event: "request-completed", task: String(request.task || "unknown"), conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });
+      this.appendSessionLog("online-world-model", { event: "request-completed", task, conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });
       return result;
     } catch (error) {
       const normalized = error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
-      this.appendSessionLog("online-world-model", { event: "request-failed", task: String(request.task || "unknown"), error: normalized?.message || String(normalized) });
+      this.appendSessionLog("online-world-model", { event: "request-failed", task, error: normalized?.message || String(normalized) });
       throw normalized;
     } finally {
       clearTimeout(timeoutId);

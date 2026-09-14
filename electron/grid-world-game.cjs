@@ -287,6 +287,47 @@ function playerDisplayName(state, accountId) {
   return String(state?.players?.[id]?.displayName || "某位主公").trim() || "某位主公";
 }
 
+function modelMasterHistory(state, general) {
+  return (general?.masterHistory || []).slice(-20).map(item => ({
+    lordName: playerDisplayName(state, item.accountId),
+    fromYear: Number(item.fromYear || 1),
+    toYear: item.toYear == null ? null : Number(item.toYear),
+    reason: String(item.reason || "效忠").slice(0, 40)
+  }));
+}
+
+function modelCaptivityHistory(state, general) {
+  return (general?.captivityHistory || []).slice(-20).map(item => ({
+    captorName: playerDisplayName(state, item.captorAccountId),
+    formerLordName: playerDisplayName(state, item.formerMasterAccountId),
+    year: Number(item.year || 1)
+  }));
+}
+
+function modelRecentInteractions(general) {
+  return (general?.interactionHistory || []).slice(-12).map(item => ({
+    year: Number(item.year || 1),
+    speakerName: String(item.speakerName || "某位主公").slice(0, 40),
+    kind: item.kind === "captive" ? "captive" : "ordinary",
+    category: item.category === "deed" ? "deed" : "speech",
+    summary: String(item.summary || "").slice(0, 120),
+    emotion: String(item.emotion || "").slice(0, 40),
+    userText: String(item.userText || "").slice(0, 240),
+    reply: String(item.reply || "").slice(0, 600)
+  }));
+}
+
+function formerLordRouting(state, general, currentAccountId) {
+  const accountIds = [...new Set((general?.masterHistory || [])
+    .map(item => String(item.accountId || ""))
+    .filter(id => id && id !== String(currentAccountId || "")))];
+  return accountIds.map((accountId, index) => ({
+    recipientKey: `former-lord-${index + 1}`,
+    displayName: playerDisplayName(state, accountId),
+    accountId
+  }));
+}
+
 function appendGeneralMemory(general, { year, category, text, accountId, intimacyDelta = 0 }) {
   general.memory ||= { entries: [], intimacy: {} };
   general.memory.entries ||= [];
@@ -842,28 +883,29 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
 
 function buildGeneralDialogueRequest(state, general, player, topic, now) {
   const captive = general.status === "captured" && general.loyalToAccountId !== player.accountId;
-  const formerLords = [...new Set((general.masterHistory || []).map(item => String(item.accountId || "")).filter(id => id && id !== player.accountId))];
+  const formerLords = formerLordRouting(state, general, player.accountId);
   const playerContext = clone(state.privatePlayers?.[player.accountId]?.playerContext || null);
   return {
     task: captive ? "general.captive-dialogue" : "general.dialogue",
     keyword: `${captive ? "[[FYOW:TASK:general.captive-dialogue:v1]]" : "[[FYOW:TASK:general.dialogue:v1]]"}\n${general.name}`,
     input: {
-      schema: "fyow.general-dialogue-request/2",
+      schema: "fyow.general-dialogue-request/3",
       interactionMode: captive ? "captive" : "ordinary",
       general: {
-        id: general.id, name: general.name, gender: general.gender,
+        name: general.name, gender: general.gender,
         heightCm: general.heightCm, weightKg: general.weightKg, measurements: clone(general.measurements),
         appearanceSetting: general.appearanceSetting, coreSetting: general.coreSetting || general.setting,
         power: general.power, trainingLevel: general.trainingLevel,
         memory: general.memoryText, intimacy: general.memory?.intimacy?.[player.accountId] || 0,
-        masterHistory: clone(general.masterHistory || []), captivityHistory: clone(general.captivityHistory || []),
-        recentInteractions: clone((general.interactionHistory || []).slice(-12))
+        masterHistory: modelMasterHistory(state, general), captivityHistory: modelCaptivityHistory(state, general),
+        recentInteractions: modelRecentInteractions(general)
       },
-      speaker: { accountId: player.accountId, name: player.displayName, context: playerContext },
-      allowedFormerLordAccountIds: formerLords,
+      speaker: { name: player.displayName, context: playerContext },
+      allowedFormerLords: formerLords.map(({ recipientKey, displayName }) => ({ recipientKey, displayName })),
       topic,
       gameYear: gameYear(state, now)
-    }
+    },
+    routing: { formerLords: formerLords.map(({ recipientKey, accountId }) => ({ recipientKey, accountId })) }
   };
 }
 
@@ -891,7 +933,7 @@ function buildGeneralMemoryUpdateRequest(state, general, player, interaction, no
     keyword: `[[FYOW:TASK:general.memory.update:v1]]\n${general.name}`,
     idempotencyKey: String(interaction?.idempotencyKey || crypto.randomUUID()),
     input: {
-      schema: "fyow.general-memory-update-request/1",
+      schema: "fyow.general-memory-update-request/2",
       gameYear: gameYear(state, now),
       general: {
         name: general.name,
@@ -902,9 +944,9 @@ function buildGeneralMemoryUpdateRequest(state, general, player, interaction, no
         appearanceSetting: general.appearanceSetting,
         coreSetting: general.coreSetting || general.setting,
         priorMemory: general.memoryText,
-        masterHistory: clone(general.masterHistory || []),
-        captivityHistory: clone(general.captivityHistory || []),
-        recentInteractions: clone((general.interactionHistory || []).slice(-12))
+        masterHistory: modelMasterHistory(state, general),
+        captivityHistory: modelCaptivityHistory(state, general),
+        recentInteractions: modelRecentInteractions(general)
       },
       speaker: {
         name: player.displayName,

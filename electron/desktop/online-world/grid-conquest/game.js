@@ -917,6 +917,7 @@ window.addEventListener("message", event => {
     const dialogue = event.data.result?.dialogue;
     if (dialogue?.reply) {
       if (dialogue.command?.type === "surrender") showToast(`${allGenerals()[dialogueGeneralId]?.name || "将领"}已经决定降服`);
+      else if (dialogue.commandError) showToast(`将领已经写好书信，但传送失败：${dialogue.commandError}`);
       else if (dialogue.command?.type === "send-letter") showToast("将领书信已通过评论唤醒与私信通道发送");
       renderDialogue();
     }

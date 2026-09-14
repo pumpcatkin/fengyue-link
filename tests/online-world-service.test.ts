@@ -2,9 +2,9 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
-const { assembleCommentRecords, signRecord } = require("../electron/online-world-protocol.cjs");
+const { assembleCommentRecords, encodeCommentRecord, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard } = require("../electron/online-world-card.cjs");
@@ -52,6 +52,79 @@ describe("online world platform service", () => {
     expect(playerContextQualityIssue({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })).toBeNull();
     expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。" }, { gender: "female" })).toMatch(/450～800/);
     expect(generalGenerationQualityIssue(completeGeneral, { gender: "female" })).toBeNull();
+  });
+
+  it("validates every dialogue command and completed long-term memory before applying it", () => {
+    expect(dialogueQualityIssue({ reply: "愿与主公详谈。", command: null }, { captive: false })).toBeNull();
+    expect(dialogueQualityIssue({ reply: "我愿降服。", command: { type: "surrender" } }, { captive: false })).toMatch(/普通将领/);
+    expect(dialogueQualityIssue({ reply: "请代我传信。", command: { type: "send-letter", recipientKey: "former-lord-2", text: "一切安好。" } }, { allowedRecipientKeys: ["former-lord-1"] })).toMatch(/历任主公名单/);
+    expect(generalMemoryQualityIssue({ category: "speech", summary: "谈论北境", emotion: "振奋", intimacyDelta: 2, compactMemory: "言谈：[1年]谈论北境\n经历：[1年]被提拔为将领" })).toBeNull();
+    expect(generalMemoryQualityIssue({ category: "speech", summary: "谈论北境", emotion: "振奋", intimacyDelta: 2, compactMemory: "只有言谈" })).toMatch(/同时包含言谈和经历/);
+  });
+
+  it("finds the real newest page before allowing an older snapshot to stop history scanning", async () => {
+    const oldControl = { schema: "fyow.control/3", id: "old", seasonId: "season", programHash: "old" };
+    const latestControl = { schema: "fyow.control/3", id: "latest", seasonId: "season", programHash: "latest" };
+    const snapshot = { schema: "fyow.snapshot/3", snapshotId: "snapshot", seasonId: "season", revision: 20, stateHash: "hash" };
+    const comment = (id: string, content: string, second: number) => ({ id, content, created_at: second });
+    const page1 = [
+      ...encodeCommentRecord(oldControl).map((content: string, index: number) => comment(`old-control-${index}`, content, 1)),
+      ...Array.from({ length: 49 }, (_, index) => comment(`old-${index}`, "旧评论", 2 + index))
+    ].slice(0, 50);
+    const page2 = [
+      ...encodeCommentRecord(snapshot).map((content: string, index: number) => comment(`snapshot-${index}`, content, 100)),
+      ...Array.from({ length: 49 }, (_, index) => comment(`middle-${index}`, "中间评论", 101 + index))
+    ].slice(0, 50);
+    const page3 = encodeCommentRecord(latestControl).map((content: string, index: number) => comment(`latest-control-${index}`, content, 200));
+    page3.push(comment("latest-ordinary", "最新评论", 201));
+    const requested: number[] = [];
+    const instance = service({
+      requestConsole: async (endpoint: string) => {
+        const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+        requested.push(page);
+        return page === 1 ? page1 : page === 2 ? page2 : page === 3 ? page3 : [];
+      }
+    });
+    instance.work = { id: "work" };
+    const history = await instance.readHistory(true);
+    expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).toContain("latest");
+    expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).not.toContain("old");
+    expect(instance.history).toMatchObject({ tailPage: 3, stoppedBy: "covered-by-snapshot" });
+    expect([...new Set(requested)]).toEqual([1, 2, 3]);
+
+    requested.splice(0);
+    instance.knownCommentIds.add("latest-ordinary");
+    await instance.readHistory(false);
+    expect(requested).toEqual([3]);
+    expect(instance.history.stoppedBy).toBe("known-comment-reached");
+  });
+
+  it("keeps scanning from the newest edge if the platform starts honoring descending order", async () => {
+    const oldControl = { schema: "fyow.control/3", id: "old-desc", seasonId: "season", programHash: "old" };
+    const latestControl = { schema: "fyow.control/3", id: "latest-desc", seasonId: "season", programHash: "latest" };
+    const snapshot = { schema: "fyow.snapshot/3", snapshotId: "snapshot-desc", seasonId: "season", revision: 20, stateHash: "hash" };
+    const comment = (id: string, content: string, second: number) => ({ id, content, created_at: second });
+    const page1 = [
+      ...encodeCommentRecord(latestControl).map((content: string, index: number) => comment(`latest-desc-${index}`, content, 300)),
+      ...Array.from({ length: 49 }, (_, index) => comment(`new-${index}`, "新评论", 250 - index))
+    ].slice(0, 50);
+    const page2 = [
+      ...encodeCommentRecord(snapshot).map((content: string, index: number) => comment(`snapshot-desc-${index}`, content, 150)),
+      ...Array.from({ length: 49 }, (_, index) => comment(`middle-desc-${index}`, "中间评论", 149 - index))
+    ].slice(0, 50);
+    const page3 = encodeCommentRecord(oldControl).map((content: string, index: number) => comment(`old-desc-${index}`, content, 1));
+    const instance = service({
+      requestConsole: async (endpoint: string) => {
+        const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+        return page === 1 ? page1 : page === 2 ? page2 : page === 3 ? page3 : [];
+      }
+    });
+    instance.work = { id: "work" };
+    const history = await instance.readHistory(true);
+    const ids = history.assembled.records.map((item: any) => item.record.id).filter(Boolean);
+    expect(ids).toContain("latest-desc");
+    expect(ids).not.toContain("old-desc");
+    expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "newest-first", stoppedBy: "covered-by-snapshot" });
   });
 
   it("repairs a legacy player's placeholder context without resetting their game", async () => {
@@ -339,6 +412,42 @@ describe("online world platform service", () => {
     expect(result.dialogue.memory).toMatchObject({ category: "speech", intimacyDelta: 2 });
     expect(instance.world.generals.g1.memoryText).toContain("与主公甲谈论北境");
     expect(instance.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ category: "speech", emotion: "振奋" });
+  });
+
+  it("publishes one public general update for a deployed-general interaction", async () => {
+    const now = 1_000_000;
+    const identity = generateOnlineWorldIdentity();
+    let world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
+    world = require("../electron/grid-world-game.cjs").applyIntent(world, {
+      type: "join", displayName: "主公甲", orientation: "women", characterProfileId: "profile-a",
+      characterTags: ["沉稳"], initialGeneralWish: "良将", playerContext: { personaSummary: completePersona }, idempotencyKey: "join"
+    }, { actorAccountId: "author", now }).state;
+    world = require("../electron/grid-world-game.cjs").applyIntent(world, {
+      type: "grant-general", generalId: "g1", name: "青禾", gender: "female", appearanceSetting: completeGeneralAppearance,
+      coreSetting: completeGeneralSetting.slice(0, 700), power: 320, discoveryId: "grant", idempotencyKey: "grant"
+    }, { actorAccountId: "author", authorityAccountId: "author", now }).state;
+    world = require("../electron/grid-world-game.cjs").applyIntent(world, {
+      type: "deploy-general", generalId: "g1", idempotencyKey: "deploy"
+    }, { actorAccountId: "author", now: now + 1 }).state;
+    const comments: any[] = [];
+    const instance = service({
+      now: () => now + 20_000,
+      getAccount: () => ({ accountId: "author", username: "服主昵称" }),
+      getIdentity: async () => identity,
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const item = { id: `comment-${comments.length + 1}`, account_id: "author", created_at: now + 30_000 + comments.length, content: options.body.content };
+        comments.push(item);
+        return item;
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = world;
+    instance.localPreferences.playerContext = { displayName: "主公甲", personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship };
+    await instance.submitIntent({ type: "talk-general", generalId: "g1", topic: "北境局势", idempotencyKey: "talk-deployed" });
+    const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
+    expect(records.filter((record: any) => record.schema === "fyow.map-delta/1")).toHaveLength(1);
+    expect(instance.world.generals.g1.memoryText).toContain("言谈：");
   });
 
   it("does not commit a new player until the initial general model returns a complete setting", async () => {

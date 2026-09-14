@@ -32,7 +32,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(11);
+    expect(card.version).toBe(12);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -58,6 +58,9 @@ describe("online world game cards", () => {
     expect(card.companion.configuration.world_book[0].value).toContain("appearanceSetting");
     expect(card.companion.configuration.world_book[0].value).toContain("coreSetting");
     expect(card.companion.configuration.world_book[1].value).toContain("禁止出现未提供");
+    expect(card.companion.configuration.world_book[2].value).toContain("recipientKey");
+    expect(card.companion.configuration.world_book[3].value).toContain("不得输出其他游戏操作或任何账号编号");
+    expect(card.companion.configuration.world_book[4].value).toContain("不得改写或遗漏");
   });
 
   it("rejects edits to either the creation snapshot or the whole package", () => {

@@ -16,10 +16,10 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 34,542 个字符，解码后 HTML 106,561 字节，gzip 压缩包 25,843 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。当前信封 34,594 个字符，解码后 HTML 106,683 字节，gzip 压缩包 25,882 字节，程序 SHA-256：
 
 ```text
-7bb8a7b2e53d154175d8da29ef884fd3127450e1716f0708bb01118c947bde72
+0540f0932ef25e6904499566053563fb1196e14d44c61c6d2a2106209b7c1586
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。
@@ -101,8 +101,8 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空。可不返回指令；若人物确有动机，可返回 send-letter，但 toAccountId 必须逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属。
-输出 Schema：{"reply":"将领回答","command":null|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
+任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、当前关系与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；若人物确有动机，可返回 send-letter，但 recipientKey 必须逐字取自 allowedFormerLords 中的 recipientKey，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属；不得输出任何账号编号。
+输出 Schema：{"reply":"将领回答","command":null|{"type":"send-letter","recipientKey":"former-lord-1","text":"书信"}}
 ```
 
 ### 3.4 俘虏将领互动
@@ -116,8 +116,8 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context 和当前主公。必须只返回一个完整 JSON 对象；reply 应符合双方人设与关系且不能为空；通常 command 为 null；当剧情与关系足以支持时，可返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 toAccountId 只能逐字取自 allowedFormerLordAccountIds，text 不超过 500 字。不得输出其他游戏操作。
-输出 Schema：{"reply":"俘虏将领回答","command":null|{"type":"surrender"}|{"type":"send-letter","toAccountId":"历任主公账号","text":"书信"}}
+任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、俘虏处境与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；只有人物动机、关系与剧情确实支持时才返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 recipientKey 只能逐字取自 allowedFormerLords，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得输出其他游戏操作或任何账号编号。
+输出 Schema：{"reply":"俘虏将领回答","command":null|{"type":"surrender"}|{"type":"send-letter","recipientKey":"former-lord-1","text":"书信"}}
 ```
 
 ### 3.5 将领记忆整理
@@ -131,11 +131,11 @@ npm run game:bundle
 内容：
 
 ```text
-任务：在将领完成一次互动后，更新其长期记忆。必须只返回一个完整 JSON 对象。category 只能为 speech 或 deed；summary 不超过 120 字，emotion 不超过 40 字，intimacyDelta 为 -5 到 5 的整数。compactMemory 必须同时包含“言谈：”和“经历：”，总长度不超过 1000 个汉字；合并重复事件时使用年份区间和次数，保留对象设定名、事件、情绪和关系结果。历任主公、被俘、降服与易主事实必须完整保留。面向玩家的记忆文本使用设定名，不显示账号编号。
+任务：在将领完成一次互动后，更新其长期记忆。必须只返回一个完整 JSON 对象。category 只能为 speech 或 deed；summary 为 1～120 字，emotion 为 1～40 字，intimacyDelta 为 -5 到 5 的整数。compactMemory 必须同时包含“言谈：”和“经历：”，总长度不超过 1000 个汉字；合并重复事件时使用年份区间和次数，保留对象设定名、事件、情绪和关系结果。结构化 masterHistory、captivityHistory 中的历任主公、被俘、降服与易主事实必须完整反映，不得改写或遗漏；只使用输入中的设定名，不输出任何账号编号、recipientKey 或其他内部标识。
 输出 Schema：{"category":"speech|deed","summary":"事件摘要","emotion":"情绪与关系感受","intimacyDelta":1,"compactMemory":"言谈：……\n经历：……"}
 ```
 
-工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；两次都必须等到平台完成事件，并通过内容长度、占位词、姓名、性别、身高、体重、三围、外观、核心设定、战力和 Schema 校验后才一次性提交玩家与初始将领。任何失败重试都使用新的平台会话。对话请求同时携带玩家上下文与分栏后的将领上下文；完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。部署时把将领七类资料、基础战力、修炼等级、当前战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。旧版单段 `setting` 存档会自动迁入“核心设定”，同时补齐兼容身体资料和外观摘要，不重置已有将领。
+工具在玩家首次加入时先调用角色设定整理任务，再调用初始将领生成任务；两次都必须等到平台完成事件，并通过内容长度、占位词、姓名、性别、身高、体重、三围、外观、核心设定、战力和 Schema 校验后才一次性提交玩家与初始将领。五类任务的任何失败重试都使用新的平台会话，最多三次。对话请求同时携带玩家上下文与分栏后的将领上下文，但账号 UUID、将领内部 ID 和真实私信目标不会发送给模型；历任主公用设定名与一次性 `recipientKey` 表示，模型返回书信后再由宿主本机映射。完成回答后再调用将领记忆整理任务，结构校验通过才记录该次互动。记忆、降服和部署档案变更在一次玩家行动中合并，只发布一份地图增量。部署时把将领七类资料、基础战力、修炼等级、当前战力、粗略记忆、互动历史、历任主公和被俘史随部署档案写入评论账本；部署档案不会留在本机持久缓存，启动时从评论区恢复。将领被攻占俘虏时，公共部署档案从地图删除，原主人本地同步删除，俘获方保留完整档案。旧版单段 `setting` 存档会自动迁入“核心设定”，同时补齐兼容身体资料和外观摘要，不重置已有将领。
 
 ## 4. 宿主通讯约定
 

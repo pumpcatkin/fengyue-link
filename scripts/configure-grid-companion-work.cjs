@@ -8,8 +8,8 @@ const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
 const { createBundledGridCard, configurationDigest } = require("../electron/online-world-card.cjs");
 const { FYOW_SCHEMAS, encodeCommentRecord, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
-const { createWorld, buildPlayerProfileContextRequest, buildGeneralGenerationRequest } = require("../electron/grid-world-game.cjs");
-const { parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue } = require("../electron/online-world-service.cjs");
+const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
+const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder } = require("../electron/online-world-service.cjs");
 
 const ORIGIN = "https://staging.aiero.cc";
 const PROFILE_ID = String(process.env.FYOW_PROFILE_ID || "default").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80) || "default";
@@ -371,7 +371,27 @@ async function runModelProbe(window, workId) {
   };
   const generalRequest = buildGeneralGenerationRequest(world, effect, crypto.randomUUID());
   const general = await requestStructuredModelProbe(window, workId, generalRequest, value => generalGenerationQualityIssue(value, effect));
-  if (profile.conversationId === general.conversationId) throw new Error("两个模型探针复用了同一会话");
+  world.players["probe-player"] = { accountId: "probe-player", displayName: "茂密", position: { x: 12, y: 18 }, carriedGeneralIds: ["probe-general"] };
+  world.players["former-player"] = { accountId: "former-player", displayName: "旧主青岚" };
+  world.privatePlayers["probe-player"].playerContext = profile.parsed;
+  world.generals["probe-general"] = createFallbackGeneral({
+    id: "probe-general",
+    ...general.parsed,
+    holderAccountId: "probe-player",
+    holderName: "茂密",
+    year: 1
+  });
+  world.generals["probe-general"].masterHistory.unshift({ accountId: "former-player", fromYear: 1, toYear: 1, reason: "旧主" });
+  const ordinaryRequest = buildGeneralDialogueRequest(world, world.generals["probe-general"], world.players["probe-player"], "初来此地，你如何看待未来的疆土与我们的相处？", Date.now());
+  const ordinary = await requestStructuredModelProbe(window, workId, ordinaryRequest, value => dialogueQualityIssue(value, { captive: false, allowedRecipientKeys: ordinaryRequest.routing.formerLords.map(item => item.recipientKey) }));
+  const memoryRequest = buildGeneralMemoryUpdateRequest(world, world.generals["probe-general"], world.players["probe-player"], { userText: ordinaryRequest.input.topic, reply: ordinary.parsed.reply, idempotencyKey: crypto.randomUUID() }, Date.now());
+  const memory = await requestStructuredModelProbe(window, workId, memoryRequest, generalMemoryQualityIssue);
+  world.generals["probe-general"].status = "captured";
+  world.generals["probe-general"].loyalToAccountId = "former-player";
+  const captiveRequest = buildGeneralDialogueRequest(world, world.generals["probe-general"], world.players["probe-player"], "你如今身为俘虏，有什么想对我或旧主说？", Date.now());
+  const captive = await requestStructuredModelProbe(window, workId, captiveRequest, value => dialogueQualityIssue(value, { captive: true, allowedRecipientKeys: captiveRequest.routing.formerLords.map(item => item.recipientKey) }));
+  const conversations = [profile, general, ordinary, memory, captive].map(item => item.conversationId);
+  if (new Set(conversations).size !== conversations.length) throw new Error("五个模型探针没有各自创建独立新会话");
   return {
     profile: {
       conversationId: profile.conversationId,
@@ -391,7 +411,11 @@ async function runModelProbe(window, workId) {
       appearanceCharacters: String(general.parsed.appearanceSetting || "").length,
       coreSettingCharacters: String(general.parsed.coreSetting || "").length,
       coreSettingSample: String(general.parsed.coreSetting || "").slice(0, 180)
-    }
+    },
+    ordinaryDialogue: { conversationId: ordinary.conversationId, finishEvent: ordinary.finishEvent, replyCharacters: String(ordinary.parsed.reply || "").length, command: ordinary.parsed.command?.type || null },
+    memory: { conversationId: memory.conversationId, finishEvent: memory.finishEvent, category: memory.parsed.category, summaryCharacters: String(memory.parsed.summary || "").length, compactMemoryCharacters: String(memory.parsed.compactMemory || "").length },
+    captiveDialogue: { conversationId: captive.conversationId, finishEvent: captive.finishEvent, replyCharacters: String(captive.parsed.reply || "").length, command: captive.parsed.command?.type || null },
+    distinctConversationCount: new Set(conversations).size
   };
 }
 
@@ -426,7 +450,7 @@ async function activateSavedProgram(window, card, workId) {
   const controls = assembleCommentRecords(comments).records
     .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === workId && item.record.authorityAccountId === signedInAccountId)
     .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
-    .sort((left, right) => Number(right.record.updatedAt || right.record.startedAt || 0) - Number(left.record.updatedAt || left.record.startedAt || 0));
+    .sort((left, right) => comparePlatformOrder(right, left));
   const current = controls[0]?.record;
   if (!current) throw new Error("评论区没有可更新的作者控制记录");
   if (current.programHash === card.program.digest) {
@@ -505,6 +529,50 @@ async function main() {
       const authorAccountId = String(installed?.app?.created_by_account_id || "");
       const signedInAccountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
       process.stdout.write(`${JSON.stringify({ ok:true, status:installedResponse.status, workId, authorAccountId, signedInAccountId, signedInIsAuthor:Boolean(authorAccountId && authorAccountId === signedInAccountId), rootKeys:installed && typeof installed === "object" ? Object.keys(installed) : [], identityFields:identityFieldPaths(installed) }, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_INSPECT_COMMENT_PAGES === "1") {
+      const pages = [];
+      for (const [order, page] of [["desc", 1], ["asc", 1], ["desc", 2], ["desc", 3]]) {
+        const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1?page=${page}&limit=50&order=${order}&filter_type=all`);
+        const payload = unwrap(response);
+        const items = extractCommentItems(payload);
+        pages.push({
+          order,
+          page,
+          ok: response.ok,
+          status: response.status,
+          itemCount: items.length,
+          firstCreatedAt: items[0]?.created_at || null,
+          lastCreatedAt: items.at(-1)?.created_at || null,
+          shape: shapeOf(payload)
+        });
+      }
+      process.stdout.write(`${JSON.stringify({ ok:true, workId, pages }, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_VERIFY_SYNC === "1") {
+      const profileResponse = await api(window, "/go/api/account/profile");
+      if (!profileResponse.ok) throw new Error(`读取当前账号失败：HTTP ${profileResponse.status}`);
+      const profile = unwrap(profileResponse);
+      const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+      const username = String(profile?.name || profile?.username || profile?.email || "测试账号");
+      const service = new OnlineWorldService({
+        requestConsole: async (endpoint, options) => {
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(`同步接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        requestModel: async () => { throw new Error("只读同步校验不应调用模型"); },
+        getAccount: () => ({ accountId, username }),
+        getIdentity: async () => loadOnlineWorldIdentity(accountId),
+        getOrigin: () => ORIGIN,
+        cacheFile: null,
+        onChange: () => {}
+      });
+      const state = await service.open({ card });
+      service.close();
+      process.stdout.write(`${JSON.stringify({ ok:true, workId, status:state.status, history:state.history, controlProgramHash:state.control?.programHash || null, currentProgramHash:state.program?.digest || null, revision:state.revision }, null, 2)}\n`);
       return;
     }
     const beforeResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);

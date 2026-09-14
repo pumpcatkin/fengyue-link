@@ -343,10 +343,23 @@ async function requestStructuredModelProbe(window, workId, request, validate) {
     }
     const issue = validate(parsed);
     if (issue) throw new Error(`模型探针质量校验失败：${issue}`);
-    return { parsed, conversationId: result.conversationId, finishEvent: result.finishEvent, answerCharacters: result.answer.length };
+    return { parsed, conversationId: result.conversationId, finishEvent: result.finishEvent, answerCharacters: result.answer.length, usage: result.usage, points: result.points };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function readPlatformPointBalance(window) {
+  const profileResponse = await api(window, "/go/api/account/profile");
+  if (!profileResponse.ok) throw new Error(`读取积分账号失败：HTTP ${profileResponse.status}`);
+  const profile = unwrap(profileResponse);
+  const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+  if (!accountId) throw new Error("积分账号没有返回账号编号");
+  const pointResponse = await api(window, `/go/api/account/point?target=${encodeURIComponent(accountId)}`);
+  if (!pointResponse.ok) throw new Error(`读取平台积分失败：HTTP ${pointResponse.status}`);
+  const point = unwrap(pointResponse);
+  const value = point?.points ?? point?.point ?? point?.balance ?? null;
+  return { accountId, points: value == null ? null : Number(String(value).replace(/,/g, "")), raw: point };
 }
 
 async function runModelProbe(window, workId) {
@@ -592,6 +605,14 @@ async function main() {
     if (process.env.FYOW_PROBE_MODEL === "1") {
       const probe = await runModelProbe(window, workId);
       process.stdout.write(`${JSON.stringify({ ok:true, workId, probe }, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_PROBE_POINTS === "1") {
+      const before = await readPlatformPointBalance(window);
+      const request = buildPlayerProfileContextRequest({ displayName: "积分探针", basicInfo: "慧眼之主", appearance: "黑发" }, crypto.randomUUID());
+      const probe = await requestStructuredModelProbe(window, workId, request, playerContextQualityIssue);
+      const after = await readPlatformPointBalance(window);
+      process.stdout.write(`${JSON.stringify({ ok:true, workId, before:before.points, after:after.points, consumed:Number.isFinite(before.points) && Number.isFinite(after.points) ? Math.max(0, before.points - after.points) : null, modelPoints:probe.points, usage:probe.usage, conversationId:probe.conversationId, finishEvent:probe.finishEvent }, null, 2)}\n`);
       return;
     }
     if (process.env.FYOW_VERIFY_ONLY === "1") {

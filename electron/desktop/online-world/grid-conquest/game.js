@@ -27,6 +27,8 @@ const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: ""
 const preferenceDraft = { orientation: "any", tags: new Map() };
 const pendingHostRequests = new Map();
 const pendingHostKeys = new Map();
+const seenModelUsageIds = new Set();
+let modelUsageInitialized = false;
 
 function host(type, data = {}, options = {}) {
   const key = String(options.key || "");
@@ -71,6 +73,11 @@ function cellKey(x, y) { return `${x},${y}`; }
 function dynamicCell(x, y) { return payload?.world?.cells?.[cellKey(x, y)] || { ownerAccountId: null, soldiers: 0, generalIds: [] }; }
 function fact(x, y) { return payload?.mapFacts?.[y * 64 + x] || { x, y, population: 0, resourceGrade: "—", resourceRank: 0, garrisonCap: 0, neutralPower: 0 }; }
 function formatNumber(value) { return Number(value || 0).toLocaleString("zh-CN"); }
+function formatPointValue(value, fallback = "—") {
+  if (value == null || value === "") return fallback;
+  const number = Number(String(value).replace(/,/g, ""));
+  return Number.isFinite(number) ? number.toLocaleString("zh-CN", { maximumFractionDigits: 4 }) : String(value);
+}
 function formatDuration(ms) {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
   if (seconds < 60) return `${seconds}秒`;
@@ -180,6 +187,20 @@ function applyHostedState(next, background = false) {
   serverNow = Number(payload?.serverNow || Date.now());
   receivedAt = Date.now();
   stateSoundSnapshot = current;
+  const usageEvents = Array.isArray(next?.modelUsageEvents) ? next.modelUsageEvents : [];
+  if (!modelUsageInitialized) {
+    usageEvents.forEach(item => seenModelUsageIds.add(String(item.id)));
+    modelUsageInitialized = true;
+  } else {
+    const freshUsage = usageEvents.filter(item => !seenModelUsageIds.has(String(item.id)));
+    freshUsage.forEach(item => seenModelUsageIds.add(String(item.id)));
+    if (freshUsage.length) {
+      const latest = freshUsage[freshUsage.length - 1];
+      const consumed = formatPointValue(latest?.points?.total, "待平台结算");
+      const remaining = formatPointValue(latest?.remainingPoints ?? next?.account?.points);
+      showToast(`${latest.label || "模型请求"}消耗 ${consumed} 积分 · 剩余 ${remaining}`);
+    }
+  }
   if (background && previous && !pendingHostRequests.size) {
     if ([...current.inbox].some(id => id && !previous.inbox.has(id))) playSound("letter");
     else if ([...current.generals].some(id => id && !previous.generals.has(id))) playSound("general");
@@ -277,6 +298,33 @@ function renderClock() {
   const now = hostTime();
   document.querySelector("#clock").textContent = new Date(now).toLocaleTimeString("zh-CN", { hour12: false });
   document.querySelector("#year").textContent = `第 ${gameYear()} 年`;
+  document.querySelector("#points-balance-value").textContent = formatPointValue(payload?.account?.points);
+}
+
+function renderModelUsage() {
+  const events = Array.isArray(payload?.modelUsageEvents) ? payload.modelUsageEvents : [];
+  document.querySelector("#points-remaining").textContent = `剩余 ${formatPointValue(payload?.account?.points)}`;
+  const target = document.querySelector("#model-usage-log");
+  target.replaceChildren();
+  target.classList.toggle("empty", !events.length);
+  if (!events.length) { target.textContent = "本次尚未调用模型"; return; }
+  [...events].reverse().forEach(item => {
+    const node = document.createElement("article");
+    node.className = `model-usage-item${item.status === "failed" ? " failed" : ""}`;
+    const title = document.createElement("b");
+    title.textContent = `${item.label || "模型请求"}${Number(item.attempt || 1) > 1 ? ` · 第 ${item.attempt} 次` : ""}`;
+    const total = document.createElement("strong");
+    total.textContent = item?.points?.total == null ? "结算中" : `−${formatPointValue(item.points.total)} 积分`;
+    const detail = document.createElement("small");
+    const parts = [new Date(item.completedAt || Date.now()).toLocaleTimeString("zh-CN", { hour12: false })];
+    if (item?.points?.input != null) parts.push(`输入 ${formatPointValue(item.points.input)}`);
+    if (item?.points?.output != null) parts.push(`输出 ${formatPointValue(item.points.output)}`);
+    parts.push(`剩余 ${formatPointValue(item.remainingPoints)}`);
+    if (item.status === "failed") parts.push("本条请求失败");
+    detail.textContent = parts.join(" · ");
+    node.append(title, total, detail);
+    target.append(node);
+  });
 }
 function renderPlayer() {
   const player = ownPlayer();
@@ -628,7 +676,7 @@ function openDialogue(id) {
 }
 
 function renderAll() {
-  renderClock(); renderPlayer(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
+  renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
   const player = ownPlayer();
   const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
   document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);

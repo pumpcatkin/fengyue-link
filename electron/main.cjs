@@ -52,7 +52,7 @@ const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
 const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
-const { consumeModelEventStream, createModelRequestPayload } = require("./model-stream.cjs");
+const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -423,6 +423,32 @@ function accountSignature(value = {}) {
     level: value.level ?? null,
     accountId: value.accountId ?? null
   });
+}
+
+function platformPointBalance(value) {
+  const number = Number(typeof value === "string" ? value.replace(/,/g, "").trim() : value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function resolvedModelPointUsage(reported, beforeValue, afterValue) {
+  const direct = reported && typeof reported === "object" && [reported.input, reported.output, reported.total].some(value => platformPointBalance(value) != null)
+    ? {
+        input: platformPointBalance(reported.input),
+        output: platformPointBalance(reported.output),
+        total: platformPointBalance(reported.total),
+        source: String(reported.source || "model-response")
+      }
+    : normalizeModelPoints(reported);
+  const before = platformPointBalance(beforeValue);
+  const after = platformPointBalance(afterValue);
+  const balanceDelta = before != null && after != null ? Math.max(0, before - after) : null;
+  const total = direct?.total ?? balanceDelta;
+  return {
+    input: direct?.input ?? null,
+    output: direct?.output ?? null,
+    total,
+    source: direct?.total != null ? (direct.source || "model-response") : (balanceDelta != null ? "balance-delta" : "platform-unavailable")
+  };
 }
 
 async function mapConcurrent(items, limit, worker) {
@@ -3508,6 +3534,8 @@ class AccountBackend {
     const structuredInput = JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} });
     if (structuredInput.length > 60000) throw new Error("在线世界模型输入超过 60000 字符限制");
     const query = `${keyword}\n${structuredInput}`;
+    await this.refreshOnlineWorldPoints(task, "before");
+    const pointsBefore = this.account.points;
     let anchor = null;
     let token = "";
     let tokenError = null;
@@ -3527,8 +3555,10 @@ class AccountBackend {
     if (!token) throw new Error(`读取账号登录令牌失败：${tokenError?.message || "登录状态尚未就绪"}`);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 180000);
+    let platformRequestStarted = false;
     this.appendSessionLog("online-world-model", { event: "request-started", task, newConversation: true });
     try {
+      platformRequestStarted = true;
       const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
         method: "POST",
         credentials: "include",
@@ -3547,15 +3577,31 @@ class AccountBackend {
       }
       const result = await consumeModelEventStream(response.body);
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
-      this.appendSessionLog("online-world-model", { event: "request-completed", task, conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length });
-      return result;
+      await this.refreshOnlineWorldPoints(task, "after");
+      const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, this.account.points);
+      this.appendSessionLog("online-world-model", { event: "request-completed", task, conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length, points: points.total, remainingPoints: this.account.points });
+      return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
       const normalized = error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
-      this.appendSessionLog("online-world-model", { event: "request-failed", task, error: normalized?.message || String(normalized) });
+      if (platformRequestStarted) {
+        await this.refreshOnlineWorldPoints(task, "after");
+        normalized.modelUsage = {
+          points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, this.account.points),
+          remainingPoints: this.account.points
+        };
+      }
+      this.appendSessionLog("online-world-model", { event: "request-failed", task, error: normalized?.message || String(normalized), points: normalized.modelUsage?.points?.total ?? null, remainingPoints: normalized.modelUsage?.remainingPoints ?? null });
       throw normalized;
     } finally {
       clearTimeout(timeoutId);
     }
+  }
+
+  async refreshOnlineWorldPoints(task, phase) {
+    return this.refreshAccount(true).catch(error => {
+      this.appendSessionLog("online-world-model", { event: `points-refresh-${phase}-failed`, task, error: error?.message || String(error) });
+      return null;
+    });
   }
 
   selectedCharacterProfile() {

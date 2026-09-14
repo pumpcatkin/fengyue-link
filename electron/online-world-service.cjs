@@ -166,6 +166,11 @@ function finiteStoredNumber(value) {
   return value !== null && value !== "" && Number.isFinite(Number(value));
 }
 
+function modelPointNumber(value) {
+  const number = Number(typeof value === "string" ? value.replace(/,/g, "").trim() : value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 function compareOrderValue(left, right) {
   return Number(left?.timestamp || 0) - Number(right?.timestamp || 0)
     || String(left?.commentId || "").localeCompare(String(right?.commentId || ""));
@@ -474,6 +479,8 @@ class OnlineWorldService {
     this.publicParticipantOrders = {};
     this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
+    this.modelUsageEvents = [];
+    this.modelUsageSequence = 0;
     this.joinInFlight = null;
     this.pendingJoinPreview = null;
     this.intentInFlight = null;
@@ -485,7 +492,11 @@ class OnlineWorldService {
 
   account() {
     const account = this.getAccount?.() || {};
-    return { accountId: String(account.accountId || ""), username: String(account.username || "") };
+    return {
+      accountId: String(account.accountId || ""),
+      username: String(account.username || ""),
+      points: account.points == null ? null : String(account.points)
+    };
   }
 
   isAuthority() {
@@ -542,6 +553,7 @@ class OnlineWorldService {
       },
       mapFacts: projection ? this.mapFactsCache : [],
       directInbox: this.directInbox.slice(-100),
+      modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
       programHtml: this.program?.html || null,
       serverNow: this.now()
     };
@@ -553,6 +565,31 @@ class OnlineWorldService {
 
   diagnostic(detail) {
     try { this.onDiagnostic({ ...detail, workId: this.work?.id || null }); } catch {}
+  }
+
+  recordModelUsage({ request, label, attempt, result = null, error = null, status = "completed" } = {}) {
+    const reported = result?.points || error?.modelUsage?.points || null;
+    const remaining = result?.remainingPoints ?? error?.modelUsage?.remainingPoints ?? this.account().points;
+    const event = {
+      id: ++this.modelUsageSequence,
+      task: String(request?.task || "unknown"),
+      label: String(label || "模型请求"),
+      attempt: Math.max(1, Math.trunc(Number(attempt || 1))),
+      status,
+      points: {
+        input: modelPointNumber(reported?.input),
+        output: modelPointNumber(reported?.output),
+        total: modelPointNumber(reported?.total),
+        source: String(reported?.source || "platform-unavailable")
+      },
+      remainingPoints: remaining == null ? null : String(remaining),
+      completedAt: this.now()
+    };
+    this.modelUsageEvents.push(event);
+    if (this.modelUsageEvents.length > 30) this.modelUsageEvents.splice(0, this.modelUsageEvents.length - 30);
+    this.saveCache();
+    this.notify();
+    return event;
   }
 
   recordLocalEvent(event) {
@@ -717,6 +754,8 @@ class OnlineWorldService {
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
       pendingModelEffects: cloneJson(this.pendingModelEffects.slice(-50)),
+      modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
+      modelUsageSequence: this.modelUsageSequence,
       knownCommentIds: [...this.knownCommentIds].slice(-500),
       historyTailPage: this.historyTailPage,
       historyPageOrder: this.historyPageOrder,
@@ -795,6 +834,11 @@ class OnlineWorldService {
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
+    this.modelUsageEvents = Array.isArray(cached?.modelUsageEvents) ? cached.modelUsageEvents.slice(-30).filter(item => item && typeof item === "object") : [];
+    this.modelUsageSequence = Math.max(
+      Math.max(0, Math.trunc(Number(cached?.modelUsageSequence || 0))),
+      ...this.modelUsageEvents.map(item => Math.max(0, Math.trunc(Number(item.id || 0))))
+    );
     this.modelConversationIds.clear();
     this.localPreferences = {
       orientation: ["men", "women", "any"].includes(cached?.localPreferences?.orientation)
@@ -1656,11 +1700,14 @@ class OnlineWorldService {
     const run = async () => {
       let lastError = null;
       for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+        let usageRecorded = false;
         try {
           const freshRequest = { ...request };
           delete freshRequest.conversationId;
           delete freshRequest.conversation_id;
           const answer = await this.requestModel(freshRequest);
+          this.recordModelUsage({ request: freshRequest, label, attempt, result: answer, status: "completed" });
+          usageRecorded = true;
           const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
           if (!conversationId) throw new Error("平台没有返回新会话编号");
           if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
@@ -1670,6 +1717,7 @@ class OnlineWorldService {
           if (issue) throw new Error(String(issue));
           return parsed;
         } catch (error) {
+          if (!usageRecorded && error?.modelUsage) this.recordModelUsage({ request, label, attempt, error, status: "failed" });
           lastError = error;
           this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, attempts, error: error?.message || String(error) });
           if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));

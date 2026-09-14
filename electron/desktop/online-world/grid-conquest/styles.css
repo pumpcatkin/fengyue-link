@@ -38,6 +38,12 @@ main { display: grid; width: min(1700px, 100%); height: 100%; grid-template-rows
 .time-strip span { color: var(--red-dark); font-size: 14px; font-weight: 900; }
 .time-strip b { font-family: Georgia, "Noto Serif SC", serif; font-size: 12px; }
 .time-strip i { width: 4px; height: 4px; border-radius: 50%; background: var(--gold); }
+.time-strip .points-balance {
+  position: absolute; right: 73px; top: 3px; display: flex; height: 22px; align-items: center; gap: 5px;
+  border: 1px solid #87622c; border-radius: 6px; background: #f4dda6; padding: 1px 7px; color: var(--ink); box-shadow: 1px 1px 0 #9d7e50;
+}
+.time-strip .points-balance small { color: var(--muted); font-size: 7px; font-weight: 900; }
+.time-strip .points-balance b { color: var(--red-dark); font-size: 10px; font-variant-numeric: tabular-nums; }
 
 .layout { display: grid; min-height: 0; grid-template-columns: minmax(500px, 1fr) 370px; gap: 12px; }
 .map-card, .panel, .paper-modal { border: 3px solid var(--line); background: var(--paper); box-shadow: 4px 4px 0 var(--shadow); }
@@ -123,6 +129,18 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 
 .stack { display: grid; gap: 7px; }
 .stack.empty, .direct-inbox.empty { color: var(--muted); font-size: 9px; font-weight: 700; }
+.points-panel { border-color: #87622c; background: #eed7a4; }
+.points-panel > header strong { color: var(--red-dark); }
+.model-usage-log { display: grid; max-height: 160px; gap: 5px; overflow: auto; }
+.model-usage-log.empty { color: var(--muted); font-size: 9px; font-weight: 700; }
+.model-usage-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 7px; align-items: center;
+  border: 1px solid #9a7134; border-left-width: 5px; border-radius: 6px; background: #fff3cf; padding: 6px 7px;
+}
+.model-usage-item.failed { border-left-color: var(--red-dark); }
+.model-usage-item b { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.model-usage-item strong { color: var(--red-dark); font-size: 10px; font-variant-numeric: tabular-nums; }
+.model-usage-item small { grid-column: 1 / -1; color: var(--muted); font-size: 7px; line-height: 1.4; }
 .job, .general-card {
   display: grid; gap: 5px; border: 2px solid var(--line); border-radius: 9px; background: var(--paper-light);
   padding: 7px; box-shadow: 2px 2px 0 #9d7e50;

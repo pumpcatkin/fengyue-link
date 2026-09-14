@@ -12,6 +12,7 @@
       <header class="time-strip" aria-label="游戏时间">
         <button id="owner-command-toggle" class="owner-command-toggle hidden" type="button">服主指令</button>
         <span id="clock">--:--:--</span><i></i><b id="year">第 1 年</b>
+        <span class="points-balance" aria-label="平台剩余积分"><small>剩余积分</small><b id="points-balance-value">—</b></span>
         <button id="sound-toggle" class="sound-toggle" type="button" aria-label="调整游戏音效">音效 60%</button>
       </header>
       <section class="layout">
@@ -31,6 +32,11 @@
             <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
             <button id="edit-preferences" class="preference-button" type="button">修改性癖偏好</button>
             <div class="metrics"><span><small>自身战力</small><b id="player-power">0</b></span><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
+          </section>
+
+          <section class="panel points-panel">
+            <header><span><small>每条模型消息单独结算</small><b>模型积分记录</b></span><strong id="points-remaining">剩余 —</strong></header>
+            <div id="model-usage-log" class="model-usage-log empty">本次尚未调用模型</div>
           </section>
 
           <section class="panel march-panel">

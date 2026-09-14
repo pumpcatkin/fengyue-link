@@ -287,6 +287,14 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toContain('playSound("victory")');
     expect(gridGame).toContain('playSound("letter")');
     expect(gridHtml).toContain('id="sound-toggle"');
+    expect(gridHtml).toContain('id="points-balance-value"');
+    expect(gridHtml).toContain('id="model-usage-log"');
+    expect(gridGame).toContain("modelUsageEvents");
+    expect(gridGame).toContain('item?.points?.total == null ? "结算中"');
+    expect(main).toContain("resolvedModelPointUsage(result.points || result.usage");
+    expect(main).toContain('await this.refreshOnlineWorldPoints(task, "before")');
+    expect(main).toContain('await this.refreshOnlineWorldPoints(task, "after")');
+    expect(main).toContain("newConversation: true");
     expect(renderer).toContain('const ONLINE_WORLD_HOST_PROTOCOL = "fyow-host/1"');
     expect(renderer).toContain("ONLINE_WORLD_HOST_MESSAGE_LIMIT");
     expect(renderer).toContain("replyResult({cancelled:true})");

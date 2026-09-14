@@ -154,7 +154,7 @@ describe("online world platform service", () => {
         calls.push(request.task);
         sentRequests.push(request);
         if (request.task === "first") await firstGate;
-        return { conversationId: `conversation-queue-${calls.length}`, answer: JSON.stringify({ task: request.task }) };
+        return { conversationId: `conversation-queue-${calls.length}`, answer: JSON.stringify({ task: request.task }), points: { total: calls.length }, remainingPoints: String(100 - calls.length) };
       }
     });
     const first = instance.requestStructuredModel({ task: "first", conversationId: "stale-conversation" });
@@ -167,6 +167,10 @@ describe("online world platform service", () => {
     expect(calls).toEqual(["first", "second"]);
     expect(sentRequests.every(request => !("conversationId" in request) && !("conversation_id" in request))).toBe(true);
     expect(instance.modelConversationIds.size).toBe(2);
+    expect(instance.state().modelUsageEvents).toMatchObject([
+      { id: 1, task: "first", label: "模型请求", points: { total: 1 }, remainingPoints: "99" },
+      { id: 2, task: "second", label: "模型请求", points: { total: 2 }, remainingPoints: "98" }
+    ]);
   });
 
   it("rejects a platform response that reuses an earlier model conversation", async () => {

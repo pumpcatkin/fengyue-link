@@ -101,6 +101,14 @@ function showReleaseVerificationFailure(security,update={}){
 
 function renderReleaseVerificationResult(next){
   const security=next?.releaseSecurity||{};
+  // The startup notice is only a transient status surface. Once the signed
+  // runtime manifest has been checked, close it automatically so the login
+  // controls are immediately usable. Development QA keeps the notice visible
+  // because it intentionally uses a synthetic, already-verified state.
+  if(security.status==="verified"&&security.verified){
+    officialNoticeOverlay.classList.add("hidden");
+    return;
+  }
   if(["blocked","unavailable","update-required"].includes(security.status))showReleaseVerificationFailure(security,next?.appUpdate||{});
 }
 

@@ -166,6 +166,38 @@ describe("official release security", () => {
     expect(attempts).toBe(3);
   });
 
+  it("retries transient GitHub gateway responses instead of blocking login", async () => {
+    let attempts = 0;
+    const gate = new ReleaseSecurityGate({
+      net: {
+        fetch: async () => {
+          attempts += 1;
+          if (attempts < 3) {
+            return {
+              ok: false,
+              status: 504,
+              headers: { get: () => "0" }
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => "5" },
+            arrayBuffer: async () => new TextEncoder().encode("ready").buffer
+          };
+        }
+      },
+      appVersion: "0.12.1",
+      isPackaged: false,
+      resourcesPath: "",
+      executablePath: "",
+      userDataPath: ""
+    });
+    const bytes = await gate.fetch("https://api.github.com/test", {}, 1024, "测试请求", Date.now() + 5000);
+    expect(Buffer.from(bytes).toString("utf8")).toBe("ready");
+    expect(attempts).toBe(3);
+  });
+
   it("limits startup integrity validation to the two token-relevant runtime files", () => {
     const runtimeManifest = validateManifestForRuntime(signedManifestShape());
     expect(runtimeManifest.files).toEqual({

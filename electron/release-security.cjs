@@ -267,7 +267,11 @@ function validateManifestForRuntime(value) {
 
 async function readBoundedResponse(response, maxBytes, label) {
   if (!response?.ok) {
-    throw new ReleaseSecurityError("network-response", `${label}请求失败（HTTP ${Number(response?.status) || 0}）`);
+    const status = Number(response?.status) || 0;
+    throw new ReleaseSecurityError("network-response", `${label}请求失败（HTTP ${status}）`, {
+      status,
+      retryable: status === 408 || status === 429 || status >= 500
+    });
   }
   const declaredLength = Number(response.headers?.get?.("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
@@ -386,8 +390,12 @@ class ReleaseSecurityGate {
         const response = await this.net.fetch(url, { ...options, redirect: "follow", signal: controller.signal });
         return await readBoundedResponse(response, maxBytes, label);
       } catch (error) {
+        const retryableResponse = error instanceof ReleaseSecurityError
+          && error.code === "network-response"
+          && Boolean(error.details?.retryable);
         if (error instanceof ReleaseSecurityError
-            && !["network-timeout", "network-error"].includes(error.code)) throw error;
+            && !["network-timeout", "network-error"].includes(error.code)
+            && !retryableResponse) throw error;
         const timedOut = error?.name === "AbortError" || error?.code === "network-timeout";
         lastError = error instanceof ReleaseSecurityError
           ? error
@@ -494,9 +502,11 @@ class ReleaseSecurityGate {
       : ["artifact-mismatch", "signature-mismatch", "unregistered-version"].includes(issue.code)
         ? "blocked"
         : "unavailable";
+    const temporaryNetworkIssue = ["network-timeout", "network-error"].includes(issue.code)
+      || (issue.code === "network-response" && Boolean(issue.details?.retryable));
     const publicMessage = issue.code === "update-required"
       ? `发现新版本 v${issue.details?.latestVersion || ""}`.trim()
-      : ["network-timeout", "network-error"].includes(issue.code)
+      : temporaryNetworkIssue
         ? "版本号对照暂未完成"
         : "版本号对照未通过";
     return this.setState(status, false, publicMessage, {

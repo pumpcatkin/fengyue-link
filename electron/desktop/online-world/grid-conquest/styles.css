@@ -219,6 +219,8 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .dialogue-modal { width: min(680px, 96vw); }
 .dialogue-history { min-height: 160px; max-height: 330px; margin-bottom: 9px; }
 .dialogue-history p.user { border-left-color: var(--red-dark); background: #f7dfc2; }
+.dialogue-history p.dialogue-pending { border-left-color: var(--muted); background: #f2ead9; color: var(--muted); }
+.dialogue-history p.dialogue-failed { border-left-color: var(--red-dark); background: #f9e2dc; color: var(--red-dark); }
 .dialogue-modal form { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .dialogue-modal textarea { min-height: 64px; resize: none; }
 .owner-command-modal { width: min(780px, 96vw); }

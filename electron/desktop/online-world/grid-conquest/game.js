@@ -27,6 +27,7 @@ const joinDraft = { profileId: "", orientation: "any", tags: new Map(), wish: ""
 const preferenceDraft = { orientation: "any", tags: new Map() };
 const pendingHostRequests = new Map();
 const pendingHostKeys = new Map();
+const dialogueRequests = new Map();
 const seenModelUsageIds = new Set();
 let modelUsageInitialized = false;
 
@@ -657,13 +658,35 @@ function renderDialogue() {
   document.querySelector("#dialogue-mode").textContent = general.status === "captured" ? "俘虏交互" : "将领互动";
   const history = document.querySelector("#dialogue-history"); history.replaceChildren();
   const lines = general.interactionHistory || [];
-  if (!lines.length) { const p = document.createElement("p"); p.textContent = "尚无对话记录。"; history.append(p); }
-  else lines.forEach(item => {
+  const outgoing = [...dialogueRequests.values()].filter(item => item.generalId === dialogueGeneralId);
+  if (!lines.length && !outgoing.length) { const p = document.createElement("p"); p.textContent = "尚无对话记录。"; history.append(p); }
+  lines.forEach(item => {
     const user = document.createElement("p"); user.className = "user"; user.textContent = redactAccountIds(`${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}`);
     const reply = document.createElement("p"); reply.textContent = redactAccountIds(`${general.name}：${item.reply || "—"}`);
     history.append(user, reply);
   });
+  outgoing.forEach(item => {
+    const user = document.createElement("p"); user.className = "user";
+    user.textContent = redactAccountIds(`${ownPlayer()?.displayName || "我"}：${item.topic}`);
+    const status = document.createElement("p"); status.className = item.status === "failed" ? "dialogue-failed" : "dialogue-pending";
+    status.textContent = item.status === "failed" ? `发送失败：${item.error || "请重试"}` : "正在等待将领回复……";
+    history.append(user, status);
+  });
   history.scrollTop = history.scrollHeight;
+}
+function failDialogueRequest(requestId, message) {
+  const request = dialogueRequests.get(requestId);
+  if (!request) return;
+  request.status = "failed";
+  request.error = String(message || "行动失败");
+  const input = document.querySelector("#dialogue-input");
+  if (dialogueGeneralId === request.generalId && !input.value.trim()) input.value = request.topic;
+  if (dialogueGeneralId === request.generalId) renderDialogue();
+}
+function finishDialogueResult(requestId, result) {
+  if (!dialogueRequests.has(requestId)) return;
+  if (result?.dialogue?.reply) dialogueRequests.delete(requestId);
+  else failDialogueRequest(requestId, "请求结束，但没有返回将领回复");
 }
 function openDialogue(id) {
   const general = allGenerals()[id];
@@ -846,7 +869,7 @@ function validateJoinStep() {
   return "";
 }
 
-async function sendIntent(intent) {
+function sendIntent(intent) {
   return host("intent", { intent: { ...intent, idempotencyKey: crypto.randomUUID() } }, { expectResult: true, key: `intent:${intent.type}` });
 }
 document.querySelector("#join-next").addEventListener("click", () => {
@@ -977,8 +1000,14 @@ document.querySelector("#dialogue-form").addEventListener("submit", event => {
   const input = document.querySelector("#dialogue-input");
   const topic = input.value.trim();
   if (!topic || !dialogueGeneralId) return;
+  const requestId = sendIntent({ type: "talk-general", generalId: dialogueGeneralId, topic });
+  if (!requestId) return;
+  for (const [id, item] of dialogueRequests) {
+    if (item.generalId === dialogueGeneralId && item.status === "failed" && item.topic === topic) dialogueRequests.delete(id);
+  }
+  dialogueRequests.set(requestId, { generalId: dialogueGeneralId, topic, status: "sending", error: "" });
   input.value = "";
-  sendIntent({ type: "talk-general", generalId: dialogueGeneralId, topic });
+  renderDialogue();
 });
 document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListener("click", event => {
   if (event.target !== overlay || overlay.id === "join-wizard") return;
@@ -1010,8 +1039,10 @@ window.addEventListener("message", event => {
     joinSubmitting = false;
     playSound("error");
     showToast(event.data.message || "行动失败");
+    failDialogueRequest(event.data.requestId, event.data.message);
     if (!ownPlayer()) renderJoinWizard();
   } else if (event.data.type === "result") {
+    finishDialogueResult(event.data.requestId, event.data.result);
     if (event.data.result?.cancelled) {
       joinSubmitting = false;
       playSound("notice");

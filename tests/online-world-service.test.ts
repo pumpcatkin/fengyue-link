@@ -426,6 +426,7 @@ describe("online world platform service", () => {
     expect(result.dialogue.memory).toMatchObject({ category: "speech", intimacyDelta: 2 });
     expect(instance.world.generals.g1.memoryText).toContain("与主公甲谈论北境");
     expect(instance.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ category: "speech", emotion: "振奋" });
+    expect(result.state.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ userText: "北境局势", reply: "愿与主公谈谈北境。" });
   });
 
   it("publishes one public general update for a deployed-general interaction", async () => {

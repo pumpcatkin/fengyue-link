@@ -11,6 +11,7 @@ const {
   GRID_COMPANION_WORK_ID,
   GRID_COMPANION_INSTANCE_ID,
   createBundledGridCard,
+  normalizeProgramText,
   createExportedGameCard,
   validateGameCard,
   rebindGameCard,
@@ -25,6 +26,12 @@ afterEach(() => {
 });
 
 describe("online world game cards", () => {
+  it("packs the same game program from LF and Windows CRLF sources", () => {
+    expect(normalizeProgramText("界面\r\n样式\r脚本")).toBe("界面\n样式\n脚本");
+    const card = createBundledGridCard();
+    expect(parseProgram(card.companion.configuration.app.description, card.gameId).digest).toBe(card.program.digest);
+  });
+
   it("ships one fixed companion work and its complete creation-page snapshot", () => {
     const card = validateGameCard(createBundledGridCard());
     expect(card.schema).toBe(GAME_CARD_SCHEMA);

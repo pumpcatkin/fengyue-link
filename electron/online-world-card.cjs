@@ -77,12 +77,17 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function normalizeProgramText(value) {
+  return String(value).replace(/\r\n?/g, "\n");
+}
+
 function builtInGridProgram() {
   const directory = path.join(__dirname, "desktop", "online-world", "grid-conquest");
+  const source = name => normalizeProgramText(fs.readFileSync(path.join(directory, name), "utf8"));
   const html = composeSingleFileProgram(
-    fs.readFileSync(path.join(directory, "index.html"), "utf8"),
-    fs.readFileSync(path.join(directory, "styles.css"), "utf8"),
-    `${fs.readFileSync(path.join(directory, "acg-tags.js"), "utf8")}\n${fs.readFileSync(path.join(directory, "game.js"), "utf8")}`
+    source("index.html"),
+    source("styles.css"),
+    `${source("acg-tags.js")}\n${source("game.js")}`
   );
   const packed = packProgram({ gameId: GRID_GAME_ID, title: GRID_GAME_TITLE, html });
   return {
@@ -91,6 +96,7 @@ function builtInGridProgram() {
     envelope: packed.envelope,
     html: injectSandboxCsp(html),
     compressedBytes: packed.compressedBytes,
+    htmlBytes: packed.htmlBytes,
     source: "builtin-preview"
   };
 }
@@ -294,6 +300,7 @@ module.exports = {
   GRID_COMPANION_INSTANCE_ID,
   GRID_COMPANION_COPY,
   builtInGridProgram,
+  normalizeProgramText,
   normalizeConfiguration,
   configurationDigest,
   cardDigest,

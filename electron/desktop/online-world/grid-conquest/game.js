@@ -995,8 +995,7 @@ document.querySelector("#march").addEventListener("click", () => {
 document.querySelector("#close-general").addEventListener("click", () => document.querySelector("#general-modal").classList.add("hidden"));
 document.querySelector("#general-interact").addEventListener("click", () => openDialogue(generalDetailId));
 document.querySelector("#close-dialogue").addEventListener("click", () => document.querySelector("#dialogue-modal").classList.add("hidden"));
-document.querySelector("#dialogue-form").addEventListener("submit", event => {
-  event.preventDefault();
+function sendDialogue() {
   const input = document.querySelector("#dialogue-input");
   const topic = input.value.trim();
   if (!topic || !dialogueGeneralId) return;
@@ -1008,6 +1007,12 @@ document.querySelector("#dialogue-form").addEventListener("submit", event => {
   dialogueRequests.set(requestId, { generalId: dialogueGeneralId, topic, status: "sending", error: "" });
   input.value = "";
   renderDialogue();
+}
+document.querySelector("#dialogue-send").addEventListener("click", sendDialogue);
+document.querySelector("#dialogue-input").addEventListener("keydown", event => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  sendDialogue();
 });
 document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListener("click", event => {
   if (event.target !== overlay || overlay.id === "join-wizard") return;

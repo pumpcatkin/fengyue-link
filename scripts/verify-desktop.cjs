@@ -118,6 +118,21 @@ if (process.type === "renderer") {
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#points-balance-value').textContent`), "1,876");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('−24 积分')`), true);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('剩余 1,876')`), true);
+      const dialogueClick = await embeddedGameFrame.executeJavaScript(`(() => {
+        window.__dialogueClickErrors = [];
+        window.addEventListener('error', event => window.__dialogueClickErrors.push(event.message));
+        openDialogue('g1');
+        const input = document.querySelector('#dialogue-input');
+        input.value = '你好';
+        document.querySelector('#dialogue-send').click();
+        return { input: input.value, history: document.querySelector('#dialogue-history').textContent, errors: window.__dialogueClickErrors, dialogueRequests: dialogueRequests.size };
+      })()`);
+      assert.deepEqual(dialogueClick.errors, []);
+      assert.equal(dialogueClick.input, '', 'general dialogue send button did not clear the draft');
+      assert(dialogueClick.history.includes('本地测试：你好'), 'general dialogue send button did not show the outgoing message');
+      assert.equal(dialogueClick.dialogueRequests, 1, 'general dialogue send button did not dispatch a request');
+      await settle();
+      assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'talk-general' && call.args[0]?.topic === '你好'), 'general dialogue request did not reach the host');
       fs.writeFileSync(path.join(outputDir, "online-world-game.png"), (await window.webContents.capturePage()).toPNG());
       const mapMetrics = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');const canvas=document.querySelector('#map');return{label:document.querySelector('#zoom-label').textContent,visibleColumns:viewport.clientWidth/(canvas.getBoundingClientRect().width/64)}})()`);
       assert.equal(mapMetrics.label, "1×");

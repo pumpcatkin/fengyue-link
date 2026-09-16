@@ -101,7 +101,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、当前关系与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；若人物确有动机，可返回 send-letter，但 recipientKey 必须逐字取自 allowedFormerLords 中的 recipientKey，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属；不得输出任何账号编号。
+任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 是将领当面说的话，直接回应本次话题，符合双方人设与当前关系。通常写 40～100 个汉字、1～3 句，最多 180 个汉字；问候只需简短回应，复杂问题也不要铺陈长篇背景、心理描写或重复用户的话。通常 command 为 null；若人物确有动机，可返回 send-letter，但 recipientKey 必须逐字取自 allowedFormerLords 中的 recipientKey，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属；不得输出任何账号编号。
 输出 Schema：{"reply":"将领回答","command":null|{"type":"send-letter","recipientKey":"former-lord-1","text":"书信"}}
 ```
 
@@ -116,7 +116,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、俘虏处境与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；只有人物动机、关系与剧情确实支持时才返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 recipientKey 只能逐字取自 allowedFormerLords，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得输出其他游戏操作或任何账号编号。
+任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 是俘虏当面说的话，直接回应本次话题，符合双方人设、俘虏处境与关系。通常写 40～100 个汉字、1～3 句，最多 180 个汉字；问候只需简短回应，不要铺陈长篇背景、心理描写或重复用户的话。通常 command 为 null；只有人物动机、关系与剧情确实支持时才返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 recipientKey 只能逐字取自 allowedFormerLords，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得输出其他游戏操作或任何账号编号。
 输出 Schema：{"reply":"俘虏将领回答","command":null|{"type":"surrender"}|{"type":"send-letter","recipientKey":"former-lord-1","text":"书信"}}
 ```
 
@@ -213,14 +213,14 @@ parent.postMessage({
 - 地图变化采用稀疏 `fyow.map-delta/1`，每条只携带发生变化的格子与部署将领；同一实体按平台评论时间戳、再按评论 ID 决定覆盖先后，不使用客户端时间。
 - 每个玩家的地图记录携带 `playerEpoch`。玩家重置后世代号加一，所有旧世代记录永久失效，旧缓存也不能把已重置角色带回房间。
 - 封禁状态与世代号进入作者签名公共快照。读取时把 `fyow.authority/1` 和地图增量按评论时间合并，因此封禁之后的目标操作即使与封禁评论位于同一页也会被过滤。
-- 在线服主每观察到 32 条新地图增量就自动写入完整公共覆盖快照；重置、封禁和解封后立即写入快照。快照所在评论时间是覆盖水位线，启动扫描组装出最新完整快照后即可停止翻阅更旧页面，只应用快照之后的少量记录。
-- 评论区旧内容不会被物理删除；它们由快照水位线和玩家世代号在逻辑上作废，既保留可审计顺序，也避免每次启动重复处理上百页废弃记录。
+- 在线服主每观察到 32 条新地图增量就自动写入完整公共覆盖快照；重置、封禁和解封后立即写入快照。快照所在评论时间是覆盖水位线。只有确认评论分页严格按时间单调排序时，启动扫描才可在快照边界停止，避免旧页重复读取。
+- 当前平台的评论分页实测为混排：同一页的时间戳不单调，新作者控制记录也可能出现在第二页。遇到混排时必须读取全部页，再按平台评论时间戳与评论 ID 合并；不能因第一页看到旧快照就跳过后页。旧内容仍由快照水位线和玩家世代号逻辑作废，不会被物理删除。混排造成的分页读取成本需要等待平台提供稳定的时间排序或增量游标才能进一步降低。
 
 ### 4.3 玩家与将领的增量战力修炼
 
 本轮参考 Cookie Clicker 作者 Orteil 的 Idle Game Maker 手册中建筑价格默认按 115% 递增的做法，以及《The Math of Idle Games》对“产出与成本跷跷板、指数成长和升级回本时间”的分析，把同一套永久成长规则用于玩家本人和将领：
 
-- 玩家与新将领的初始基础战力统一为 300；模型返回的 `power` 只为兼容旧 Schema，不参与校验或数值分配。
+- 新玩家初始拥有 500 金币、基础战力 500；新将领初始基础战力仍为 300。模型返回的 `power` 只为兼容旧 Schema，不参与校验或数值分配。已入场玩家的金币与基础战力维持原存档值。
 - 修炼等级为 0～100，一次可连续修炼 1～10 级。第 `L` 级的单级费用为 `ceil(max(50, 基础战力 × 0.2) × 1.15^L)`，开始时立即扣除金币。
 - 当前战力为 `floor(基础战力 × (1 + 0.06 × L) × 1.25^floor(L/10))`。每一级稳定增长，每 10 级再出现一个明显里程碑增幅。
 - 每一级耗时 `1 + floor(L/10)` 分钟；批量任务总时长最低 1 分钟、最高 1 小时，继续使用宿主校准后的真实时间结算。
@@ -230,7 +230,7 @@ parent.postMessage({
 
 参考资料：Orteil Idle Game Maker handbook（`https://orteil.dashnet.org/igm/help.html`）；Anthony Pecorella, *The Math of Idle Games, Part I*（Game Developer）。
 
-以初始基础战力 300 的玩家为例：0 级战力 300、首次修炼费用 60；10 级战力 600；20 级战力 1031。这个曲线让早期提升直观，后期金币需求快速上升，不会被低成本无限线性堆高。
+以新玩家基础战力 500 为例：0 级战力 500、首次修炼费用 100；10 级战力 1000；20 级战力 1718。这个曲线让早期提升直观，后期金币需求快速上升，不会被低成本无限线性堆高。
 
 ### 4.4 当前获得将领的路径与时间估算
 
@@ -256,4 +256,4 @@ parent.postMessage({
 7. 从普通将领与俘虏将领互动分别触发书信，核对角色设定上下文、对话结果、记忆二次整理、评论回复唤醒、目标限制、私信加密与收件箱展示。
 8. 使用作者账号打开左上角服主指令，验证开服、搬迁、重置自己/其他玩家、封禁与解封；普通玩家不显示入口。
 9. 重置后确认目标玩家立刻回到四问入场流程，旧 `playerEpoch` 地图记录不再生效；封禁后确认目标无法加入，且其地图增量和私信唤醒被忽略。
-10. 累计至少 32 条地图增量后确认作者客户端发布覆盖快照，新客户端在快照页停止历史扫描并只合并水位线之后的记录。
+10. 累计至少 32 条地图增量后确认作者客户端发布覆盖快照；时间单调分页在快照页停止，混排分页则读取全页并只应用水位线之后的记录。

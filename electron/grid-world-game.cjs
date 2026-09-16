@@ -10,7 +10,8 @@ const DIALOGUE_COOLDOWN_MS = 15 * 1000;
 const TRAINING_COST_GROWTH = 1.15;
 const TRAINING_BATCH_MAX = 10;
 const MAX_TRAINING_LEVEL = 100;
-const DEFAULT_PLAYER_BASE_POWER = 300;
+const DEFAULT_PLAYER_BASE_POWER = 500;
+const STARTING_PLAYER_GOLD = 500;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 
 function clone(value) {
@@ -616,7 +617,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       accountId: actorAccountId,
       accountName: String(context.actorAccountName || intent.accountName || actorAccountId).slice(0, 80),
       displayName: String(intent.displayName || actorAccountId).slice(0, 40),
-      gold: 1000,
+      gold: STARTING_PLAYER_GOLD,
       basePower: DEFAULT_PLAYER_BASE_POWER,
       trainingLevel: 0,
       power: DEFAULT_PLAYER_BASE_POWER,
@@ -646,7 +647,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       population: info.population,
       resourceGrade: info.resourceGrade
     });
-    result = { capital, gold: 1000, soldiers: cell.soldiers };
+    result = { capital, gold: STARTING_PLAYER_GOLD, power: DEFAULT_PLAYER_BASE_POWER, soldiers: cell.soldiers };
   } else {
     const player = ensurePlayer(state, actorAccountId);
     if (type === "start-mining") {
@@ -903,6 +904,7 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
       speaker: { name: player.displayName, context: playerContext },
       allowedFormerLords: formerLords.map(({ recipientKey, displayName }) => ({ recipientKey, displayName })),
       topic,
+      replyStyle: "像面对面交谈一样直接回应，通常 40～100 个汉字、1～3 句，最多 180 个汉字；问候简短，不写长篇背景或心理描写。",
       gameYear: gameYear(state, now)
     },
     routing: { formerLords: formerLords.map(({ recipientKey, accountId }) => ({ recipientKey, accountId })) }

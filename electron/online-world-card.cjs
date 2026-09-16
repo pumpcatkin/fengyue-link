@@ -49,7 +49,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、当前关系与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；若人物确有动机，可返回 send-letter，但 recipientKey 必须逐字取自 allowedFormerLords 中的 recipientKey，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属；不得输出任何账号编号。\n输出 Schema：{\"reply\":\"将领回答\",\"command\":null|{\"type\":\"send-letter\",\"recipientKey\":\"former-lord-1\",\"text\":\"书信\"}}",
+      value: "任务：以已经效忠或新发掘的普通将领身份回应。依据 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、历任主公、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 是将领当面说的话，直接回应本次话题，符合双方人设与当前关系。通常写 40～100 个汉字、1～3 句，最多 180 个汉字；问候只需简短回应，复杂问题也不要铺陈长篇背景、心理描写或重复用户的话。通常 command 为 null；若人物确有动机，可返回 send-letter，但 recipientKey 必须逐字取自 allowedFormerLords 中的 recipientKey，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得自行更改兵力、金币、土地、战力、修炼等级或归属；不得输出任何账号编号。\n输出 Schema：{\"reply\":\"将领回答\",\"command\":null|{\"type\":\"send-letter\",\"recipientKey\":\"former-lord-1\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 2, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -58,7 +58,7 @@ const GRID_COMPANION_COPY = Object.freeze({
       key: "_or_[[FYOW:TASK:general.captive-dialogue:v1]]",
       key_region: 2,
       value_type: 0,
-      value: "任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 应符合双方人设、俘虏处境与用户本次话题，内容完整且不超过 2000 字。通常 command 为 null；只有人物动机、关系与剧情确实支持时才返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 recipientKey 只能逐字取自 allowedFormerLords，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得输出其他游戏操作或任何账号编号。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"recipientKey\":\"former-lord-1\",\"text\":\"书信\"}}",
+      value: "任务：以尚未降服的俘虏将领身份回应。综合 general 的姓名、性别、身体资料、appearanceSetting、coreSetting、战力与修炼等级，以及 memory、masterHistory、captivityHistory、近期互动、亲密度、speaker.context、topic 和 gameYear。必须只返回一个完整 JSON 对象；reply 是俘虏当面说的话，直接回应本次话题，符合双方人设、俘虏处境与关系。通常写 40～100 个汉字、1～3 句，最多 180 个汉字；问候只需简短回应，不要铺陈长篇背景、心理描写或重复用户的话。通常 command 为 null；只有人物动机、关系与剧情确实支持时才返回 surrender，表示正式效忠当前 speaker；也可返回 send-letter，但 recipientKey 只能逐字取自 allowedFormerLords，收信人语义必须与对应 displayName 一致，text 为 1～500 字。不得输出其他游戏操作或任何账号编号。\n输出 Schema：{\"reply\":\"俘虏将领回答\",\"command\":null|{\"type\":\"surrender\"}|{\"type\":\"send-letter\",\"recipientKey\":\"former-lord-1\",\"text\":\"书信\"}}",
       value_configs: [], value_region: 1, sort: 3, depth: 0, probability: 100, enable: true
     }),
     Object.freeze({
@@ -171,7 +171,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 16,
+    version: 17,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null

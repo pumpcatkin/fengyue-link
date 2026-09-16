@@ -558,6 +558,9 @@ async function main() {
           itemCount: items.length,
           firstCreatedAt: items[0]?.created_at || null,
           lastCreatedAt: items.at(-1)?.created_at || null,
+          newestCreatedAt: Math.max(0, ...items.map(item => Number(item?.created_at || 0))),
+          oldestCreatedAt: Math.min(...items.map(item => Number(item?.created_at || 0)).filter(Boolean)),
+          controlIds: assembleCommentRecords(items).records.filter(item => item.record?.schema === FYOW_SCHEMAS.control).map(item => item.record.id),
           shape: shapeOf(payload)
         });
       }
@@ -583,7 +586,29 @@ async function main() {
         cacheFile: null,
         onChange: () => {}
       });
-      const state = await service.open({ card });
+      let state;
+      try {
+        state = await service.open({ card });
+      } catch (error) {
+        const platformComments = await readAllComments(window, workId).catch(() => []);
+        const platformControls = assembleCommentRecords(platformComments).records
+          .filter(item => item.record?.schema === FYOW_SCHEMAS.control)
+          .sort((left, right) => comparePlatformOrder(right, left))
+          .slice(0, 8)
+          .map(item => ({ id: item.record.id, programHash: item.record.programHash, sources: item.sources.map(source => ({ id: source.id, createdAt: source.created_at })) }));
+        process.stderr.write(`${JSON.stringify({
+          event: "sync-verification-diagnostic",
+          error: String(error?.message || error),
+          cardProgramHash: card.program.digest,
+          controlId: service.control?.id || null,
+          controlProgramHash: service.control?.programHash || null,
+          loadedProgramHash: service.program?.digest || null,
+          history: service.history,
+          platformCommentCount: platformComments.length,
+          platformControls
+        })}\n`);
+        throw error;
+      }
       service.close();
       process.stdout.write(`${JSON.stringify({ ok:true, workId, status:state.status, history:state.history, controlProgramHash:state.control?.programHash || null, currentProgramHash:state.program?.digest || null, revision:state.revision }, null, 2)}\n`);
       return;

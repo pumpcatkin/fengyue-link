@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
@@ -58,6 +58,9 @@ describe("online world platform service", () => {
   });
 
   it("validates every dialogue command and completed long-term memory before applying it", () => {
+    expect(compactDialogueReply("愿与主公详谈。")).toBe("愿与主公详谈。");
+    expect(Array.from(compactDialogueReply("北境尚有战事。".repeat(30))).length).toBeLessThanOrEqual(180);
+    expect(compactDialogueReply("战局未定，".repeat(50))).toMatch(/…$/);
     expect(dialogueQualityIssue({ reply: "愿与主公详谈。", command: null }, { captive: false })).toBeNull();
     expect(dialogueQualityIssue({ reply: "我愿降服。", command: { type: "surrender" } }, { captive: false })).toMatch(/普通将领/);
     expect(dialogueQualityIssue({ reply: "请代我传信。", command: { type: "send-letter", recipientKey: "former-lord-2", text: "一切安好。" } }, { allowedRecipientKeys: ["former-lord-1"] })).toMatch(/历任主公名单/);
@@ -98,7 +101,7 @@ describe("online world platform service", () => {
     requested.splice(0);
     instance.knownCommentIds.add("latest-ordinary");
     await instance.readHistory(false);
-    expect(requested).toEqual([3]);
+    expect(requested).toEqual([3, 1]);
     expect(instance.history.stoppedBy).toBe("known-comment-reached");
   });
 
@@ -128,6 +131,34 @@ describe("online world platform service", () => {
     expect(ids).toContain("latest-desc");
     expect(ids).not.toContain("old-desc");
     expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "newest-first", stoppedBy: "covered-by-snapshot" });
+  });
+
+  it("reads every page when comments are relevance-ranked instead of chronological", async () => {
+    const oldControl = { schema: "fyow.control/3", id: "old-ranked", seasonId: "season", programHash: "old" };
+    const latestControl = { schema: "fyow.control/3", id: "latest-ranked", seasonId: "season", programHash: "latest" };
+    const snapshot = { schema: "fyow.snapshot/3", snapshotId: "ranked-snapshot", seasonId: "season", revision: 30, stateHash: "hash" };
+    const comment = (id: string, content: string, second: number) => ({ id, content, created_at: second });
+    const page1 = [
+      ...encodeCommentRecord(oldControl).map((content: string, index: number) => comment(`ranked-old-${index}`, content, 200)),
+      ...encodeCommentRecord(snapshot).map((content: string, index: number) => comment(`ranked-snapshot-${index}`, content, 190)),
+      ...Array.from({ length: 48 }, (_, index) => comment(`ranked-filler-1-${index}`, "旧评论", 100 + index))
+    ].slice(0, 50);
+    const page2 = [
+      ...encodeCommentRecord(latestControl).map((content: string, index: number) => comment(`ranked-latest-${index}`, content, 300)),
+      ...Array.from({ length: 49 }, (_, index) => comment(`ranked-filler-2-${index}`, "评论", 60 + index))
+    ].slice(0, 50);
+    const page3 = Array.from({ length: 17 }, (_, index) => comment(`ranked-filler-3-${index}`, "更早评论", 50 + index));
+    const requested: number[] = [];
+    const instance = service({ requestConsole: async (endpoint: string) => {
+      const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+      requested.push(page);
+      return page === 1 ? page1 : page === 2 ? page2 : page === 3 ? page3 : [];
+    } });
+    instance.work = { id: "work" };
+    const history = await instance.readHistory(true);
+    expect(history.assembled.records.map((item: any) => item.record.id)).toContain("latest-ranked");
+    expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "mixed", stoppedBy: "mixed-page-order-full-scan" });
+    expect([...new Set(requested)].sort()).toEqual([1, 2, 3]);
   });
 
   it("repairs a legacy player's placeholder context without resetting their game", async () => {

@@ -14,6 +14,20 @@ function joined(now = 1_000_000) {
 }
 
 describe("grid conquest rules", () => {
+  it("grants new players 500 starting gold and 500 base power without changing older progress", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    expect(state.players.a.gold).toBe(500);
+    expect(state.players.a.basePower).toBe(500);
+    expect(state.players.a.power).toBe(500);
+    state.players.a.gold = 321;
+    state.players.a.basePower = 300;
+    state.players.a.power = 300;
+    const restored = game.settleWorld(state, now + 1).state.players.a;
+    expect(restored.gold).toBe(321);
+    expect(restored.basePower).toBe(300);
+    expect(restored.power).toBe(300);
+  });
   it("requires profile completion and makes the initial wish binding for generation", () => {
     const profile = game.buildPlayerProfileContextRequest({
       displayName: "茂密", basicInfo: "猫亚人", appearance: "白色头发"
@@ -107,10 +121,10 @@ describe("grid conquest rules", () => {
     expect(secondCost / firstCost).toBeCloseTo(1.15, 1);
     const selfTraining = game.applyIntent(state, { type: "power-train", targetType: "player", levels: 2, idempotencyKey: "self-power" }, { actorAccountId: "a", now });
     const selfJob = selfTraining.state.jobs[selfTraining.result.jobId];
-    expect(selfTraining.result.nextPower).toBeGreaterThan(300);
+    expect(selfTraining.result.nextPower).toBeGreaterThan(500);
     state = game.settleWorld(selfTraining.state, selfJob.finishAt).state;
     expect(state.players.a.trainingLevel).toBe(2);
-    expect(state.players.a.power).toBe(game.trainingPower(300, 2));
+    expect(state.players.a.power).toBe(game.trainingPower(500, 2));
 
     state.players.a.gold = 100000;
     state = game.applyIntent(state, { type: "grant-general", generalId: "trainee", name: "青禾", gender: "female", setting: "善守城。", power: 500, discoveryId: "trainee", idempotencyKey: "grant-trainee" }, { actorAccountId: "a", authorityAccountId: "a", now: now + 1 }).state;
@@ -191,6 +205,7 @@ describe("grid conquest rules", () => {
     expect(JSON.stringify(dialogue.input)).not.toContain(formerId);
     expect(JSON.stringify(memory.input)).not.toContain(formerId);
     expect(dialogue.input.allowedFormerLords).toEqual([{ recipientKey: "former-lord-1", displayName: "旧主乙" }]);
+    expect(dialogue.input.replyStyle).toContain("最多 180 个汉字");
     expect(dialogue.routing.formerLords).toEqual([{ recipientKey: "former-lord-1", accountId: formerId }]);
   });
 

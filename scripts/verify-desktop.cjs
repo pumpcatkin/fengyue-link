@@ -118,6 +118,8 @@ if (process.type === "renderer") {
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#points-balance-value').textContent`), "1,876");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('−24 积分')`), true);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('剩余 1,876')`), true);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#general-profile-name')).fontSize`), '15px');
+      assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#general-core-setting')).fontSize`), '13px');
       const dialogueClick = await embeddedGameFrame.executeJavaScript(`(() => {
         window.__dialogueClickErrors = [];
         window.addEventListener('error', event => window.__dialogueClickErrors.push(event.message));
@@ -131,10 +133,22 @@ if (process.type === "renderer") {
       assert.equal(dialogueClick.input, '', 'general dialogue send button did not clear the draft');
       assert(dialogueClick.history.includes('本地测试：你好'), 'general dialogue send button did not show the outgoing message');
       assert.equal(dialogueClick.dialogueRequests, 1, 'general dialogue send button did not dispatch a request');
+      assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#dialogue-history p.dialogue-pending')).fontSize`), '12px');
       await settle();
       assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'talk-general' && call.args[0]?.topic === '你好'), 'general dialogue request did not reach the host');
+      const replyFontSize = await embeddedGameFrame.executeJavaScript(`(() => {
+        allGenerals().g1.interactionHistory.push({ year: 1, accountId: 'a', userText: '你好', reply: '主公安好，我在此待命。' });
+        renderDialogue();
+        return getComputedStyle(document.querySelector('#dialogue-history p:not(.user):not(.dialogue-pending):not(.dialogue-failed)')).fontSize;
+      })()`);
+      assert.equal(replyFontSize, '14px', 'general dialogue reply remains too small');
       fs.writeFileSync(path.join(outputDir, "online-world-game.png"), (await window.webContents.capturePage()).toPNG());
-      const mapMetrics = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');const canvas=document.querySelector('#map');return{label:document.querySelector('#zoom-label').textContent,visibleColumns:viewport.clientWidth/(canvas.getBoundingClientRect().width/64)}})()`);
+      let mapMetrics;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        mapMetrics = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');const canvas=document.querySelector('#map');return{label:document.querySelector('#zoom-label').textContent,visibleColumns:viewport.clientWidth/(canvas.getBoundingClientRect().width/64)}})()`);
+        if (mapMetrics.visibleColumns >= 11 && mapMetrics.visibleColumns <= 13) break;
+        await settle();
+      }
       assert.equal(mapMetrics.label, "1×");
       assert(mapMetrics.visibleColumns >= 11 && mapMetrics.visibleColumns <= 13);
       const zoomed = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');viewport.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));return document.querySelector('#zoom-label').textContent})()`);

@@ -319,6 +319,15 @@ function dialogueQualityIssue(value, { captive = false, allowedRecipientKeys = [
   return null;
 }
 
+function compactDialogueReply(value) {
+  const characters = Array.from(String(value || "").trim());
+  if (characters.length <= 180) return characters.join("");
+  const head = characters.slice(0, 180);
+  const sentenceEnd = head.findLastIndex(character => "。！？!?；".includes(character));
+  if (sentenceEnd >= 70) return head.slice(0, sentenceEnd + 1).join("").trim();
+  return `${head.slice(0, 179).join("").trimEnd()}…`;
+}
+
 function generalMemoryQualityIssue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "将领记忆结果不是 JSON 对象";
   const category = String(value.category || "");
@@ -817,7 +826,7 @@ class OnlineWorldService {
     const cached = this.loadCache(this.work.id);
     this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
     this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
-    this.historyPageOrder = ["oldest-first", "newest-first"].includes(cached?.historyPageOrder) ? cached.historyPageOrder : "unknown";
+    this.historyPageOrder = ["oldest-first", "newest-first", "mixed"].includes(cached?.historyPageOrder) ? cached.historyPageOrder : "unknown";
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
     this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
@@ -1051,21 +1060,30 @@ class OnlineWorldService {
     };
     const tailPage = await this.locateHistoryTailPage(readPage);
     this.historyTailPage = tailPage;
-    const newestTimestamp = comments => Math.max(0, ...comments.map(commentTimestamp));
-    // The platform currently ignores order=desc and returns oldest-first pages.
-    // Detect the direction as well, so a future platform fix cannot reverse our scan.
-    let pageOrder = this.historyPageOrder;
-    if (fullScan || !["oldest-first", "newest-first"].includes(pageOrder)) {
-      const firstPageComments = await readPage(1);
-      const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
-      pageOrder = tailPage > 1 && newestTimestamp(firstPageComments) > newestTimestamp(tailPageComments)
-        ? "newest-first"
-        : "oldest-first";
-      this.historyPageOrder = pageOrder;
-    }
+    const firstPageComments = await readPage(1);
+    const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
+    const timestamps = comments => comments.map(commentTimestamp).filter(Boolean);
+    const monotonic = (values, ascending) => values.every((value, index) => !index || (ascending ? values[index - 1] <= value : values[index - 1] >= value));
+    const firstTimes = timestamps(firstPageComments);
+    const tailTimes = timestamps(tailPageComments);
+    // Comment order may be relevance-ranked even when order=desc is requested.
+    // A snapshot is only an early-stop boundary when page chronology is proven.
+    const oldestFirst = tailPage > 1 && firstTimes.length && tailTimes.length
+      && monotonic(firstTimes, true) && monotonic(tailTimes, true)
+      && Math.max(...firstTimes) <= Math.min(...tailTimes);
+    const newestFirst = tailPage > 1 && firstTimes.length && tailTimes.length
+      && monotonic(firstTimes, false) && monotonic(tailTimes, false)
+      && Math.min(...firstTimes) >= Math.max(...tailTimes);
+    const pageOrder = tailPage === 1 ? "newest-first" : oldestFirst ? "oldest-first" : newestFirst ? "newest-first" : "mixed";
+    this.historyPageOrder = pageOrder;
     const scanPages = pageOrder === "newest-first"
       ? Array.from({ length: tailPage }, (_, index) => index + 1)
       : Array.from({ length: tailPage }, (_, index) => tailPage - index);
+    if (pageOrder === "mixed") {
+      for (let index = 0; index < scanPages.length; index += 4) {
+        await Promise.all(scanPages.slice(index, index + 4).map(readPage));
+      }
+    }
     for (const page of scanPages) {
       const comments = await readPage(page);
       for (const comment of comments) {
@@ -1074,6 +1092,7 @@ class OnlineWorldService {
         seen.add(id);
         all.push(comment);
       }
+      if (pageOrder === "mixed") continue;
       const assembled = assembleCommentRecords(all);
       const decision = historyPageDecision({
         pageComments: comments,
@@ -1087,6 +1106,7 @@ class OnlineWorldService {
         break;
       }
     }
+    if (pageOrder === "mixed") stoppedBy = "mixed-page-order-full-scan";
     const assembled = assembleCommentRecords(all);
     this.history = { pagesRead, commentsRead: all.length, stoppedBy: stoppedBy || "oldest-page", incomplete: assembled.incomplete.length, invalid: assembled.invalid.length, tailPage, pageOrder };
     const newestComments = [...all]
@@ -1897,7 +1917,7 @@ class OnlineWorldService {
       label: captive ? "俘虏将领互动" : "普通将领互动",
       validate: value => dialogueQualityIssue(value, { captive, allowedRecipientKeys })
     });
-    const reply = String(parsed.reply).trim();
+    const reply = compactDialogueReply(parsed.reply);
     const memory = await this.requestStructuredModel(
       buildGeneralMemoryUpdateRequest(this.world, general, player, { userText: intent.topic, reply, idempotencyKey: `memory:${intent.idempotencyKey}` }, this.now()),
       { attempts: 3, label: "将领记忆整理", validate: generalMemoryQualityIssue }
@@ -2116,4 +2136,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

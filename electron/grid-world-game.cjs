@@ -1025,6 +1025,9 @@ function projectWorldState(state, viewerAccountId) {
     width: state.width,
     height: state.height,
     startedAt: state.startedAt,
+    // The public snapshot needs the immutable season authority binding so
+    // guests can validate locally generated rewards after a cold start.
+    authorityAccountId: state.authorityAccountId ? String(state.authorityAccountId) : null,
     revision: state.revision,
     cells: clone(state.cells),
     players,

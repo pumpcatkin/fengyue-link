@@ -271,6 +271,7 @@ describe("grid conquest rules", () => {
     state = game.applyIntent(state, { type: "start-mining", x: player.position.x, y: player.position.y, auto: true, idempotencyKey: "private-mine" }, { actorAccountId: "a", now }).state;
     state = game.applyIntent(state, { type: "grant-general", generalId: "private-general", name: "青禾", gender: "female", setting: "善守城。", power: 500, discoveryId: "private", idempotencyKey: "private-general" }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
     const publicState = game.projectWorldState(state, null);
+    expect(publicState.authorityAccountId).toBe("a");
     expect(publicState.players.a.gold).toBeUndefined();
     expect(publicState.players.a.carriedGeneralIds).toBeUndefined();
     expect(publicState.players.a.position).toBeUndefined();

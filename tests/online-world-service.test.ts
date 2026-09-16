@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, signRecord } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
@@ -42,6 +42,13 @@ function service(options: Record<string, unknown>) {
 }
 
 describe("online world platform service", () => {
+  it("repairs legacy snapshots that omitted the season authority binding for guests", () => {
+    const legacy = createWorld({ authorityAccountId: "author" });
+    delete legacy.authorityAccountId;
+    expect(bindWorldAuthority(legacy, { authorityAccountId: "author" })).toBe(legacy);
+    expect(legacy.authorityAccountId).toBe("author");
+    expect(() => bindWorldAuthority({ authorityAccountId: "other" }, { authorityAccountId: "author" })).toThrow(/权威绑定/);
+  });
   it("rejects placeholder profile text but accepts any structured general length and model power", () => {
     expect(playerContextQualityIssue({
       personaSummary: "名为茂密的猫亚人，除此之外玩家未提供更多信息。".repeat(6),

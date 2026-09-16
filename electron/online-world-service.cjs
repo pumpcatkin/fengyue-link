@@ -404,6 +404,16 @@ function normalizeWorldState(value) {
   return value;
 }
 
+function bindWorldAuthority(world, control) {
+  if (!world || !control) return world;
+  const expected = String(control.authorityAccountId || "").trim();
+  if (!expected) return world;
+  const current = String(world.authorityAccountId || "").trim();
+  if (current && current !== expected) throw new Error("公共地图权威绑定不一致");
+  world.authorityAccountId = expected;
+  return world;
+}
+
 function extractContentItems(payload) {
   const result = [];
   const queue = [{ value: payload, depth: 0 }];
@@ -875,6 +885,7 @@ class OnlineWorldService {
     if (cached?.world?.gameId === GRID_GAME_ID) {
       this.control = cached.control || null;
       this.world = normalizeWorldState(cached.world);
+      bindWorldAuthority(this.world, this.control);
       this.restoreLocalOverlay(cached.localOverlay || null);
       this.directInbox = Array.isArray(cached.directInbox) ? cached.directInbox.slice(-100) : [];
       this.seenDirectMessageIds = new Set(Array.isArray(cached.seenDirectMessageIds) ? cached.seenDirectMessageIds : this.directInbox.map(item => item.messageId));
@@ -1333,6 +1344,7 @@ class OnlineWorldService {
           this.publicParticipantOrders = {};
         }
         normalizeWorldState(this.world);
+        bindWorldAuthority(this.world, this.control);
         if (this.world) this.applyPublicLedger(history.assembled.records);
         if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
@@ -1548,6 +1560,7 @@ class OnlineWorldService {
   async applyLocalIntent(intent, actorAccountId, options = {}) {
     if (String(actorAccountId) !== this.account().accountId) throw new Error("只能在本机执行当前玩家的行动");
     const identity = await this.getIdentity();
+    bindWorldAuthority(this.world, this.control);
     const actionTime = this.now();
     const beforeWorld = cloneJson(this.world);
     const outcome = applyIntent(this.world, intent, { actorAccountId, actorAccountName: this.account().username, authorityAccountId: this.control.authorityAccountId, now: actionTime });
@@ -2149,4 +2162,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

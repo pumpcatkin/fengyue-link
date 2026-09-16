@@ -226,7 +226,7 @@ function renderModelSelector(next){
     tabs.append(button);
   }
 
-  const canChange=Boolean(next.work)&&next.room?.role!=="guest"&&!next.messageOperationBusy&&!['processing-input','generating','processing-output','syncing'].includes(next.room?.round?.status);
+  const canChange=Boolean(next.work)&&!next.modelOperations?.length&&next.room?.role!=="guest"&&!next.messageOperationBusy&&!['processing-input','generating','processing-output','syncing'].includes(next.room?.round?.status);
   const filtered=activeModelFamily==="all"?items:items.filter(item=>(item.family||"other")===activeModelFamily);
   options.replaceChildren();
   for(const item of filtered){
@@ -296,8 +296,8 @@ function renderModelSelector(next){
       : next.room?.role==="guest"
         ? `房主：${roomModel?.label||roomModel?.model||"等待同步"} · 本机：${ownModel?.label||ownModel?.model||"自动选择中"}（优先 Grok；缺失时选其他实测型号）`
         : ownModel
-          ? `价格系数 ${formatModelPrice(ownModel.priceCoefficient)} · 出字率 ${formatSuccessRate(ownModel.successRate)}`
-          : "请选择模型";
+          ? `自动选模已启用 · 价格 ${formatModelPrice(ownModel.priceCoefficient)} · 出字率 ${formatSuccessRate(ownModel.successRate)}；发送时按优先级重选`
+          : "发送时自动选择模型";
 }
 
 function orderedSessionLogs(){return [...sessionLogEntries.values()].sort((left,right)=>Number(left.seq||0)-Number(right.seq||0))}
@@ -429,8 +429,8 @@ function renderPerspectivePlugin(next){
   const run=runs.find(item=>item.pluginId==="perspective-split");
   const progress=next.plugins?.perspectiveProgress;
   const cost=run?`${run.pointsIncomplete?"已读取 ":""}${run.points?.total??0} 积分${run.pointsIncomplete?"（部分尝试消耗未能读取）":""}`:"";
-  document.querySelector("#perspective-split-summary-state").textContent=progress?`第 ${progress.attempt}/${progress.maxAttempts} 次`:run?.status==="running"?"处理中":definition.enabled?"已启用":"未启用";
-  document.querySelector("#perspective-split-last-run").textContent=progress?`正在${progress.attempt>1?"重新加载整理作品并新建会话重试":"整理本轮视角"}（第 ${progress.attempt}/${progress.maxAttempts} 次）…`:run?run.status==="error"?`整理失败，原文暂不公开：${run.error} · ${cost}`:run.status==="completed"?`上次整理 ${run.memberCount} 人${run.attemptCount?`，尝试 ${run.attemptCount} 次`:""} · ${cost}`:"正在整理本轮视角…":"";
+  document.querySelector("#perspective-split-summary-state").textContent=progress?"自动选择模型中":run?.status==="running"?"处理中":definition.enabled?"已启用":"未启用";
+  document.querySelector("#perspective-split-last-run").textContent=progress?"正在整理本轮视角，失败将自动切换模型…":run?run.status==="error"?`整理失败，原文暂不公开：${run.error} · ${cost}`:run.status==="completed"?`上次整理 ${run.memberCount} 人${run.attemptCount?`，尝试 ${run.attemptCount} 次`:""} · ${cost}`:"正在整理本轮视角…":"";
 }
 
 function renderPluginPanel(next){
@@ -918,7 +918,16 @@ async function refreshDomains(force=false){
   }
 }
 
+document.querySelector("#model-loading-cancel").addEventListener("click",()=>api.cancelModelRequests().catch(error=>toast(error.message)));
 function render(next){
+  const modelJobs=next.modelOperations||[];
+  const modelJob=modelJobs.find(job=>job.stage!=="queued")||modelJobs[0];
+  document.querySelector("#model-loading").classList.toggle("hidden",!modelJob);
+  if(modelJob){
+    const stage={queued:"等待前一项完成",selecting:"正在选择模型",generating:"正在生成",waiting:"正在切换模型"}[modelJob.stage]||"正在加载";
+    document.querySelector("#model-loading-title").textContent=`${modelJob.label} · ${stage}`;
+    document.querySelector("#model-loading-detail").textContent=[modelJob.model?`${modelJob.model}${modelJob.provider?`（${modelJob.provider}）`:""}`:null,modelJob.attempt?`第 ${modelJob.attempt} 次尝试`:null,modelJob.stage==="waiting"?`${Math.ceil(modelJob.retryAfterMs/1000)} 秒后重试`:null,modelJob.points!=null?`已消耗 ${modelJob.points} 积分`:null,modelJobs.length>1?`共 ${modelJobs.length} 项`:null].filter(Boolean).join(" · ");
+  }
   state=next;
   renderReleaseVerificationResult(next);
   if(next.uiTheme&&next.uiTheme!==uiTheme)uiTheme=applyUiTheme(next.uiTheme,{persist:true,syncBackend:false});

@@ -7,6 +7,7 @@ const split = require("../electron/perspective-split.cjs");
 const pipeline = require("../electron/plugin-pipeline.cjs");
 const settings = require("../electron/work-settings.cjs");
 const retryModels = require("../electron/perspective-retry-model.cjs");
+const autoModels = require("../electron/auto-model-router.cjs");
 const runtimeUtils = require("../electron/runtime-utils.cjs");
 const members = [{ id: "a", displayName: "小丽" }, { id: "b", displayName: "小花" }];
 const segment = (id: string, kind: string, audience: string[], text: string) => ({ id, kind, audience, text });
@@ -23,7 +24,7 @@ const parse = (value: any, source = sourceOf(fixture())) => split.parsePerspecti
 function backend(overrides = {}) {
   const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
   const type = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-    ...split, ...pipeline, ...settings, ...runtimeUtils, URL, Buffer, console, setTimeout, clearTimeout,
+    ...split, ...pipeline, ...settings, ...runtimeUtils, ...autoModels, URL, Buffer, console, setTimeout, clearTimeout, AbortController, setInterval, clearInterval,
     crypto: require("node:crypto"), ...require("../electron/multiplayer-prompts.cjs"), ...retryModels,
     perspectiveRetryModelKey: retryModels.modelKey, ...overrides
   });
@@ -383,7 +384,7 @@ describe("perspective partition and reconstruction", () => {
     expect(raw.data[0]!.answer).toBe("ALL");
     expect(sendCommand.mock.calls.every(([method]) => !method.includes("POST"))).toBe(true);
   });
-  it("keeps all three failed attempts private and totals their known points", async () => {
+  it("keeps a canceled model operation private and preserves its known points", async () => {
     const instance = backend();
     instance.room = { members };
     instance.account = { accountId: "a" };
@@ -394,12 +395,12 @@ describe("perspective partition and reconstruction", () => {
       { provider: "deepseek", model: "deepseek-v4-flash", key: "deepseek\0deepseek-v4-flash" }
     ] }));
     instance.applyPerspectiveRetryModel = vi.fn(async (target: any) => target);
-    instance.runPlatformAutomationModel = vi.fn(async () => ({ output: "invalid", model: "M", points: { total: 19 } }));
+    instance.runPlatformAutomationModel = vi.fn(async () => { throw Object.assign(new Error("已取消模型请求"), { pluginRun: { attemptCount: 7, points: { total: 57 } } }); });
     const round: any = {};
-    await expect(instance.runPerspectivePlugin("secret", round)).rejects.toMatchObject({ message: expect.stringContaining("已尝试 3 次仍失败"), pluginRun: { withheld: true, attemptCount: 3, points: { total: 57 } } });
+    await expect(instance.runPerspectivePlugin("secret", round)).rejects.toMatchObject({ message: expect.stringContaining("已取消"), pluginRun: { withheld: true, attemptCount: 7, points: { total: 57 } } });
     expect(round.perspectiveSplit).toBe(true);
     expect(Object.keys(round.perspectiveOutputs)).toHaveLength(0);
-    expect(instance.runPlatformAutomationModel).toHaveBeenCalledTimes(3);
+    expect(instance.runPlatformAutomationModel).toHaveBeenCalledTimes(1);
     expect(instance.perspectiveProgress).toBeNull();
   });
 });
@@ -442,6 +443,19 @@ describe("perspective retries use fresh background work sessions", () => {
     instance.pluginSettings = pipeline.normalizePluginSettings({ plugins: { "perspective-split": { enabled: true } } });
     instance.appendSessionLog = vi.fn();
     instance.emit = vi.fn();
+    instance.recordAutomaticModelUsage = vi.fn();
+    instance.withAutoModel = async (_appId: string, _label: string, execute: any) => {
+      const controller = new AbortController();
+      return autoModels.runAutoModel({
+        signal: controller.signal,
+        loadModels: async () => autoModels.normalizeCatalog({ models: [
+          { provider_name: "p", model_id: "deepseek-v4-flash" },
+          { provider_name: "p", model_id: "gemini-3.5-flash" }
+        ] }),
+        execute: (context: any) => { sequence.push(`model:${context.attempt}:${context.model.model}`); return execute(context); },
+        wait: async () => { if (windows.length >= outcomes.length && outcomes.at(-1) !== "success") controller.abort(); }
+      });
+    };
     instance.preparePerspectiveRetryModels = vi.fn(async () => {
       sequence.push("model-plan");
       return { originalModel: { provider: "old", name: "old" }, candidates: [
@@ -467,8 +481,8 @@ describe("perspective retries use fresh background work sessions", () => {
     expect(result.run).toMatchObject({ attemptCount: 3, points: { input: 4, output: 6, total: 10 }, pointsIncomplete: true });
     expect(result.run.attempts.map((item: any) => item.status)).toEqual(["error", "error", "completed"]);
     expect(sequence).toEqual([
-      "create:0", "load:0", "reset:0", "load:0", "clean:0", "send:0", "destroy:0",
-      "model-plan", "model:2:gemini-flash", "create:1", "load:1", "reset:1", "load:1", "clean:1", "send:1", "destroy:1",
+      "model:1:deepseek-v4-flash", "create:0", "load:0", "reset:0", "load:0", "clean:0", "send:0", "destroy:0",
+      "model:2:gemini-3.5-flash", "create:1", "load:1", "reset:1", "load:1", "clean:1", "send:1", "destroy:1",
       "model:3:deepseek-v4-flash", "create:2", "load:2", "reset:2", "load:2", "clean:2", "send:2", "destroy:2"
     ]);
     const sendScripts = windows.map(window => window.webContents.executeJavaScript.mock.calls.find(([script]: string[]) => script!.includes("const modelInput ="))[0]);
@@ -492,7 +506,7 @@ describe("perspective retries use fresh background work sessions", () => {
     expect(sequence).not.toContain("send:0");
     expect(result.run.attemptCount).toBe(2);
   });
-  it("exhausts three attempts without exposing the source through the output pipeline", async () => {
+  it("cancels repeated failures without exposing the source through the output pipeline", async () => {
     const { instance, windows } = automation(["timeout", "invalid", "invalid"]);
     const round: any = { number: 1 };
     await instance.runConversationPluginStack(pipeline.PLUGIN_PHASES.OUTPUT, "ALL PRIVATE SOURCE", round);
@@ -507,7 +521,7 @@ describe("perspective retries use fresh background work sessions", () => {
   it("destroys a stalled window when its hard deadline expires", async () => {
     const { instance, windows } = automation(["success"]);
     instance.loadSurfaceUrl = () => new Promise(() => {});
-    await expect(instance.runPlatformAutomationModel(split.PERSPECTIVE_APP_ID, "input", "独立视角", { timeoutMs: 15 })).rejects.toThrow("后台请求超时");
+    await expect(instance.runPlatformAutomationAttempt(split.PERSPECTIVE_APP_ID, "input", "独立视角", { timeoutMs: 15 })).rejects.toThrow("后台请求超时");
     expect(windows).toHaveLength(1);
     expect(windows[0].destroyed).toBe(true);
   });

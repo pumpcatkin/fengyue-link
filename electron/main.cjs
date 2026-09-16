@@ -53,6 +53,7 @@ const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
 const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
+const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -426,6 +427,7 @@ function accountSignature(value = {}) {
 }
 
 function platformPointBalance(value) {
+  if (value == null || String(value).trim() === "") return null;
   const number = Number(typeof value === "string" ? value.replace(/,/g, "").trim() : value);
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
@@ -621,12 +623,16 @@ class AccountBackend {
     this.loginPageWarmPromise = null;
     this.accountRefreshPromise = null;
     this.account = { username: null, email: null, points: null, level: null, accountId: null, updatedAt: null };
+    this.autoModelJobs = new Map();
+    this.autoModelQueues = new Map();
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, createBundledGridCard());
     this.onlineWorldService = new OnlineWorldService({
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),
-      requestModel: request => this.onlineWorldModelRequest(request),
+      requestModel: (request, options) => this.onlineWorldModelRequest(request, options),
+      runModelTask: (label, execute) => this.withAutoModel(this.onlineWorldService?.work?.id, label, execute, { scope: "online-world" }),
+      onClose: () => this.cancelAutoModels("online-world"),
       getAccount: () => this.account,
       getIdentity: () => loadOrCreateOnlineWorldIdentity(this.profileId, this.account.accountId),
       getOrigin: () => this.origin,
@@ -816,6 +822,7 @@ class AccountBackend {
         error: this.platformModels.error || null,
         updatedAt: this.platformModels.updatedAt
       },
+      modelOperations: [...this.autoModelJobs.values()].map(job => ({ ...job.state })),
       backgroundPages: {
         gameAlive: Boolean(this.gameSurface?.webContents && !this.gameSurface.webContents.isDestroyed()),
         gameReady: Boolean(this.gameSurfaceReady),
@@ -2667,6 +2674,7 @@ class AccountBackend {
     if (this.conversationBusy) throw new Error("请等待会话操作完成后再登出");
     if (this.room) throw new Error("请先退出或关闭当前房间，再登出账号");
     if (this.loginInProgress) throw new Error("登录流程进行中，请稍后再试");
+    this.cancelAutoModels();
     const previousOrigin = this.origin;
     this.onlineWorldService.close();
     this.authSessionRevision += 1;
@@ -3538,7 +3546,104 @@ class AccountBackend {
     return result;
   }
 
-  async onlineWorldModelRequest(request = {}) {
+  cancelAutoModels(scope = null) {
+    for (const job of this.autoModelJobs?.values() || []) if (!scope || job.scope === scope) job.controller.abort();
+    return { canceled: true };
+  }
+
+  recordAutomaticModelUsage(signal, result) {
+    const job = [...this.autoModelJobs.values()].find(item => item.controller.signal === signal);
+    if (!job) return;
+    job.state.lastPoints = result?.points?.total ?? null;
+    if (result?.points?.total != null) job.state.points = Number(job.state.points || 0) + Number(result.points.total);
+    this.emit();
+  }
+
+  async configureAutomaticModel(appId, target, { conversationId = null, signal } = {}) {
+    const scopes = [null, ...(conversationId ? [conversationId] : [])];
+    for (const scope of scopes) {
+      assertActive(signal);
+      const query = `/apps/config?app_id=${encodeURIComponent(appId)}${scope ? `&conversation_id=${encodeURIComponent(scope)}` : ""}`;
+      const current = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000 }));
+      assertActive(signal);
+      const nextModel = { ...(current.model || {}), provider: target.provider, name: target.model };
+      if (Object.hasOwn(nextModel, "model")) nextModel.model = target.model;
+      const params = { ...(nextModel.completion_params || {}) };
+      for (const [key, range] of Object.entries(target.parameterRanges || {})) {
+        if (range.supported === false) delete params[key];
+        else if (Number.isFinite(Number(params[key]))) {
+          if (Number.isFinite(range.min)) params[key] = Math.max(range.min, Number(params[key]));
+          if (Number.isFinite(range.max)) params[key] = Math.min(range.max, Number(params[key]));
+        }
+      }
+      nextModel.completion_params = params;
+      await this.platformGoApi("/apps/config", {
+        method: "POST", body: { app_id: appId, ...(scope ? { conversation_id: scope } : {}), model: nextModel }, timeout: 15000
+      });
+      assertActive(signal);
+      const saved = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000 }));
+      if (saved?.model?.provider !== target.provider || (saved?.model?.name || saved?.model?.model) !== target.model) throw new Error("平台尚未保存自动选择的模型");
+      if (!scope && this.currentWorkAppId() === appId && this.platformModels) {
+        this.platformModels.selected = this.modelPublicValue({ ...target, priceCoefficient: target.price, averageLatency: target.latency });
+        this.platformModels.config = saved;
+        if (this.room?.role === "host") this.room.model = this.platformModels.selected;
+        this.emit();
+      }
+    }
+  }
+
+  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null } = {}) {
+    this.assertToolLoggedIn();
+    if (!appId) throw new Error("尚未选择模型请求的作品");
+    const controller = new AbortController();
+    const jobId = crypto.randomUUID();
+    const authRevision = this.authSessionRevision;
+    const room = this.room;
+    const work = scope === "online-world" ? this.onlineWorldService?.work : this.work;
+    const job = { controller, scope, state: { id: jobId, label, stage: "queued", attempt: 0, points: null } };
+    this.autoModelJobs.set(jobId, job);
+    this.emit();
+    const checkContext = () => {
+      if (this.destroying || !this.loggedIn || this.authSessionRevision !== authRevision
+        || (scope === "online-world" ? this.onlineWorldService?.work !== work || this.onlineWorldService?.status === "closed"
+          : this.work !== work || this.room !== room)) controller.abort();
+    };
+    const watcher = setInterval(checkContext, 250);
+    const previous = this.autoModelQueues.get(appId) || Promise.resolve();
+    const run = previous.catch(() => {}).then(() => runAutoModel({
+      signal: controller.signal,
+      loadModels: async () => normalizeCatalog(await this.platformGoApi("/workspaces/model-list", { timeout: 15000 })),
+      onState: progress => {
+        checkContext();
+        job.state = { ...job.state, ...progress };
+        this.appendSessionLog("auto-model", { label, ...progress });
+        this.emit();
+      },
+      execute: async context => {
+        checkContext();
+        assertActive(context.signal);
+        await this.configureAutomaticModel(appId, context.model, { conversationId, signal: context.signal });
+        assertActive(context.signal);
+        if (reload) await reload(context);
+        assertActive(context.signal);
+        const result = await execute(context);
+        checkContext();
+        assertActive(context.signal);
+        return result;
+      }
+    }));
+    const settled = run.catch(() => {});
+    this.autoModelQueues.set(appId, settled);
+    try { return await run; }
+    finally {
+      clearInterval(watcher);
+      this.autoModelJobs.delete(jobId);
+      if (this.autoModelQueues.get(appId) === settled) this.autoModelQueues.delete(appId);
+      if (!this.destroying) this.emit();
+    }
+  }
+
+  async onlineWorldModelRequest(request = {}, { signal } = {}) {
     this.assertToolLoggedIn();
     const workId = this.onlineWorldService?.work?.id;
     if (!workId) throw new Error("在线世界尚未绑定伴生作品");
@@ -3572,6 +3677,9 @@ class AccountBackend {
     }
     if (!anchor) throw new Error(`读取账号会话失败：${tokenError?.message || "登录状态尚未就绪"}`);
     const controller = new AbortController();
+    const cancel = () => controller.abort();
+    assertActive(signal);
+    signal?.addEventListener("abort", cancel, { once: true });
     const timeoutId = setTimeout(() => controller.abort(), 180000);
     let platformRequestStarted = false;
     this.appendSessionLog("online-world-model", { event: "request-started", task, newConversation: true });
@@ -3589,7 +3697,9 @@ class AccountBackend {
       });
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}));
-        throw new Error(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+        const error = new Error(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+        if ([401, 402, 403].includes(response.status)) error.retryable = false;
+        throw error;
       }
       if (/json/i.test(String(response.headers.get("content-type") || ""))) {
         const failure = await response.json().catch(() => ({}));
@@ -3599,21 +3709,24 @@ class AccountBackend {
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
       await this.refreshOnlineWorldPoints(task, "after");
       const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, this.account.points);
+      this.recordAutomaticModelUsage(signal, { points });
       this.appendSessionLog("online-world-model", { event: "request-completed", task, conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length, points: points.total, remainingPoints: this.account.points });
       return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
-      const normalized = error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
+      const normalized = signal?.aborted ? abortError() : error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
       if (platformRequestStarted) {
         await this.refreshOnlineWorldPoints(task, "after");
         normalized.modelUsage = {
           points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, this.account.points),
           remainingPoints: this.account.points
         };
+        this.recordAutomaticModelUsage(signal, normalized.modelUsage);
       }
       this.appendSessionLog("online-world-model", { event: "request-failed", task, error: normalized?.message || String(normalized), points: normalized.modelUsage?.points?.total ?? null, remainingPoints: normalized.modelUsage?.remainingPoints ?? null });
       throw normalized;
     } finally {
       clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", cancel);
     }
   }
 
@@ -3835,60 +3948,23 @@ class AccountBackend {
     activeRound.perspectiveSplit = true;
     activeRound.perspectiveOutputs = Object.create(null);
     const members = this.room.members.map(member => ({ ...member }));
-    const attempts = [];
-    const points = { input: 0, output: 0, total: 0 };
-    let pointsIncomplete = false;
-    let model = "";
-    let retryModelPlan = null;
-    const recordAttempt = (attempt, generated, error = null) => {
-      const observed = generated?.points || error?.pluginRun?.points;
-      if (!observed || observed.total == null || !Number.isFinite(Number(observed.total)) || Number(observed.total) < 0) pointsIncomplete = true;
-      for (const field of ["input", "output", "total"]) {
-        const amount = Number(observed?.[field]);
-        if (Number.isFinite(amount) && amount >= 0) points[field] += amount;
-      }
-      model = generated?.model || error?.pluginRun?.model || model;
-      attempts.push({ attempt, status: error ? "error" : "completed", error: error ? error.message || String(error) : null });
-    };
+    this.perspectiveProgress = { attempt: 1, maxAttempts: null };
+    this.emit({ perspectiveAttemptStarted: true });
     try {
-      for (let attempt = 1; attempt <= PERSPECTIVE_MAX_ATTEMPTS; attempt += 1) {
-        let generated = null;
-        let retryModel = null;
-        this.perspectiveProgress = { attempt, maxAttempts: PERSPECTIVE_MAX_ATTEMPTS };
-        this.emit({ perspectiveAttemptStarted: true });
-        try {
-          if (attempt > 1) {
-            retryModelPlan ||= await this.preparePerspectiveRetryModels();
-            retryModel = retryModelPlan.candidates.shift() || null;
-            if (!retryModel) throw new Error("平台当前模型列表中没有未使用的重试型号，无法按要求更换模型");
-            await this.applyPerspectiveRetryModel(retryModel, retryModelPlan.originalModel, attempt);
-          }
-          // Each call owns a fresh hidden window, reloads the work after
-          // clearing its conversation, and destroys the window before retrying.
-          generated = await this.runPlatformAutomationModel(
-            PERSPECTIVE_APP_ID, buildPerspectiveRequest(output, members),
-            `独立视角（第 ${attempt}/${PERSPECTIVE_MAX_ATTEMPTS} 次）`,
-            { timeoutMs: PERSPECTIVE_ATTEMPT_TIMEOUT_MS }
-          );
-          const parsed = parsePerspectiveResponse(generated.output, { members });
-          recordAttempt(attempt, generated);
-          attempts.at(-1).retryModel = retryModel ? { provider: retryModel.provider, model: retryModel.model } : null;
-          activeRound.perspectiveOutputs = parsed.outputs;
-          return { value: parsed.outputs[String(this.account.accountId)] || WITHHELD_OUTPUT, run: {
-            model, points, pointsIncomplete, attemptCount: attempts.length, maxAttempts: PERSPECTIVE_MAX_ATTEMPTS, attempts,
-            memberCount: members.length, segmentCount: parsed.payload.segments.length
-          } };
-        } catch (error) {
-          recordAttempt(attempt, generated, error);
-          if (retryModel) attempts.at(-1).retryModel = { provider: retryModel.provider, model: retryModel.model };
-          this.appendSessionLog("perspective-retry", { event: "attempt-failed", attempt, maxAttempts: PERSPECTIVE_MAX_ATTEMPTS, error: error?.message || String(error), points: { ...points }, pointsIncomplete });
-          if (attempt === PERSPECTIVE_MAX_ATTEMPTS) {
-            const failure = new Error(`独立视角已尝试 ${PERSPECTIVE_MAX_ATTEMPTS} 次仍失败：${error?.message || String(error)}`);
-            failure.pluginRun = { model, points, pointsIncomplete, attemptCount: attempts.length, maxAttempts: PERSPECTIVE_MAX_ATTEMPTS, attempts, withheld: true };
-            throw failure;
-          }
-        }
-      }
+      const generated = await this.runPlatformAutomationModel(
+        PERSPECTIVE_APP_ID, buildPerspectiveRequest(output, members), "独立视角",
+        { timeoutMs: PERSPECTIVE_ATTEMPT_TIMEOUT_MS, validate: result => parsePerspectiveResponse(result.output, { members }) }
+      );
+      const parsed = parsePerspectiveResponse(generated.output, { members });
+      activeRound.perspectiveOutputs = parsed.outputs;
+      return { value: parsed.outputs[String(this.account.accountId)] || WITHHELD_OUTPUT, run: {
+        model: generated.model, points: generated.points, pointsIncomplete: generated.pointsIncomplete,
+        attemptCount: generated.attemptCount, maxAttempts: null, attempts: generated.attempts,
+        memberCount: members.length, segmentCount: parsed.payload.segments.length
+      } };
+    } catch (error) {
+      error.pluginRun = { ...(error.pluginRun || {}), withheld: true };
+      throw error;
     } finally {
       this.perspectiveProgress = null;
       this.emit({ perspectiveAttemptsFinished: true });
@@ -4054,7 +4130,9 @@ class AccountBackend {
       previousOutputCount: previousOutputs.length,
       players
     });
-    const generated = await this.runPlatformAutomationModel(EFFECT_JUDGE_APP_ID, request, "效果判定插件");
+    const generated = await this.runPlatformAutomationModel(EFFECT_JUDGE_APP_ID, request, "效果判定插件", {
+      validate: result => parseEffectJudgeResponse(result.output, { settings, players })
+    });
     this.appendSessionLog("plugin-pipeline", {
       event: "effect-judge-response-read",
       round: activeRound.number,
@@ -4230,7 +4308,42 @@ class AccountBackend {
     return samples;
   }
 
-  async runPlatformAutomationModel(appId, modelInput, label = "平台插件", { timeoutMs = 0 } = {}) {
+  async runPlatformAutomationModel(appId, modelInput, label = "平台插件", { timeoutMs = 180000, validate = null } = {}) {
+    const totalPoints = { input: 0, output: 0, total: 0 };
+    let pointsIncomplete = false;
+    const attempts = [];
+    let attemptCount = 0;
+    let model = "";
+    try {
+      return await this.withAutoModel(appId, label, async ({ signal, attempt }) => {
+        attemptCount = attempt;
+        let result;
+        let failure;
+        try {
+          result = await this.runPlatformAutomationAttempt(appId, modelInput, label, { timeoutMs: timeoutMs || 180000, signal });
+          model = result.model || model;
+          if (validate) await validate(result);
+        } catch (error) { failure = error; }
+        const observed = result?.points || failure?.modelUsage?.points;
+        for (const field of ["input", "output", "total"]) {
+          if (observed?.[field] == null) pointsIncomplete = true;
+          else totalPoints[field] += Number(observed[field]) || 0;
+        }
+        attempts.push({ attempt, status: failure ? "error" : "completed", error: failure?.message || null });
+        if (attempts.length > 30) attempts.shift();
+        this.recordAutomaticModelUsage(signal, { points: observed });
+        this.appendSessionLog("auto-model-usage", { label, attempt, points: observed || null, model });
+        if (failure) throw failure;
+        return { ...result, points: totalPoints, pointsIncomplete, attemptCount, attempts };
+      });
+    } catch (error) {
+      error.pluginRun = { model, points: totalPoints, pointsIncomplete, attemptCount, attempts, maxAttempts: null };
+      throw error;
+    }
+  }
+
+  async runPlatformAutomationAttempt(appId, modelInput, label = "平台插件", { timeoutMs = 180000, signal } = {}) {
+    assertActive(signal);
     const automationWindow = new BrowserWindow({
       show: false,
       frame: false,
@@ -4250,6 +4363,8 @@ class AccountBackend {
       }
     });
     const adapterUrl = `${this.origin}/zh/explore/installed/${appId}`;
+    const cancel = () => { if (!automationWindow.isDestroyed()) automationWindow.destroy(); };
+    signal?.addEventListener("abort", cancel, { once: true });
     const perform = async () => {
       await this.loadSurfaceUrl(automationWindow, adapterUrl, label, 25000);
       const reset = await automationWindow.webContents.executeJavaScript(`(async () => {
@@ -4411,12 +4526,13 @@ class AccountBackend {
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
       if (!automationWindow.isDestroyed()) automationWindow.destroy();
     }
   }
 
   async runPrefixAdapterModel(modelInput) {
-    return this.runPlatformAutomationModel(PREFIX_ADAPTER_APP_ID, modelInput, "联机前置词适配器");
+    return this.runPlatformAutomationModel(PREFIX_ADAPTER_APP_ID, modelInput, "联机前置词适配器", { validate: result => parsePrefixAdapterSuggestion(result.output) });
   }
 
   async adaptCurrentWorkPrefix() {
@@ -4963,6 +5079,7 @@ class AccountBackend {
   }
 
   async setPlatformModel(value = {}, { broadcast = true, internal = false } = {}) {
+    if (!internal && this.autoModelJobs?.size) throw new Error("模型请求进行中，请先取消或等待完成");
     if (!this.loggedIn || !this.work?.suffix) throw new Error("请先登录并选择作品");
     if (!internal && this.room?.role === "guest") throw new Error("只有房主可以更改房间展示的模型");
     if (!internal && this.room?.round && ["processing-input", "generating", "processing-output", "syncing"].includes(this.room.round.status)) throw new Error("本轮处理、生成或同步期间不能更换模型");
@@ -5375,6 +5492,7 @@ class AccountBackend {
   }
 
   clearRoomSession(extra = { roomLeft: true }) {
+    this.cancelAutoModels("platform");
     this.room = null;
     this.roomPollNotBefore = 0;
     this.roomPollIdleCount = 0;
@@ -6013,6 +6131,7 @@ class AccountBackend {
       if (!(await this.advanceHostRoundAfterResultAcks())) this.emit({ roundWaitingForGuests: true });
     } catch (error) {
       activeRound.error = error?.message || String(error);
+      if (this.room?.round !== activeRound) return;
       activeRound.status = "collecting";
       activeRound.submissions = {};
       await this.broadcastRoomPacket("turn-state", {
@@ -6048,12 +6167,28 @@ class AccountBackend {
   }
 
   async sendModelInputAndCapture(modelInput) {
+    const appId = this.currentWorkAppId();
+    return this.withAutoModel(appId, "联机回合", ({ signal }) => this.sendModelInputAttempt(modelInput, signal), {
+      conversationId: this.room?.save?.conversationId || this.conversation.activeId,
+      reload: async () => {
+        await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "自动模型切换", 20000);
+        await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
+        await this.applyGameIsolation(false);
+      }
+    });
+  }
+
+  async sendModelInputAttempt(modelInput, signal) {
     if (!this.work?.url) throw new Error("房主尚未载入游玩作品");
     const gameUrl = this.workGameUrl();
     if (!this.isSameWorkPage(this.gameSurface.webContents.getURL(), gameUrl)) await this.gameSurface.webContents.loadURL(gameUrl);
     // Keep an already-isolated conversation attached. DOM automation can use
     // hidden platform controls directly, while the user sees the submitted row
     // and streaming answer without a full-page flash or a detach/reattach gap.
+    const cancel = () => { if (!this.gameSurface.webContents.isDestroyed()) this.gameSurface.webContents.reload(); };
+    assertActive(signal);
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
     const result = await this.gameSurface.webContents.executeJavaScript(`(async () => {
       const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
       for (let attempt = 0; attempt < 80 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(250);
@@ -6104,9 +6239,27 @@ class AccountBackend {
     })()`, true);
     if (!result?.output) throw new Error("平台模型已结束，但没有取得输出内容");
     return result;
+    } finally { signal?.removeEventListener("abort", cancel); }
   }
 
   async performLatestPlatformMessageOperation(action, value = "") {
+    if (action !== "refresh") return this.performLatestPlatformMessageAttempt(action, value);
+    return this.withAutoModel(this.currentWorkAppId(), "重新生成回复", async ({ signal }) => {
+      const cancel = () => { if (!this.gameSurface.webContents.isDestroyed()) this.gameSurface.webContents.reload(); };
+      assertActive(signal);
+      signal.addEventListener("abort", cancel, { once: true });
+      try { return await this.performLatestPlatformMessageAttempt(action, value); }
+      finally { signal.removeEventListener("abort", cancel); }
+    }, {
+      conversationId: this.room?.save?.conversationId || this.conversation.activeId,
+      reload: async () => {
+        await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "自动模型切换", 20000);
+        await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
+      }
+    });
+  }
+
+  async performLatestPlatformMessageAttempt(action, value = "") {
     if (!this.work?.url) throw new Error("尚未载入作品对话页面");
     const operation = String(action || "");
     if (!["refresh", "edit", "delete"].includes(operation)) throw new Error("不支持的记录操作");
@@ -8978,6 +9131,7 @@ class AccountBackend {
   destroy() {
     if (this.destroying) return;
     this.destroying = true;
+    this.cancelAutoModels();
     this.onlineWorldService.close();
     clearInterval(this.statusTimer);
     clearInterval(this.accountTimer);
@@ -9152,6 +9306,7 @@ handleLocalIpc("backend:update-plugin-settings", (_event, pluginId, settings) =>
 handleLocalIpc("backend:refresh-work-settings", () => backend.refreshWorkSettings());
 handleLocalIpc("backend:update-work-settings", (_event, settings) => backend.updateWorkSettings(settings || {}));
 handleLocalIpc("backend:refresh-models", () => backend.refreshPlatformModels());
+handleLocalIpc("backend:cancel-model-requests", () => backend.cancelAutoModels());
 handleLocalIpc("backend:set-model", (_event, model) => backend.setPlatformModel(model || {}));
 handleLocalIpc("backend:message-operation", (_event, action, value) => backend.runHostMessageOperation(action, value));
 handleLocalIpc("backend:inject-prototype-tool-card", () => backend.injectPrototypeToolCard());

@@ -444,6 +444,8 @@ class OnlineWorldService {
     this.requestConsole = options.requestConsole;
     this.requestGo = options.requestGo;
     this.requestModel = options.requestModel;
+    this.runModelTask = options.runModelTask;
+    this.onClose = options.onClose;
     this.getAccount = options.getAccount;
     this.getIdentity = options.getIdentity;
     this.getOrigin = options.getOrigin;
@@ -779,6 +781,7 @@ class OnlineWorldService {
   }
 
   close() {
+    this.onClose?.();
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     this.pendingJoinPreview = null;
@@ -1717,29 +1720,39 @@ class OnlineWorldService {
   }
 
   async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null } = {}) {
+    const oneAttempt = async ({ attempt = 1, signal } = {}) => {
+      let usageRecorded = false;
+      try {
+        const freshRequest = { ...request };
+        delete freshRequest.conversationId;
+        delete freshRequest.conversation_id;
+        const answer = await this.requestModel(freshRequest, { signal });
+        this.recordModelUsage({ request: freshRequest, label, attempt, result: answer, status: "completed" });
+        usageRecorded = true;
+        const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
+        if (!conversationId) throw new Error("平台没有返回新会话编号");
+        if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
+        this.modelConversationIds.add(conversationId);
+        const parsed = parseJsonAnswer(answer?.answer ?? answer);
+        const issue = typeof validate === "function" ? validate(parsed) : null;
+        if (issue) throw new Error(String(issue));
+        return parsed;
+      } catch (error) {
+        if (!usageRecorded && error?.modelUsage) this.recordModelUsage({ request, label, attempt, error, status: "failed" });
+        this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, error: error?.message || String(error) });
+        throw error;
+      }
+    };
+    if (this.runModelTask) return this.runModelTask(label, oneAttempt);
+    // Standalone transport fixtures may opt into a bounded retry policy. The
+    // desktop injects the shared, cancellable unlimited model router above.
     const run = async () => {
       let lastError = null;
       for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
-        let usageRecorded = false;
         try {
-          const freshRequest = { ...request };
-          delete freshRequest.conversationId;
-          delete freshRequest.conversation_id;
-          const answer = await this.requestModel(freshRequest);
-          this.recordModelUsage({ request: freshRequest, label, attempt, result: answer, status: "completed" });
-          usageRecorded = true;
-          const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
-          if (!conversationId) throw new Error("平台没有返回新会话编号");
-          if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
-          this.modelConversationIds.add(conversationId);
-          const parsed = parseJsonAnswer(answer?.answer ?? answer);
-          const issue = typeof validate === "function" ? validate(parsed) : null;
-          if (issue) throw new Error(String(issue));
-          return parsed;
+          return await oneAttempt({ attempt });
         } catch (error) {
-          if (!usageRecorded && error?.modelUsage) this.recordModelUsage({ request, label, attempt, error, status: "failed" });
           lastError = error;
-          this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, attempts, error: error?.message || String(error) });
           if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
         }
       }

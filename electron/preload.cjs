@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   refreshWorkSettings: () => ipcRenderer.invoke("backend:refresh-work-settings"),
   updateWorkSettings: settings => ipcRenderer.invoke("backend:update-work-settings", settings),
   refreshModels: () => ipcRenderer.invoke("backend:refresh-models"),
+  cancelModelRequests: () => ipcRenderer.invoke("backend:cancel-model-requests"),
   setModel: model => ipcRenderer.invoke("backend:set-model", model),
   runMessageOperation: (action, value) => ipcRenderer.invoke("backend:message-operation", action, value),
   injectPrototypeToolCard: () => ipcRenderer.invoke("backend:inject-prototype-tool-card"),

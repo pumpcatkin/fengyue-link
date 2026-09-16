@@ -313,11 +313,14 @@ function readbackChecks(exported, desired) {
   };
 }
 
-async function requestStructuredModelProbe(window, workId, request, validate) {
+async function requestStructuredModelProbe(window, workId, request, validate, signal) {
   const token = String(await window.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
   const keyword = String(request.keyword || `[[FYOW:TASK:${request.task}:v1]]`);
   const query = `${keyword}\n${JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} })}`;
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) throw new Error("模型探针已取消");
+  signal?.addEventListener("abort", cancel, { once: true });
   const timeout = setTimeout(() => controller.abort(), 180_000);
   try {
     const response = await window.webContents.session.fetch(new URL("/go/api/apps/chat-messages", ORIGIN).href, {
@@ -346,6 +349,56 @@ async function requestStructuredModelProbe(window, workId, request, validate) {
     return { parsed, conversationId: result.conversationId, finishEvent: result.finishEvent, answerCharacters: result.answer.length, usage: result.usage, points: result.points };
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
+async function runAutomaticModelProbe(window, workId) {
+  const vm = require("node:vm");
+  const router = require("../electron/auto-model-router.cjs");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
+    ...router, crypto, AbortController, setInterval, clearInterval
+  });
+  const backend = Object.create(Backend.prototype);
+  const events = [];
+  Object.assign(backend, {
+    loggedIn: true, authSessionRevision: 1, work: { id: workId },
+    autoModelJobs: new Map(), autoModelQueues: new Map(), emit: () => {},
+    appendSessionLog: (kind, detail) => { if (kind === "auto-model") { events.push(detail); process.stdout.write(`${JSON.stringify({ stage: detail.stage, attempt: detail.attempt, model: detail.model })}\n`); } },
+    platformGoApi: async (endpoint, options) => {
+      const response = await api(window, `/go/api${endpoint}`, options);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return { data: unwrap(response) };
+    }
+  });
+  const previous = unwrap(await api(window, `/go/api/apps/config?app_id=${encodeURIComponent(workId)}`));
+  if (!previous?.model) throw new Error("探针未读到原模型，停止测试");
+  const world = createWorld({ seed: "auto-model-probe", seasonId: "probe", startedAt: Date.now(), authorityAccountId: "probe" });
+  const player = { accountId: "probe", displayName: "测试主公", position: { x: 1, y: 1 } };
+  const general = createFallbackGeneral({ id: "probe-general", name: "青禾", gender: "female", holderAccountId: "probe", holderName: "测试主公", setting: "善于守城，重视约定的成年将领。", year: 1 });
+  world.players.probe = player;
+  world.privatePlayers.probe = { orientation: "women" };
+  world.generals[general.id] = general;
+  const request = buildGeneralDialogueRequest(world, general, player, "你好，请简短介绍你擅长的守城策略。", Date.now());
+  const before = await readPlatformPointBalance(window);
+  const timeout = setTimeout(() => backend.cancelAutoModels(), 240000);
+  try {
+    const result = await backend.withAutoModel(workId, "自动选模连通性探针", async ({ attempt, signal }) => {
+      // The first failure is injected locally BEFORE generation: no paid request.
+      if (attempt === 1) throw new Error("本地注入切换测试，不发送模型请求");
+      return requestStructuredModelProbe(window, workId, request, value => dialogueQualityIssue(value, { captive: false, allowedRecipientKeys: [] }), signal);
+    });
+    const after = await readPlatformPointBalance(window);
+    return { ok: true, injectedFailure: true, attempts: events.filter(item => item.stage === "generating").length,
+      finishEvent: result.finishEvent, conversationCreated: Boolean(result.conversationId), answerCharacters: result.answerCharacters,
+      points: result.points?.total ?? before.points - after.points, model: events.filter(item => item.stage === "generating").at(-1)?.model };
+  } finally {
+    clearTimeout(timeout);
+    const restored = await api(window, "/go/api/apps/config", { method: "POST", body: { app_id: workId, model: previous.model } });
+    if (!restored.ok) throw new Error("探针已完成，原模型配置恢复失败");
+    const verified = unwrap(await api(window, `/go/api/apps/config?app_id=${encodeURIComponent(workId)}`));
+    if (verified?.model?.provider !== previous.model.provider || verified?.model?.name !== previous.model.name) throw new Error("原模型配置恢复回读不一致");
   }
 }
 
@@ -530,6 +583,19 @@ async function main() {
   });
   try {
     await login(window, loadCredentials());
+    if (process.env.FYOW_PROBE_AUTO_MODEL === "1") {
+      process.stdout.write(`${JSON.stringify(await runAutomaticModelProbe(window, workId), null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_INSPECT_MODELS === "1") {
+      const response = await api(window, "/go/api/workspaces/model-list");
+      if (!response.ok) throw new Error(`读取模型列表失败：HTTP ${response.status}`);
+      const catalog = unwrap(response);
+      const { normalizeCatalog, rankModels } = require("../electron/auto-model-router.cjs");
+      const models = rankModels(normalizeCatalog(catalog));
+      process.stdout.write(`${JSON.stringify({ count: models.length, tiers: [0, 1, 2].map(tier => ({ tier, count: models.filter(item => item.priority === tier).length })), first: models.slice(0, 15).map(({ label, provider, price, successRate, latency, priority }) => ({ label, provider, price, successRate, latency, priority })) }, null, 2)}\n`);
+      return;
+    }
     await load(window, `/zh/app/${encodeURIComponent(workId)}/configuration`);
     if (process.env.FYOW_INSPECT_AUTHOR === "1") {
       const [installedResponse, profileResponse] = await Promise.all([

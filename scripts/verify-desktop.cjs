@@ -74,6 +74,17 @@ if (process.type === "renderer") {
       fs.writeFileSync(path.join(outputDir, "official-notice.png"), (await window.webContents.capturePage()).toPNG());
       await evaluate(`document.querySelector('#official-notice-action').click()`);
       assert.equal(await evaluate(`document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
+      window.webContents.send("qa:onState", { ...state, modelOperations: [{ id: "model-qa", label: "将领交互", stage: "waiting", model: "deepseek-v4.1-flash", attempt: 8, retryAfterMs: 2000, points: 12 }] });
+      await settle();
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#model-loading')).display`), "flex");
+      assert.equal(await evaluate(`document.querySelector('#model-loading-detail').textContent.includes('第 8 次尝试')`), true);
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('.model-loading-logo')).animationName`), "model-loading-spin");
+      fs.writeFileSync(path.join(outputDir, "auto-model-loading.png"), (await window.webContents.capturePage()).toPNG());
+      await evaluate(`document.querySelector('#model-loading-cancel').click()`);
+      assert(calls.some(call => call.name === "cancelModelRequests"));
+      window.webContents.send("qa:onState", state);
+      await settle();
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#model-loading')).display`), "none");
       assert.equal(await evaluate(`document.querySelector('#author-name').textContent`), "八爪毛米");
       assert.equal(await evaluate(`document.querySelector('[data-author-link="github"]').disabled`), false);
       assert.equal(await evaluate(`document.querySelector('[data-author-link="homepage"]').disabled`), true);

@@ -27,6 +27,7 @@ function createModelRequestPayload({ workId, query }) {
 }
 
 function finitePointValue(value) {
+  if (value == null || String(value).trim() === "") return null;
   if (typeof value === "string") value = value.replace(/,/g, "").trim();
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -132,7 +133,8 @@ async function consumeModelEventStream(body) {
       }
     }
   } finally {
-    if (finished) await reader.cancel().catch(() => {});
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
   if (!finished) throw modelStreamError("模型响应在完成标记前提前结束");
   if (!answer.trim()) throw modelStreamError("模型完成后没有返回正文");

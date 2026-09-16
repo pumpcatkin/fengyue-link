@@ -68,3 +68,9 @@ select{width:100%;border:1px solid var(--line);border-radius:9px;background:#0d1
 .member-appearance>p{white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0}
 #conversation-rename-form{display:grid;gap:8px}
 .plugin-compatibility-note{display:block;padding:2px;color:var(--muted);font-size:10px;line-height:1.6}
+.model-loading{position:fixed;left:20px;bottom:36px;z-index:12000;display:flex;align-items:center;gap:12px;max-width:min(540px,calc(100vw - 40px));padding:12px 16px;border:1px solid #8fb7a5;border-radius:14px;background:#f4f4e9;color:#263d36;box-shadow:0 4px 22px #0003;pointer-events:auto}
+.model-loading.hidden{display:none}.model-loading>div{display:grid;gap:4px;min-width:0}.model-loading strong{font-size:14px}.model-loading small{font-size:12px;overflow-wrap:anywhere}.model-loading button{font-size:13px;color:#263d36;background:#dde8dc;border:1px solid #98ad9e;padding:7px 11px}
+.model-loading-logo{flex:0 0 32px;display:grid;place-items:center;width:32px;height:32px;border:3px solid #b7ccbe;border-top-color:#376f56;border-radius:50%;font-size:20px;animation:model-loading-spin 1.25s linear infinite}
+@keyframes model-loading-spin{to{transform:rotate(360deg)}}
+:root .model-loading-logo{border:3px solid #b7ccbe !important;border-top-color:#376f56 !important}
+@media(prefers-reduced-motion:reduce){.model-loading-logo{animation:none}}

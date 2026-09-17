@@ -16,15 +16,17 @@ https://staging.aiero.cc/zh/app/b27218e6-80f9-4c0d-91c7-4b8f87d47be8/configurati
 npm run game:bundle
 ```
 
-把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。0.14.31 / 卡版本 18 的信封为 41,991 个字符，解码后 HTML 130,450 字节，gzip 压缩包 31,430 字节，程序 SHA-256：
+把 `release-cache/online-world/grid-conquest-description-envelope.txt` 的完整内容放入“详细介绍”。程序由 HTML、CSS、JavaScript 和 292 个 ACG 人物词条合成单文件，不读取任何外部游戏资源。0.15.0 / 卡版本 19 的信封为 50,018 个字符，解码后 HTML 156,495 字节，gzip 压缩包 37,450 字节，程序 SHA-256：
 
 ```text
-4abf9c52759e8b3bb922c1001cf60e3ccebc5ae7ecfa7aeb0a55c23b39280ec5
+2c653f4876ab80ffbc9b1d43321a9a13ceab3969e0e304391d1d3d01b5f492f5
 ```
 
 工具校验信封摘要、`gameId`、宿主 API 和作者签名控制记录后，在 `iframe sandbox="allow-scripts"` 与强制断网 CSP 中运行。
 
-0.14.31 已把程序保存到上述固定伴生作品并回读校验，同时更新该赛季的作者签名程序摘要；名称、简介、前置词、提示词、后置词和世界书全部保持原值。今后只更新前端时，用 `FYOW_PROGRAM_ONLY=1` 与 `FYOW_ACTIVATE_PROGRAM=1` 执行 `scripts/configure-grid-companion-work.cjs`，并核对 `worldBooksPreserved` 等回读结果。
+本次已把程序保存到上述固定伴生作品并回读校验，同时更新该赛季的作者签名程序摘要；名称、简介、前置词、提示词、后置词和世界书全部保持原值。今后只更新前端时，用 `FYOW_PROGRAM_ONLY=1` 与 `FYOW_ACTIVATE_PROGRAM=1` 执行 `scripts/configure-grid-companion-work.cjs`，并核对 `worldBooksPreserved` 等回读结果。
+
+0.15.0 的界面采用左通讯、中地图、右行动与地图下方可折叠区域栏。世界聊天只显示最新 50 条，按平台主评论时间排序；对话请求新增将领战力和天赋、主公战力、世界驻将平均战力以及完整历任主公链，仍沿用五个任务世界书与每次独立新会话。天赋和修炼的确定性规则由宿主结算，模型不决定数值结果。服主“散落天材地宝”支持普通数量及两种红色数量；重投只替换未领取地点且排除已占领格，不清空玩家库存。详见 `grid-talents-catalog.md` 和 `grid-balance-simulation.md`。
 
 地图任务覆盖层只使用当前玩家本地队列，不增加评论同步内容。选择目标显示路线预览，出发后连线采用任务记录的起点和终点；悬停实际路线显示剩余时间。采矿十字镐固定在格子左上角，练兵双剑固定在右上角，分别显示当前轮预计金币和按驻军余量估算的新增士兵。计时使用校准后的宿主时间，到期等待真实结算；缩放/右键拖动不会修改任务或收益。
 

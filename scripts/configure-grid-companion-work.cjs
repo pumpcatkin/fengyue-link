@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
 const { createBundledGridCard, configurationDigest, normalizeConfiguration } = require("../electron/online-world-card.cjs");
-const { FYOW_SCHEMAS, encodeCommentRecord, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
+const { FYOW_SCHEMAS, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
 const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder } = require("../electron/online-world-service.cjs");
@@ -509,9 +509,59 @@ async function readAllComments(window, workId) {
       const id = String(item?.id || item?.comment_id || "");
       if (id && !seen.has(id)) { seen.add(id); comments.push(item); }
     }
-    if (pageItems.length < 50) break;
+    if ((pageItems.rootCount ?? pageItems.length) < 50) break;
   }
-  return comments;
+  const reader = platformCommentService(window, workId, "");
+  return reader.hydrateCommentReplies(comments);
+}
+
+function platformCommentService(window, workId, accountId) {
+  const service = new OnlineWorldService({
+    requestConsole: async (endpoint, options = {}) => {
+      const response = await api(window, `/console/api${endpoint}`, options);
+      if (!response.ok || (response.payload?.code && response.payload.code !== 100000)) throw new Error(`评论接口失败：HTTP ${response.status}`);
+      return unwrap(response);
+    },
+    getAccount: () => ({ accountId }), cacheFile: null
+  });
+  service.work = { id: workId, authorAccountId: accountId };
+  return service;
+}
+
+async function verifySegmentedComments(window, workId) {
+  const profile = unwrap(await api(window, "/go/api/account/profile"));
+  const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+  if (!accountId) throw new Error("缺少测试账号");
+  const service = platformCommentService(window, workId, accountId);
+  const record = { schema: FYOW_SCHEMAS.generalDefinition, id: crypto.randomUUID(), gameId: "fyow.protocol-probe", text: `分段回读探针:${crypto.randomBytes(3600).toString("hex")}` };
+  const sources = [];
+  try {
+    sources.push(...await service.postRecord(record));
+    const root = sources[0];
+    let replies = (await readAllComments(window, workId)).filter(source => decodeCommentChunk(source.content)?.id === record.id);
+    let assembled = assembleCommentRecords([root, ...replies]);
+    for (let attempt = 0; attempt < 3 && !assembled.records.some(item => item.record.id === record.id); attempt += 1) {
+      await sleep(1000);
+      replies = (await readAllComments(window, workId)).filter(source => decodeCommentChunk(source.content)?.id === record.id);
+      assembled = assembleCommentRecords([root, ...replies]);
+    }
+    const result = assembled.records.find(item => item.record.id === record.id);
+    if (!result || result.record.text !== record.text) throw new Error(`原生回复分段回读不一致：${JSON.stringify({
+      chunks: sources.length,
+      sent: sources.map(source => ({ id: source.id, author: source.account_id, parent: source.parent_id, chunk: decodeCommentChunk(source.content)?.part, keys: Object.keys(source) })),
+      read: replies.map(source => ({ id: source.id, author: source.account_id, parent: source.parent_id, root: source._fyowRootId, chunk: decodeCommentChunk(source.content)?.part, keys: Object.keys(source) })),
+      incomplete: assembled.incomplete.map(({ id, received, total }) => ({ id, received, total })), invalid: assembled.invalid,
+      branchResponse: await api(window, `/console/api/comments/branches/${encodeURIComponent(root.id)}`),
+      pagedBranchResponse: await api(window, `/console/api/comments/branches/${encodeURIComponent(root.id)}?page=1&limit=50`)
+    })}`);
+    if (!sources.every(source => source.content.length <= 980)) throw new Error("分段超出980字符");
+    return { ok: true, chunks: sources.length, largestChunk: Math.max(...sources.map(source => source.content.length)), nativeReplies: replies.filter(source => decodeCommentChunk(source.content)?.id === record.id && decodeCommentChunk(source.content)?.part > 1).length, reconstructedCharacters: result.record.text.length };
+  } finally {
+    for (const source of [...sources].reverse()) {
+      const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1/${encodeURIComponent(source.id)}`, { method: "DELETE" });
+      if (!response.ok) process.stderr.write("探针评论清理失败，请检查测试作品。\n");
+    }
+  }
 }
 
 async function activateSavedProgram(window, card, workId) {
@@ -566,10 +616,7 @@ async function activateSavedProgram(window, card, workId) {
   const unsigned = { ...current, id: crypto.randomUUID(), programHash: card.program.digest, updatedAt: Date.now() };
   delete unsigned.signature;
   const updated = signRecord(unsigned, identity.signingPrivateKey);
-  for (const content of encodeCommentRecord(updated)) {
-    const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1`, { method: "POST", body: { is_anonymous: false, biz_type: 1, content } });
-    if (!response.ok) throw new Error(`发布程序控制记录失败：HTTP ${response.status}`);
-  }
+  await platformCommentService(window, workId, signedInAccountId).postRecord(updated);
   let verified = false;
   let verificationDiagnostic = null;
   for (let attempt = 0; attempt < 10 && !verified; attempt += 1) {
@@ -596,6 +643,72 @@ async function main() {
   });
   try {
     await login(window, loadCredentials());
+    if (process.env.FYOW_PROBE_REPLY === "1") {
+      const profile = unwrap(await api(window, "/go/api/account/profile"));
+      const accountId = String(profile?.id || "");
+      const target = `/console/api/comments/${workId}/1`;
+      const sent = [];
+      try {
+        const root = unwrap(await api(window, target, { method: "POST", body: { content: `FYOW分支回读测试 ${crypto.randomUUID()}`, biz_type: 1, is_anonymous: false } }));
+        const rootComment = extractCommentItems(root)[0];
+        if (!rootComment) throw new Error("没有根评论");
+        sent.push(rootComment);
+        const bodies = [
+          { parent_id: rootComment.id, to_account_id: accountId },
+          { parent_id: rootComment.id },
+          { parent_id: rootComment.id, to_account_id: accountId, to_comment_id: rootComment.id }
+        ];
+        for (let index = 0; index < bodies.length; index++) {
+          const response = await api(window, target, { method: "POST", body: { ...bodies[index], content: `FYOW短回复测试-${index}`, biz_type: 1, is_anonymous: false } });
+          sent.push(...extractCommentItems(unwrap(response)));
+        }
+        await sleep(2000);
+        const listing = [];
+        for (let page = 1; page < 40; page++) {
+          const response = await api(window, `${target}?page=${page}&limit=100&order=desc&filter_type=all`);
+          const items = extractCommentItems(unwrap(response));
+          listing.push(...items.filter(item => sent.some(source => source.id === item.id)));
+          if (items.length < 100) break;
+        }
+        const result = {
+          root: rootComment.id,
+          sent: sent.map(item => ({ id: item.id, content: item.content, keys: Object.keys(item) })),
+          branch: await api(window, `/console/api/comments/branches/${rootComment.id}?_t=${Date.now()}`),
+          rootDetail: listing
+        };
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      } finally {
+        for (const item of sent.reverse()) await api(window, `${target}/${item.id}`, { method: "DELETE" });
+      }
+      return;
+    }
+    if (process.env.FYOW_INSPECT_COMMENT_CLIENT === "1") {
+      await load(window, `/zh/explore/installed/${workId}`);
+      await sleep(2000);
+      const result = await window.webContents.executeJavaScript(`(async () => {
+        const hits = [];
+        for (const url of [...new Set([...document.scripts].map(script => script.src).filter(Boolean))]) {
+          const source = await fetch(url).then(response => response.text()).catch(() => '');
+          if (!source.includes('"sendAppComment"')) continue;
+          for (const needle of ['O=','function O(','bodyStringify','645141,e=>']) {
+            let from = 0;
+            for (let count = 0; count < 5; count++) {
+              const index = source.indexOf(needle,from);
+              if(index < 0) break;
+              hits.push({url,needle,snippet:source.slice(Math.max(0,index-150),index+2500)});
+              from=index+needle.length;
+            }
+          }
+        }
+        return hits;
+      })()`, true);
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_PROBE_SEGMENTS === "1") {
+      process.stdout.write(`${JSON.stringify(await verifySegmentedComments(window, workId), null, 2)}\n`);
+      return;
+    }
     if (process.env.FYOW_PROBE_AUTO_MODEL === "1") {
       process.stdout.write(`${JSON.stringify(await runAutomaticModelProbe(window, workId), null, 2)}\n`);
       return;

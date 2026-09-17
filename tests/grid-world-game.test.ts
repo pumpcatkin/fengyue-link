@@ -112,7 +112,7 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(first.state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/只能同时进行一项练兵/);
   });
 
-  it("uses Cookie-style exponential costs for player and undeployed-general power training", () => {
+  it("uses Cookie-style exponential player costs and closes the legacy unlimited-general training entry", () => {
     const now = 1_000_000;
     let state = joined(now);
     const firstCost = game.powerTrainingCost(300, 0, 1);
@@ -128,11 +128,7 @@ describe("grid conquest rules", () => {
 
     state.players.a.gold = 100000;
     state = game.applyIntent(state, { type: "grant-general", generalId: "trainee", name: "青禾", gender: "female", setting: "善守城。", power: 500, discoveryId: "trainee", idempotencyKey: "grant-trainee" }, { actorAccountId: "a", authorityAccountId: "a", now: now + 1 }).state;
-    const generalTraining = game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "trainee", levels: 1, idempotencyKey: "general-power" }, { actorAccountId: "a", now: now + 2 });
-    expect(() => game.applyIntent(generalTraining.state, { type: "deploy-general", generalId: "trainee", idempotencyKey: "deploy-training" }, { actorAccountId: "a", now: now + 3 })).toThrow(/正在修炼/);
-    const completed = game.settleWorld(generalTraining.state, generalTraining.result.finishAt).state;
-    expect(completed.generals.trainee.trainingLevel).toBe(1);
-    expect(completed.generals.trainee.power).toBeGreaterThan(500);
+    expect(() => game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "trainee", levels: 1, idempotencyKey: "general-power" }, { actorAccountId: "a", now: now + 2 })).toThrow(/五次/);
   });
 
   it("does not allow a deployed general to start power training", () => {
@@ -140,7 +136,8 @@ describe("grid conquest rules", () => {
     let state = joined(now);
     state = game.applyIntent(state, { type: "grant-general", generalId: "guard", name: "守将", gender: "female", setting: "守土有方。", power: 500, discoveryId: "guard", idempotencyKey: "grant-guard" }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
     state = game.applyIntent(state, { type: "deploy-general", generalId: "guard", idempotencyKey: "deploy-guard" }, { actorAccountId: "a", now: now + 1 }).state;
-    expect(() => game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "guard", levels: 1, idempotencyKey: "train-deployed" }, { actorAccountId: "a", now: now + 2 })).toThrow(/未部署/);
+    expect(() => game.applyIntent(state, { type: "power-train", targetType: "general", targetId: "guard", levels: 1, idempotencyKey: "train-deployed" }, { actorAccountId: "a", now: now + 2 })).toThrow(/五次/);
+    expect(() => game.applyIntent(state, { type: "cultivate-general", generalId: "guard", goldInvestment: 5000, materialId: "white", idempotencyKey: "cultivate-deployed" }, { actorAccountId: "a", now: now + 6 * game.HOUR })).toThrow(/部署/);
   });
 
   it("migrates legacy general settings into the separated profile without minimum-value measurements", () => {

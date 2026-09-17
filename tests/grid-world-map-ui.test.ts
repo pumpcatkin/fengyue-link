@@ -14,6 +14,8 @@ function harness() {
   };
   const tooltip = {
     textContent: "", style: {} as Record<string, string>, offsetWidth: 220, offsetHeight: 110, hidden: true,
+    children: [] as any[],
+    append(child: any) { this.children.push(child); },
     classList: { add() { tooltip.hidden = true; }, remove() { tooltip.hidden = false; } }
   };
   const ctx: any = {
@@ -26,7 +28,9 @@ function harness() {
       offsetWidth: 648, clientWidth: 640, clientHeight: 640, clientLeft: 4, clientTop: 4,
       getBoundingClientRect: () => ({ left: 100, top: 50, width: 648, height: 648 })
     },
-    document: { querySelector: () => tooltip }, window: { innerWidth: 1440, innerHeight: 940 }
+    marchQuoteCache: null,
+    document: { querySelector: (selector: string) => selector === "#march-soldiers" ? { value: "100" } : tooltip, querySelectorAll: () => [], createElement: () => ({}) },
+    window: { innerWidth: 1440, innerHeight: 940 }
   };
   runInNewContext(helpers, ctx);
   ctx.mapTaskOverlays = ctx.buildMapTaskOverlays();
@@ -37,14 +41,14 @@ describe("grid world map task overlays", () => {
   it("previews the same horizontal-then-vertical route and real-time duration as the game rules", () => {
     const { ctx } = harness();
     const route = ctx.mapTaskOverlays[0];
-    expect(route).toMatchObject({ type: "march", preview: true, durationMs: 360000 });
+    expect(route).toMatchObject({ type: "march", preview: true, durationMs: 180000, cost: 66 });
     expect(route.points).toEqual([{ x: 4.5, y: 7.5 }, { x: 8.5, y: 7.5 }, { x: 8.5, y: 9.5 }]);
-    expect(ctx.marchMapRoute({ x: 0, y: 0 }, { x: 63, y: 63 }).durationMs).toBe(3600000);
+    expect(ctx.marchMapRoute({ x: 0, y: 0 }, { x: 63, y: 63 }).durationMs).toBe(126 * 30000);
     expect(ctx.marchMapRoute({ x: 4, y: 7 }, { x: 4, y: 7 })).toBeNull();
     for (const bad of [{ x: -1, y: 7 }, { x: 64, y: 7 }, { x: 1.5, y: 7 }, { x: NaN, y: 7 }, null]) {
       expect(ctx.marchMapRoute(bad, { x: 1, y: 1 })).toBeNull();
     }
-    expect(ctx.mapTaskDescription(route)).toContain("预计耗时：360秒");
+    expect(ctx.mapTaskDescription(route)).toContain("预计耗时：180秒");
   });
 
   it("keeps the active route from its stored origin even after a different tile is selected", () => {
@@ -137,5 +141,16 @@ describe("grid world map task overlays", () => {
     expect(tooltip.hidden).toBe(true);
     ctx.hideMapTaskTooltip();
     expect(ctx.mapPointer).toBeNull();
+  });
+
+  it("colors unaffordable route quotes without an early insufficient-gold warning", () => {
+    const { ctx, tooltip } = harness();
+    ctx.mapPointer = { x: 174, y: 129 };
+    ctx.renderMapTaskTooltip();
+    expect(tooltip.children.at(-1)).toMatchObject({ className: "route-cost unaffordable", textContent: "预计消耗：66 金币" });
+    expect(tooltip.textContent).not.toContain("金币不足");
+    ctx.ownPlayer = () => ({ gold: 500, position: { x: 4, y: 7 } });
+    ctx.renderMapTaskTooltip();
+    expect(tooltip.children.at(-1).className).toBe("route-cost");
   });
 });

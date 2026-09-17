@@ -10,23 +10,62 @@
   <body>
     <main>
       <header class="time-strip" aria-label="游戏时间">
+        <button id="return-library" type="button">‹ 游戏库</button>
         <button id="owner-command-toggle" class="owner-command-toggle hidden" type="button">服主指令</button>
         <span id="clock">--:--:--</span><i></i><b id="year">第 1 年</b>
         <span class="points-balance" aria-label="平台剩余积分"><small>剩余积分</small><b id="points-balance-value">—</b></span>
         <button id="sound-toggle" class="sound-toggle" type="button" aria-label="调整游戏音效">音效 60%</button>
       </header>
       <section class="layout">
+        <section class="social-sidebar panel" aria-label="通讯">
+          <header><span><small>疆土驿站</small><b>通讯</b></span></header>
+          <nav class="social-tabs" aria-label="通讯频道">
+            <button type="button" data-social-tab="world" class="active">世界</button>
+            <button type="button" data-social-tab="generals">将领</button>
+            <button type="button" data-social-tab="letters">书信</button>
+          </nav>
+          <section id="social-world" class="social-page">
+            <div id="world-chat-messages" class="chat-messages" aria-live="polite"></div>
+            <form id="world-chat-form" class="chat-composer"><textarea id="world-chat-input" maxlength="500" placeholder="与这片大陆的主公交谈…"></textarea><button id="world-chat-send" type="submit">发送</button></form>
+            <small class="chat-note">公开频道 · 保留最近 50 条</small>
+          </section>
+          <section id="social-generals" class="social-page hidden">
+            <div id="general-conversations" class="conversation-list"></div>
+            <section id="dialogue-modal" class="social-thread hidden">
+              <header><span><small id="dialogue-mode">将领互动</small><b id="dialogue-general">—</b></span><button id="close-dialogue" type="button">‹</button></header>
+              <div id="dialogue-history" class="dialogue-history"></div>
+              <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button id="dialogue-send" class="primary" type="button">发送</button></form>
+            </section>
+          </section>
+          <section id="social-letters" class="social-page hidden">
+            <header><b>收到的信件</b><strong id="direct-count">0</strong></header>
+            <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
+          </section>
+        </section>
+        <div class="map-workspace">
         <div class="map-card">
           <div id="map-viewport" class="map-viewport">
             <canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas>
             <div id="map-task-tooltip" class="map-task-tooltip hidden" role="status"></div>
+            <div id="map-floating-feedback" class="map-floating-feedback hidden" role="status"></div>
             <span id="zoom-label" class="zoom-label">1×</span>
           </div>
           <div class="legend">
             <span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span>
             <span class="legend-tip">滚轮缩放 · 右键拖动</span>
-            <button id="return-library" type="button">返回游戏库</button>
           </div>
+        </div>
+        <section id="selected-area" class="selected-area panel" aria-label="选中的区域">
+          <button id="toggle-selected-area" class="collapse-grip" type="button" aria-expanded="true" aria-label="收起选中的区域">⌄</button>
+          <div class="area-content">
+            <section class="area-facts">
+              <header><b>选中的区域</b><small id="cell-coordinate">请选择地图格子</small></header>
+              <div class="cell-facts"><span><small>人口</small><b id="cell-population">—</b></span><span><small>资源</small><b id="cell-resource">—</b></span><span><small>驻军 / 上限</small><b id="cell-garrison">—</b></span><div class="power-crest"><i aria-hidden="true">⚔</i><div><small>守备战力</small><b id="cell-power">—</b></div></div></div>
+            </section>
+            <section class="area-companions"><header><b>身边的将领</b><small>查看 · 交互 · 部署</small></header><div id="carried-generals" class="stack empty">尚无随行将领</div></section>
+            <section class="area-owner"><header><small>领地主人</small><b id="cell-owner">—</b></header><div id="deployed-generals" class="deployed-generals empty">此地没有部署将领</div></section>
+          </div>
+        </section>
         </div>
         <aside>
           <section class="panel player-panel">
@@ -50,15 +89,15 @@
             <div class="training-grid">
               <label>修炼对象<select id="training-target"></select></label>
               <label>连续修炼<input id="training-levels" type="number" min="1" max="10" value="1"></label>
+              <label id="cultivation-gold-field" class="hidden">投入金币<input id="cultivation-gold" type="number" step="1" value="5000"></label>
+              <label id="cultivation-material-field" class="hidden">天材地宝<select id="cultivation-material"></select></label>
               <div id="training-preview" class="training-preview">选择自己或未部署将领</div>
               <button id="start-power-training" class="primary" type="button">开始修炼</button>
             </div>
           </section>
 
-          <section class="panel cell-panel">
-            <header><span><small>当前格子</small><b id="cell-coordinate">请选择地图格子</b></span><em id="cell-owner">—</em></header>
-            <div class="cell-facts"><span><small>人口上限</small><b id="cell-population">—</b></span><span><small>资源等级</small><b id="cell-resource">—</b></span><span><small>驻军</small><b id="cell-garrison">—</b></span><span><small>守备战力</small><b id="cell-power">—</b></span></div>
-            <div id="deployed-generals" class="deployed-generals empty">此地没有部署将领</div>
+          <section class="panel orders-panel">
+            <header><span><small>针对选中区域</small><b>领地行动</b></span></header>
             <div class="action-grid">
               <button id="start-mining" type="button">挂机开采</button>
               <label>练兵数量<input id="train-amount" type="number" min="1" max="10000" value="10"></label>
@@ -75,20 +114,12 @@
             <div id="jobs" class="stack empty">暂无任务</div>
           </section>
 
-          <section class="panel">
-            <header><span><small>已收服 · 随行</small><b>身边的将领</b></span></header>
-            <div id="carried-generals" class="stack empty">尚无随行将领</div>
-          </section>
-
           <section class="panel captive-panel">
             <header><span><small>等待处置</small><b>俘虏区</b></span><strong id="captive-count">0</strong></header>
             <div id="captives" class="stack empty">暂无俘虏</div>
           </section>
 
-          <section class="panel letter-panel">
-            <header><span><small>将领书信</small><b>收到的信件</b></span><strong id="direct-count">0</strong></header>
-            <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
-          </section>
+          <section class="panel"><header><b>天材地宝</b><small>仅存本机</small></header><div id="material-inventory" class="material-inventory"></div></section>
         </aside>
       </section>
     </main>
@@ -156,18 +187,15 @@
         <div class="general-stats"><span><small>姓名</small><b id="general-profile-name">—</b></span><span><small>性别</small><b id="general-gender">—</b></span><span><small>身高</small><b id="general-height">—</b></span><span><small>体重</small><b id="general-weight">—</b></span><span><small>三围</small><b id="general-measurements">—</b></span><span><small>战力 / 修炼</small><b id="general-power">0</b></span><span><small>归属</small><b id="general-holder">—</b></span></div>
         <section><h2>外观设定</h2><p id="general-appearance">—</p></section>
         <section><h2>核心设定</h2><p id="general-core-setting">—</p></section>
+        <section><h2>占领天赋</h2><p id="general-talent">—</p></section>
         <section><h2>历任主公与被俘记录</h2><div id="general-service-history" class="archive-list"></div></section>
         <section><h2>互动历史</h2><div id="general-history" class="archive-list"></div></section>
         <footer><button id="general-interact" class="primary hidden" type="button">交互</button></footer>
       </article>
     </section>
 
-    <section id="dialogue-modal" class="overlay hidden" role="dialog" aria-modal="true">
-      <article class="paper-modal dialogue-modal">
-        <header><span><small id="dialogue-mode">将领互动</small><h1 id="dialogue-general">—</h1></span><button id="close-dialogue" type="button">关闭</button></header>
-        <div id="dialogue-history" class="dialogue-history"></div>
-        <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button id="dialogue-send" class="primary" type="button">发送</button></form>
-      </article>
+    <section id="deploy-confirmation" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="deploy-confirmation-text">
+      <article class="paper-modal deploy-confirmation"><h2 id="deploy-confirmation-text"></h2><footer><button id="deploy-cancel" type="button">取消</button><button id="deploy-confirm" class="primary" type="button">确认部署</button></footer></article>
     </section>
 
     <section id="owner-command-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="owner-command-title">
@@ -189,6 +217,12 @@
           <h2>服务器搬迁</h2>
           <p>复制伴生作品配置与公共地图快照，建立新作品，再在旧评论区发布作者签名的定向搬迁记录。</p>
           <button id="owner-migrate-server" type="button">搬迁并重置服务器</button>
+        </section>
+        <section class="owner-command-section">
+          <h2>天材地宝散落</h2>
+          <p>重新散落会覆盖未领取的旧位置，跳过已占领领地。玩家已获得的材料保持不变。</p>
+          <div class="owner-command-row"><label>普通材料数量<input id="treasure-count" type="number" min="1" max="1000" value="240"></label><label>升红材料<input id="treasure-red-ascend" type="number" min="0" max="20" value="0"></label><label>重塑材料<input id="treasure-red-reroll" type="number" min="0" max="20" value="0"></label></div>
+          <button id="owner-scatter-treasures" type="button">重新散落天材地宝</button>
         </section>
         <footer><small>公共账本每累计 32 条地图变更会由在线服主自动写入覆盖快照；新客户端读到完整快照后即可跳过更旧页面。</small></footer>
       </article>

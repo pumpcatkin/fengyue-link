@@ -1272,6 +1272,15 @@ window.addEventListener("message",async event=>{
         replyResult({admin:true,migration:result});
         toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
       }
+      if(command.type==="scatter-treasures"){
+        const count=Number(command.count??240),redAscend=Number(command.redAscend??0),redReroll=Number(command.redReroll??0);
+        if(![count,redAscend,redReroll].every(Number.isSafeInteger)||count<0||count>4096||redAscend<0||redReroll<0||redAscend+redReroll>count)throw new Error("宝物总数与赤色素材数量无效");
+        if(!await confirmAction(`这会替换尚未领取的散落批次，在未占领区域放置 ${count} 个宝物，其中赤曜升格 ${redAscend} 个、赤曜洗髓 ${redReroll} 个。`,{title:"重新散落宝物",acceptText:"确认散落"})){replyResult({cancelled:true});return}
+        const result=await api.administerOnlineWorld({type:"scatter-treasures",count,redAscend,redReroll});
+        if(result?.state)renderOnlineWorld(result.state);
+        replyResult({...result,admin:true});toast("宝物散落批次已发布");return;
+      }
+      if(!["player-reset","player-ban","player-unban"].includes(command.type))throw new Error("未知服主指令");
       const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
       if(!target)throw new Error("请选择已存在的玩家");
       const label=`${target.displayName||"未设置玩家名"}（风月昵称 ${target.accountName||"未设置昵称"}）`;

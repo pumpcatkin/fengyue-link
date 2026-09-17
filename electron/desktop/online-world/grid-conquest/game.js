@@ -32,6 +32,14 @@ const pendingHostKeys = new Map();
 const dialogueRequests = new Map();
 const seenModelUsageIds = new Set();
 let modelUsageInitialized = false;
+let deployGeneralId = null;
+let floatingFeedbackTimer = null;
+let socialTab = "world";
+let worldChatFingerprint = "";
+let marchQuoteCache = null;
+let marchQuoteTimer = null;
+const worldChatDrafts = new Map();
+const MATERIAL_NAMES = { white: "白色", green: "绿色", blue: "蓝色", purple: "紫色", gold: "金色", "red-ascend": "红色·升华", "red-reroll": "红色·重塑" };
 
 function host(type, data = {}, options = {}) {
   const key = String(options.key || "");
@@ -44,12 +52,12 @@ function host(type, data = {}, options = {}) {
   const message = { source: "fyow-grid-conquest", protocol: HOST_PROTOCOL, type, ...data };
   if (requestId) message.requestId = requestId;
   if (requestId) {
-    const control = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    const control = !options.silent && document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
     if (control && !control.disabled) {
       control.disabled = true;
       control.classList.add("host-pending");
     }
-    pendingHostRequests.set(requestId, { key, control });
+    pendingHostRequests.set(requestId, { key, control, silent: Boolean(options.silent) });
     if (key) pendingHostKeys.set(key, requestId);
   }
   parent.postMessage(message, "*");
@@ -114,6 +122,19 @@ function showToast(text) {
   node.classList.remove("hidden");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.add("hidden"), 3000);
+}
+
+function showMapFeedback(text, anchor = document.querySelector("#march")) {
+  const node = document.querySelector("#map-floating-feedback");
+  const rect = anchor.getBoundingClientRect();
+  node.textContent = text;
+  node.style.left = `${Math.max(60, Math.min(window.innerWidth - 60, rect.left + rect.width / 2))}px`;
+  node.style.top = `${Math.max(60, rect.top - 15)}px`;
+  node.classList.add("hidden");
+  void node.offsetWidth;
+  node.classList.remove("hidden");
+  clearTimeout(floatingFeedbackTimer);
+  floatingFeedbackTimer = setTimeout(() => node.classList.add("hidden"), 1800);
 }
 
 let audioContext = null;
@@ -235,7 +256,32 @@ function marchMapRoute(from, to) {
   const points = [{ x: from.x + .5, y: from.y + .5 }];
   if (from.x !== to.x) points.push({ x: to.x + .5, y: from.y + .5 });
   if (from.y !== to.y) points.push({ x: to.x + .5, y: to.y + .5 });
-  return { from, to, points, durationMs: Math.min(3600000, (Math.abs(to.x - from.x) + Math.abs(to.y - from.y)) * 60000) };
+  const distance = Math.abs(to.x - from.x) + Math.abs(to.y - from.y);
+  return { from, to, points, distance, durationMs: distance * 30000 };
+}
+function selectedMarchQuote(route) {
+  if (marchQuoteCache?.requestKey === marchQuoteKey()) return { cost: marchQuoteCache.cost, durationMs: marchQuoteCache.durationMs };
+  const soldiers = Math.max(0, Math.trunc(Number(document.querySelector("#march-soldiers").value) || 0));
+  const modifiers = ownPlayer()?.marchModifiers || {};
+  const cost = Math.max(1, Math.round(route.distance * (10 + Math.ceil(soldiers / 100)) * Number(modifiers.costMultiplier ?? 1)));
+  return { cost, durationMs: Math.max(1000, Math.round(route.durationMs * Number(modifiers.durationMultiplier ?? 1))) };
+}
+function selectedMarchIntent() {
+  return {
+    to: selected, soldiers: Math.max(0, Math.trunc(Number(document.querySelector("#march-soldiers").value) || 0)),
+    generalIds: [...document.querySelectorAll("#march-generals input:checked")].map(input => input.value),
+    attack: document.querySelector("#march-attack").checked
+  };
+}
+function marchQuoteKey() { return JSON.stringify({ ...selectedMarchIntent(), revision: payload?.world?.revision, from: ownPlayer()?.position }); }
+function refreshMarchQuote() {
+  clearTimeout(marchQuoteTimer);
+  if (!selected || !ownPlayer()?.position || (selected.x === ownPlayer().position.x && selected.y === ownPlayer().position.y)) return;
+  marchQuoteTimer = setTimeout(() => {
+    const requestKey = marchQuoteKey();
+    if (marchQuoteCache?.requestKey === requestKey) return;
+    host("intent", { intent: { type: "quote-march", ...selectedMarchIntent(), requestKey } }, { expectResult: true, silent: true });
+  }, 120);
 }
 
 function buildMapTaskOverlays() {
@@ -252,9 +298,14 @@ function buildMapTaskOverlays() {
       overlays.push({ type: job.type, job, x: job.x + (job.type === "mining" ? .045 : .575), y: job.y + .045, width: .38, height: .38 });
     }
   }
+  for (const treasure of Object.values(payload?.world?.treasureSpawns || {})) {
+    if (validMapPosition(treasure) && !payload?.world?.claimedTreasures?.[treasure.id]) {
+      overlays.push({ type: "treasure", treasure, x: treasure.x + .08, y: treasure.y + .56, width: .35, height: .35 });
+    }
+  }
   if (!jobs.some(job => job.type === "march")) {
     const route = marchMapRoute(ownPlayer()?.position, selected);
-    if (route) overlays.unshift({ type: "march", ...route, preview: true });
+    if (route) overlays.unshift({ type: "march", ...route, ...selectedMarchQuote(route), preview: true });
   }
   return overlays;
 }
@@ -278,6 +329,7 @@ function mapTaskAt(point, pixelsPerCell) {
 }
 
 function mapTaskDescription(item, now = hostTime()) {
+  if (item.type === "treasure") return `天材地宝 · ${MATERIAL_NAMES[item.treasure.materialId] || "未知品质"}\n行军抵达 (${item.treasure.x}, ${item.treasure.y}) 后拾取\n以评论区先后顺序确定归属`;
   if (item.type === "march" && item.preview) {
     return `行军路线预览\n起点 (${item.from.x}, ${item.from.y}) → 目标 (${item.to.x}, ${item.to.y})\n预计耗时：${formatDuration(item.durationMs)}\n点击「向这里行军」后出发`;
   }
@@ -316,6 +368,13 @@ function renderMapTaskTooltip() {
   const item = point && mapTaskAt(point, point.pixelsPerCell);
   if (!item) { tooltip.classList.add("hidden"); return; }
   tooltip.textContent = mapTaskDescription(item);
+  if (item.type === "march") {
+    const cost = item.preview ? item.cost : Number(item.job?.cost || item.job?.goldCost || 0);
+    const line = document.createElement("span");
+    line.className = `route-cost${item.preview && cost > Number(ownPlayer()?.gold || 0) ? " unaffordable" : ""}`;
+    line.textContent = `${item.preview ? "预计消耗" : "已支付"}：${formatNumber(cost)} 金币`;
+    tooltip.append(line);
+  }
   tooltip.classList.remove("hidden");
   const left = Math.max(8, Math.min(mapPointer.x + 14, window.innerWidth - tooltip.offsetWidth - 8));
   const top = mapPointer.y > tooltip.offsetHeight + 22 ? mapPointer.y - tooltip.offsetHeight - 14 : mapPointer.y + 18;
@@ -355,6 +414,15 @@ function drawMapTasks(size) {
     context.save();
     context.translate(item.x * size, item.y * size);
     context.scale(item.width * size / 24, item.height * size / 24);
+    if (item.type === "treasure") {
+      const palette = { white: "#f6f1df", green: "#8fc16b", blue: "#77b3d4", purple: "#ba84cb", gold: "#f3c352", "red-ascend": "#df6553", "red-reroll": "#e53e76" };
+      context.fillStyle = palette[item.treasure.materialId] || "#f6f1df";
+      context.strokeStyle = "#4b3829"; context.lineWidth = 2;
+      context.beginPath(); context.moveTo(12, 1); context.lineTo(22, 10); context.lineTo(12, 23); context.lineTo(2, 10); context.closePath(); context.fill(); context.stroke();
+      context.strokeStyle = "#fff7dd"; context.lineWidth = 1;
+      context.beginPath(); context.moveTo(5, 9); context.lineTo(12, 4); context.stroke();
+      context.restore(); continue;
+    }
     context.fillStyle = item.type === "mining" ? "#fff0be" : "#e8eef4";
     context.strokeStyle = "#4b3829"; context.lineWidth = 1.6;
     context.beginPath(); context.roundRect(0, 0, 24, 24, 4); context.fill(); context.stroke();
@@ -504,7 +572,7 @@ function powerTrainingTargets() {
   return [
     { value: `player:${ownAccountId()}`, type: "player", id: ownAccountId(), name: `${player.displayName}（自己）`, entity: player },
     ...Object.values(allGenerals())
-      .filter(general => general.holderAccountId === ownAccountId() && general.status !== "deployed")
+      .filter(general => general.holderAccountId === ownAccountId() && ["carried", "waiting"].includes(general.status))
       .map(general => ({ value: `general:${general.id}`, type: "general", id: general.id, name: `${general.name}（将领）`, entity: general }))
   ];
 }
@@ -521,10 +589,36 @@ function renderPowerTraining() {
   }
   if (targets.some(target => target.value === previous)) select.value = previous;
   const target = targets.find(item => item.value === select.value) || targets[0];
+  const cultivating = target?.type === "general";
+  input.parentElement.classList.toggle("hidden", cultivating);
+  document.querySelector("#cultivation-gold-field").classList.toggle("hidden", !cultivating);
+  document.querySelector("#cultivation-material-field").classList.toggle("hidden", !cultivating);
+  renderMaterials();
   select.disabled = !target;
   input.disabled = !target;
   button.disabled = !target;
   if (!target) { preview.textContent = "加入游戏后可以修炼自己与未部署将领"; document.querySelector("#training-level").textContent = "0 阶"; return; }
+  if (cultivating) {
+    const quote = target.entity.cultivationQuote;
+    const count = Number(target.entity.cultivationCount || 0);
+    document.querySelector("#training-level").textContent = `${count} / 5 次`;
+    if (!quote || !quote.remaining) {
+      preview.textContent = count >= 5 ? "五次修炼已完成。" : "正在等待修炼条件同步。";
+      button.disabled = true; button.textContent = count >= 5 ? "修炼圆满" : "等待同步"; return;
+    }
+    const gold = document.querySelector("#cultivation-gold");
+    gold.min = String(quote.goldMin); gold.max = String(quote.goldMax);
+    if (gold.dataset.general !== target.id || Number(gold.value) < quote.goldMin || Number(gold.value) > quote.goldMax) gold.value = String(quote.goldMin);
+    gold.dataset.general = target.id;
+    const unlocked = hostTime() >= Number(quote.unlockAt);
+    const cost = Math.max(1, Math.round(Number(gold.value) * (1 + Number(quote.modifiers?.cultivationCost || 0))));
+    const material = document.querySelector("#cultivation-material").value;
+    const materialCount = Number(ownPlayer()?.materials?.[material] || 0);
+    preview.textContent = `第 ${quote.attempt} 次 · 可投入 ${formatNumber(quote.goldMin)}—${formatNumber(quote.goldMax)} 金币。实际消耗 ${formatNumber(cost)} 金币 + 1 件材料。金币越多，战力增幅越高（含随机浮动）；材料仅改变天赋。${unlocked ? "" : ` 加入满 ${quote.gateHours} 小时开放，剩余 ${formatDuration(quote.unlockAt - hostTime())}。`}`;
+    button.disabled = !unlocked || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
+    button.textContent = !unlocked ? "尚未开放" : materialCount < 1 ? "尚无材料" : "修炼一次";
+    return;
+  }
   const remaining = Math.max(0, MAX_TRAINING_LEVEL - Number(target.entity.trainingLevel || 0));
   input.max = String(Math.max(1, Math.min(10, remaining)));
   if (Number(input.value) > Number(input.max)) input.value = input.max;
@@ -548,8 +642,9 @@ function renderMarchParty() {
   const available = marchAvailable();
   const requested = Math.max(0, Number(document.querySelector("#march-soldiers").value || 0));
   document.querySelector("#march-available").textContent = `${formatNumber(available)} 人`;
-  document.querySelector("#march-cost-per-cell").textContent = `${10 + Math.ceil(requested / 100)} 金币`;
+  document.querySelector("#march-cost-per-cell").textContent = `${Math.round((10 + Math.ceil(requested / 100)) * Number(ownPlayer()?.marchModifiers?.costMultiplier ?? 1))} 金币`;
   document.querySelector("#march-soldiers").max = String(available);
+  refreshMarchQuote();
 }
 
 function canInteract(general) {
@@ -570,18 +665,24 @@ function generalCard(general, mode) {
   node.className = "general-card";
   const line = document.createElement("div");
   const name = document.createElement("b"); name.textContent = general.name;
-  const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(trainingPower(general))} · ${Number(general.trainingLevel || 0)}阶`;
+  const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(trainingPower(general))} · 修炼 ${Number(general.cultivationCount || 0)}/5`;
   line.append(name, power);
   const note = document.createElement("small");
   note.textContent = mode === "captive" ? `原主：${accountLabel(general.loyalToAccountId || general.capturedFromAccountId)}` : general.status === "waiting" ? `留置于 ${general.location?.x},${general.location?.y}` : "随行中";
   const buttons = document.createElement("div"); buttons.className = "buttons";
   buttons.append(makeButton("详情", () => openGeneral(general.id)));
   if (canInteract(general)) buttons.append(makeButton("交互", () => openDialogue(general.id), "primary"));
-  if (mode === "carried" && general.status === "carried") buttons.append(makeButton("部署", () => sendIntent({ type: "deploy-general", generalId: general.id })));
+  if (mode === "carried" && general.status === "carried") buttons.append(makeButton("部署", () => confirmDeploy(general.id)));
   if (general.status === "waiting" && general.location?.x === ownPlayer()?.position?.x && general.location?.y === ownPlayer()?.position?.y) {
     buttons.append(makeButton("带在身边", () => sendIntent({ type: "take-general", generalId: general.id })));
   }
-  node.append(line, note, buttons);
+  node.append(line, note);
+  if (general.talentSummary) {
+    const talent = document.createElement("span"); talent.className = `talent-chip rarity-${general.talentSummary.rarity}`;
+    talent.textContent = general.talentSummary.text || general.talentSummary.name;
+    node.append(talent);
+  }
+  node.append(buttons);
   return node;
 }
 
@@ -602,16 +703,49 @@ function renderGenerals() {
   else captives.forEach(general => captiveNode.append(generalCard(general, "captive")));
 
   const march = document.querySelector("#march-generals");
+  const previousSelection = new Set([...march.querySelectorAll("input:checked")].map(input => input.value));
+  const wasPopulated = Boolean(march.querySelector("input"));
   march.replaceChildren();
   const label = document.createElement("small"); label.textContent = "随行将领"; march.append(label);
   const selectable = carried.filter(general => general.status === "carried").slice(0, 2);
   if (!selectable.length) { const empty = document.createElement("span"); empty.textContent = "暂无可选将领"; march.append(empty); }
   else selectable.forEach(general => {
     const item = document.createElement("label");
-    const input = document.createElement("input"); input.type = "checkbox"; input.value = general.id; input.checked = true;
+    const input = document.createElement("input"); input.type = "checkbox"; input.value = general.id; input.checked = !wasPopulated || previousSelection.has(general.id);
+    input.addEventListener("change", () => { renderMarchParty(); draw(); });
     const text = document.createElement("span"); text.textContent = general.name;
     item.append(input, text); march.append(item);
   });
+}
+
+function confirmDeploy(id) {
+  const general = allGenerals()[id];
+  if (!general) return;
+  const player = ownPlayer();
+  const cell = selected && dynamicCell(selected.x, selected.y);
+  const owned = cell?.ownerAccountId === ownAccountId();
+  const here = player?.position?.x === selected?.x && player?.position?.y === selected?.y;
+  deployGeneralId = owned && here ? id : null;
+  document.querySelector("#deploy-confirmation-text").textContent = !owned
+    ? "目前区域尚未占领，请行军至已占领领土部署。"
+    : !here ? "请先行军至选中的自有领土，再部署将领。" : `是否将${general.name}部署到此处？`;
+  document.querySelector("#deploy-confirm").classList.toggle("hidden", !deployGeneralId);
+  document.querySelector("#deploy-cancel").textContent = deployGeneralId ? "取消" : "知道了";
+  document.querySelector("#deploy-confirmation").classList.remove("hidden");
+}
+function renderMaterials() {
+  const inventory = ownPlayer()?.materials || {};
+  const holder = document.querySelector("#material-inventory");
+  const select = document.querySelector("#cultivation-material");
+  const previous = select.value;
+  holder.replaceChildren(); select.replaceChildren();
+  for (const [id, label] of Object.entries(MATERIAL_NAMES)) {
+    const count = Number(inventory[id] || 0);
+    const chip = document.createElement("span"); chip.className = `material-chip rarity-${id}`; chip.textContent = `${label} × ${count}`; holder.append(chip);
+    if (count > 0) { const option = document.createElement("option"); option.value = id; option.textContent = `${label} × ${count}`; select.append(option); }
+  }
+  if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  if (!select.options.length) { const option = document.createElement("option"); option.value = ""; option.textContent = "暂无天材地宝"; select.append(option); }
 }
 
 function renderDeployed(cell) {
@@ -648,9 +782,9 @@ function renderCell() {
     const info = fact(selected.x, selected.y);
     cell = dynamicCell(selected.x, selected.y);
     const owner = payload?.world?.players?.[cell.ownerAccountId];
-    const occupiedPower = Number(cell.soldiers || 0) + (cell.generalIds || []).reduce((sum, id) => sum + Number(allGenerals()[id]?.power || 0), 0);
+    const occupiedPower = cell.defensivePower ?? (Number(cell.soldiers || 0) + (cell.generalIds || []).reduce((sum, id) => sum + Number(allGenerals()[id]?.power || 0), 0));
     values["#cell-coordinate"] = `坐标 ${selected.x}, ${selected.y}`;
-    values["#cell-owner"] = cell.ownerAccountId ? (cell.ownerAccountId === ownAccountId() ? "我的领地" : owner?.displayName || "其他势力") : "未占领";
+    values["#cell-owner"] = cell.ownerAccountId ? (owner?.displayName || "其他势力") : "未占领";
     values["#cell-population"] = formatNumber(info.population);
     values["#cell-resource"] = info.resourceGrade;
     values["#cell-garrison"] = `${formatNumber(cell.soldiers)} / ${formatNumber(info.garrisonCap)}`;
@@ -700,6 +834,48 @@ function renderInbox() {
     const text = document.createElement("p"); text.textContent = item.payload?.text || "";
     line.append(sender, time); node.append(line, text); target.append(node);
   });
+}
+
+function switchSocialTab(tab) {
+  socialTab = tab;
+  document.querySelectorAll("[data-social-tab]").forEach(button => button.classList.toggle("active", button.dataset.socialTab === tab));
+  for (const name of ["world", "generals", "letters"]) document.querySelector(`#social-${name}`).classList.toggle("hidden", name !== tab);
+}
+function renderWorldChat() {
+  const messages = (payload?.worldChat || []).slice(-50);
+  const fingerprint = JSON.stringify(messages);
+  const target = document.querySelector("#world-chat-messages");
+  if (fingerprint !== worldChatFingerprint) {
+    const nearBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 60;
+    const previousTop = target.scrollTop;
+    const hadMessages = Boolean(target.children.length);
+    target.replaceChildren();
+    for (const item of messages) {
+      const article = document.createElement("article");
+      article.className = `chat-message${item.accountId === ownAccountId() ? " self" : ""}`;
+      const header = document.createElement("header");
+      const name = document.createElement("b"); name.textContent = item.displayName || accountLabel(item.accountId);
+      const time = document.createElement("time"); time.textContent = new Date(item.createdAt || item.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+      const text = document.createElement("p"); text.textContent = item.text;
+      header.append(name, time); article.append(header, text); target.append(article);
+    }
+    if (!messages.length) { const empty = document.createElement("p"); empty.className = "chat-note"; empty.textContent = "尚无世界消息，来打个招呼吧。"; target.append(empty); }
+    target.scrollTop = !hadMessages || nearBottom ? target.scrollHeight : previousTop;
+    worldChatFingerprint = fingerprint;
+  }
+  document.querySelector("#world-chat-send").disabled = !ownPlayer() || pendingHostKeys.has("intent:world-chat");
+}
+function renderConversations() {
+  const list = document.querySelector("#general-conversations"); list.replaceChildren();
+  const generals = Object.values(allGenerals()).filter(general => canInteract(general));
+  list.classList.toggle("hidden", Boolean(dialogueGeneralId && !document.querySelector("#dialogue-modal").classList.contains("hidden")));
+  for (const general of generals) {
+    const button = makeButton(general.name, () => openDialogue(general.id));
+    const hint = document.createElement("small");
+    hint.textContent = general.status === "captured" ? "俘虏交互" : `战力 ${formatNumber(general.power)} · 点击交谈`;
+    button.append(hint); list.append(button);
+  }
+  if (!generals.length) list.textContent = "身边还没有可交谈的将领。";
 }
 
 function ownerPlayerEntries() {
@@ -786,10 +962,12 @@ function openGeneral(id) {
   document.querySelector("#general-weight").textContent = `${Number(general.weightKg || (general.gender === "female" ? 55 : 72))} kg`;
   const measurements = general.measurements || {};
   document.querySelector("#general-measurements").textContent = `${Number(measurements.chestCm || 0)} / ${Number(measurements.waistCm || 0)} / ${Number(measurements.hipCm || 0)} cm`;
-  document.querySelector("#general-power").textContent = `${formatNumber(trainingPower(general))} / ${Number(general.trainingLevel || 0)} 阶`;
+  document.querySelector("#general-power").textContent = `${formatNumber(trainingPower(general))} / 修炼 ${Number(general.cultivationCount || 0)} 次`;
   document.querySelector("#general-holder").textContent = accountLabel(general.holderAccountId);
   document.querySelector("#general-appearance").textContent = redactAccountIds(general.appearanceSetting || "沿用旧档案，暂无独立外观分类。");
   document.querySelector("#general-core-setting").textContent = redactAccountIds(general.coreSetting || general.setting || "暂无核心设定");
+  document.querySelector("#general-talent").textContent = general.talentSummary?.text || general.talentSummary?.name || "天赋待同步";
+  document.querySelector("#general-talent").className = `rarity-${general.talentSummary?.rarity || "white"}`;
   const service = document.querySelector("#general-service-history"); service.replaceChildren();
   const records = [
     ...(general.masterHistory || []).map(item => `[${item.fromYear}年${item.toYear == null ? "至今" : "—" + item.toYear + "年"}] 主公：${accountLabel(item.accountId)}（${item.reason || "效忠"}）`),
@@ -850,6 +1028,8 @@ function openDialogue(id) {
   const general = allGenerals()[id];
   if (!canInteract(general)) { showToast("当前所在位置不支持与这名将领交互"); return; }
   dialogueGeneralId = id;
+  switchSocialTab("generals");
+  document.querySelector("#general-conversations").classList.add("hidden");
   document.querySelector("#general-modal").classList.add("hidden");
   document.querySelector("#dialogue-modal").classList.remove("hidden");
   renderDialogue();
@@ -857,7 +1037,7 @@ function openDialogue(id) {
 }
 
 function renderAll() {
-  renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderOwnerCommands(); draw();
+  renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); draw();
   const player = ownPlayer();
   const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
   document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);
@@ -865,7 +1045,15 @@ function renderAll() {
   if (generalDetailId && !document.querySelector("#general-modal").classList.contains("hidden")) {
     if (allGenerals()[generalDetailId]) openGeneral(generalDetailId); else document.querySelector("#general-modal").classList.add("hidden");
   }
-  if (dialogueGeneralId && !document.querySelector("#dialogue-modal").classList.contains("hidden")) renderDialogue();
+  if (dialogueGeneralId && !document.querySelector("#dialogue-modal").classList.contains("hidden")) {
+    if (canInteract(allGenerals()[dialogueGeneralId])) renderDialogue();
+    else {
+      dialogueGeneralId = null;
+      document.querySelector("#dialogue-modal").classList.add("hidden");
+      document.querySelector("#dialogue-history").replaceChildren();
+      renderConversations();
+    }
+  }
   updateMapScale(false);
   if (player?.position && !mapCentered) { mapCentered = true; requestAnimationFrame(() => centerMap(player.position, "auto")); }
 }
@@ -1100,7 +1288,7 @@ canvas.addEventListener("click", event => {
   const point = mapCanvasPoint(event.clientX, event.clientY);
   if (!point) return;
   selected = { x: Math.floor(point.x), y: Math.floor(point.y) };
-  renderCell(); draw();
+  renderCell(); refreshMarchQuote(); draw();
 });
 canvas.addEventListener("pointermove", event => {
   if (panState || event.buttons) { hideMapTaskTooltip(); return; }
@@ -1130,10 +1318,41 @@ viewport.addEventListener("wheel", event => { event.preventDefault(); stepZoom(e
 window.addEventListener("resize", () => updateMapScale(true));
 
 document.querySelector("#return-library").addEventListener("click", () => host("library"));
+document.querySelector("#toggle-selected-area").addEventListener("click", event => {
+  const collapsed = document.querySelector(".map-workspace").classList.toggle("area-collapsed");
+  event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
+  event.currentTarget.setAttribute("aria-label", collapsed ? "展开选中的区域" : "收起选中的区域");
+  event.currentTarget.textContent = collapsed ? "⌃" : "⌄";
+  requestAnimationFrame(() => updateMapScale(true));
+});
+document.querySelectorAll("[data-social-tab]").forEach(button => button.addEventListener("click", () => switchSocialTab(button.dataset.socialTab)));
+document.querySelector("#world-chat-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const input = document.querySelector("#world-chat-input");
+  const text = input.value.trim();
+  if (!text || !ownPlayer()) return;
+  const id = sendIntent({ type: "world-chat", text });
+  if (id) { worldChatDrafts.set(id, text); input.value = ""; renderWorldChat(); }
+});
+document.querySelector("#world-chat-input").addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); document.querySelector("#world-chat-form").requestSubmit(); }
+});
+document.querySelector("#deploy-cancel").addEventListener("click", () => document.querySelector("#deploy-confirmation").classList.add("hidden"));
+document.querySelector("#deploy-confirm").addEventListener("click", () => {
+  if (deployGeneralId) sendIntent({ type: "deploy-general", generalId: deployGeneralId });
+  document.querySelector("#deploy-confirmation").classList.add("hidden");
+  deployGeneralId = null;
+});
 document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
 document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
 document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
 document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }, { expectResult: true, key: "admin:open-server" }));
+document.querySelector("#owner-scatter-treasures").addEventListener("click", () => host("admin", { command: {
+  type: "scatter-treasures",
+  count: Number(document.querySelector("#treasure-count").value),
+  redAscend: Number(document.querySelector("#treasure-red-ascend").value),
+  redReroll: Number(document.querySelector("#treasure-red-reroll").value)
+} }, { expectResult: true, key: "admin:scatter-treasures" }));
 document.querySelector("#owner-migrate-server").addEventListener("click", () => host("admin", { command: { type: "migrate-server" } }, { expectResult: true, key: "admin:migrate-server" }));
 document.querySelector("#owner-reset-player-button").addEventListener("click", () => host("admin", { command: { type: "player-reset", targetAccountId: document.querySelector("#owner-reset-player").value } }, { expectResult: true, key: "admin:player-reset" }));
 document.querySelector("#owner-ban-player-button").addEventListener("click", () => {
@@ -1143,23 +1362,31 @@ document.querySelector("#owner-ban-player-button").addEventListener("click", () 
   host("admin", { command: { type, targetAccountId: select.value } }, { expectResult: true, key: `admin:${type}` });
 });
 document.querySelector("#banned-return-library").addEventListener("click", () => host("library"));
-document.querySelector("#march-soldiers").addEventListener("input", renderMarchParty);
+document.querySelector("#march-soldiers").addEventListener("input", () => { renderMarchParty(); draw(); });
+document.querySelector("#march-attack").addEventListener("change", refreshMarchQuote);
 document.querySelector("#training-target").addEventListener("change", renderPowerTraining);
 document.querySelector("#training-levels").addEventListener("input", renderPowerTraining);
+document.querySelector("#cultivation-gold").addEventListener("change", renderPowerTraining);
+document.querySelector("#cultivation-material").addEventListener("change", renderPowerTraining);
 document.querySelector("#start-power-training").addEventListener("click", () => {
   const [targetType, targetId] = document.querySelector("#training-target").value.split(":");
-  sendIntent({ type: "power-train", targetType, targetId, levels: Number(document.querySelector("#training-levels").value) });
+  if (targetType === "general") sendIntent({ type: "cultivate-general", generalId: targetId, goldInvestment: Number(document.querySelector("#cultivation-gold").value), materialId: document.querySelector("#cultivation-material").value });
+  else sendIntent({ type: "power-train", targetType, targetId, levels: Number(document.querySelector("#training-levels").value) });
 });
 document.querySelector("#start-mining").addEventListener("click", () => { if (selected) sendIntent({ type: "start-mining", x: selected.x, y: selected.y, auto: true }); });
 document.querySelector("#train").addEventListener("click", () => { if (selected) sendIntent({ type: "train", x: selected.x, y: selected.y, amount: Number(document.querySelector("#train-amount").value) }); });
 document.querySelector("#march").addEventListener("click", () => {
   if (!selected) return;
-  const generalIds = [...document.querySelectorAll("#march-generals input:checked")].map(input => input.value);
-  sendIntent({ type: "march", to: selected, soldiers: Number(document.querySelector("#march-soldiers").value), generalIds, attack: document.querySelector("#march-attack").checked });
+  const route = marchMapRoute(ownPlayer()?.position, selected);
+  if (route && selectedMarchQuote(route).cost > Number(ownPlayer()?.gold || 0)) {
+    playSound("error"); showMapFeedback("金币不足"); return;
+  }
+  sendIntent({ type: "march", ...selectedMarchIntent() });
 });
 document.querySelector("#close-general").addEventListener("click", () => document.querySelector("#general-modal").classList.add("hidden"));
 document.querySelector("#general-interact").addEventListener("click", () => openDialogue(generalDetailId));
-document.querySelector("#close-dialogue").addEventListener("click", () => document.querySelector("#dialogue-modal").classList.add("hidden"));
+document.querySelector("#close-dialogue").addEventListener("click", () => { document.querySelector("#dialogue-modal").classList.add("hidden"); renderConversations(); });
+document.querySelector("#dialogue-form").addEventListener("submit", event => { event.preventDefault(); sendDialogue(); });
 function sendDialogue() {
   const input = document.querySelector("#dialogue-input");
   const topic = input.value.trim();
@@ -1206,12 +1433,26 @@ window.addEventListener("message", event => {
     if (ownPlayer()) joinSubmitting = false;
     renderAll();
   } else if (event.data.type === "error") {
+    if (requestState?.silent) return;
     joinSubmitting = false;
     playSound("error");
-    showToast(event.data.message || "行动失败");
+    if (requestState?.key === "intent:march" && /金币不足/.test(event.data.message || "")) showMapFeedback("金币不足");
+    else showToast(event.data.message || "行动失败");
+    if (worldChatDrafts.has(event.data.requestId)) {
+      const input = document.querySelector("#world-chat-input");
+      if (!input.value) input.value = worldChatDrafts.get(event.data.requestId);
+      worldChatDrafts.delete(event.data.requestId);
+      renderWorldChat();
+    }
     failDialogueRequest(event.data.requestId, event.data.message);
     if (!ownPlayer()) renderJoinWizard();
   } else if (event.data.type === "result") {
+    if (event.data.result?.marchQuote) {
+      if (event.data.result.marchQuote.requestKey === marchQuoteKey()) { marchQuoteCache = event.data.result.marchQuote; draw(); }
+      return;
+    }
+    if (requestState?.silent) return;
+    worldChatDrafts.delete(event.data.requestId);
     finishDialogueResult(event.data.requestId, event.data.result);
     if (event.data.result?.cancelled) {
       joinSubmitting = false;

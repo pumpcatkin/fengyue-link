@@ -1,10 +1,14 @@
 import { createRequire } from "node:module";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
-const { assembleCommentRecords, encodeCommentRecord, signRecord } = require("../electron/online-world-protocol.cjs");
+const { assembleCommentRecords, encodeCommentRecord, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard } = require("../electron/online-world-card.cjs");
@@ -41,6 +45,67 @@ function service(options: Record<string, unknown>) {
   });
 }
 
+function coverageHarness() {
+  const identities: Record<string, any> = { author: generateOnlineWorldIdentity(), player: generateOnlineWorldIdentity() };
+  const roots: any[] = [];
+  const base = 1_800_000_000_000;
+  let postTime = base + 200;
+  let nextId = 0;
+  const append = (record: any, actor: string, timestamp: number) => {
+    const chunks = encodeCommentRecord(record);
+    const root: any = { id: `root-${nextId++}`, account_id: actor, created_at: timestamp, content: chunks[0], children: [] };
+    root.children = chunks.slice(1).map((content: string, index: number) => ({ id: `${root.id}-reply-${index}`, account_id: actor, created_at: timestamp + index + 1, content }));
+    roots.push(root);
+    return { record, root, sources: [root, ...root.children.map((reply: any) => ({ ...reply, _fyowRootId: root.id }))] };
+  };
+  const requestConsole = async (endpoint: string, options: any = {}) => {
+    if (options.method === "POST") {
+      const item = { id: `posted-${nextId++}`, account_id: "author", created_at: postTime++, ...options.body };
+      if (options.body.parent_id) roots.find(root => root.id === options.body.parent_id).children.push(item);
+      else roots.push({ ...item, children: [] });
+      return item;
+    }
+    if (endpoint.includes("/branches/")) return [];
+    const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+    return { data: roots.slice((page - 1) * 50, page * 50) };
+  };
+  const create = (accountId = "author") => {
+    const instance = service({
+      getAccount: () => ({ accountId }), getIdentity: async () => identities[accountId] || identities.player,
+      requestConsole, now: () => base + 10_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.status = "ready";
+    return instance;
+  };
+  const author = create();
+  author.control = signRecord({
+    schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season",
+    programHash: author.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identities.author.signingPublicKey
+  }, identities.author.signingPrivateKey);
+  author.world = createWorld({ seed: "coverage", seasonId: "season", authorityAccountId: "author", startedAt: base });
+  author.world.treasureEpoch = 1;
+  author.world.treasureSpawns.old = { id: "old", epoch: 1, x: 1, y: 1, materialId: "white", spawnedAt: base };
+  append(author.control, "author", base + 1);
+  const snapshot = (state: any, time: number, coverage?: any) => {
+    const publicState = JSON.parse(JSON.stringify(state));
+    delete publicState.privatePlayers;
+    return append(signRecord({
+      schema: "fyow.snapshot/3", snapshotId: `snapshot-${time}`, gameId: author.world.gameId, workId: "work", seasonId: "season",
+      revision: state.revision || 0, state: publicState, stateHash: sha256(Buffer.from(canonicalJson(publicState))),
+      ...(coverage ? { ledgerCoverage: coverage } : {})
+    }, identities.author.signingPrivateKey), "author", base + time);
+  };
+  snapshot(author.world, 10, { version: 1, through: { timestamp: 0, commentId: "" } });
+  const map = (actor: string, time: number, changes: any, extra: any = {}) => append(signRecord({
+    schema: "fyow.map-delta/1", mapDeltaId: `map-${actor}-${time}`, gameId: author.world.gameId, workId: "work", seasonId: "season",
+    actorAccountId: actor, participant: { displayName: actor }, playerEpoch: 0,
+    deviceSigningPublicKey: identities[actor].signingPublicKey,
+    changes: { cells: {}, generals: {}, ...changes }, ...extra
+  }, identities[actor].signingPrivateKey), actor, base + time);
+  return { author, create, append, snapshot, map, roots, base, identities };
+}
+
 describe("online world platform service", () => {
   it("repairs legacy snapshots that omitted the season authority binding for guests", () => {
     const legacy = createWorld({ authorityAccountId: "author" });
@@ -75,7 +140,7 @@ describe("online world platform service", () => {
     expect(generalMemoryQualityIssue({ category: "speech", summary: "谈论北境", emotion: "振奋", intimacyDelta: 2, compactMemory: "只有言谈" })).toMatch(/同时包含言谈和经历/);
   });
 
-  it("finds the real newest page before allowing an older snapshot to stop history scanning", async () => {
+  it("finds the real newest page and conservatively scans legacy snapshots without coverage metadata", async () => {
     const oldControl = { schema: "fyow.control/3", id: "old", seasonId: "season", programHash: "old" };
     const latestControl = { schema: "fyow.control/3", id: "latest", seasonId: "season", programHash: "latest" };
     const snapshot = { schema: "fyow.snapshot/3", snapshotId: "snapshot", seasonId: "season", revision: 20, stateHash: "hash" };
@@ -101,11 +166,12 @@ describe("online world platform service", () => {
     instance.work = { id: "work" };
     const history = await instance.readHistory(true);
     expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).toContain("latest");
-    expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).not.toContain("old");
-    expect(instance.history).toMatchObject({ tailPage: 3, stoppedBy: "covered-by-snapshot" });
+    expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).toContain("old");
+    expect(instance.history).toMatchObject({ tailPage: 3, stoppedBy: "oldest-page" });
     expect([...new Set(requested)]).toEqual([1, 2, 3]);
 
     requested.splice(0);
+    instance.publicHistoryOrder = history.completeThrough;
     instance.knownCommentIds.add("latest-ordinary");
     await instance.readHistory(false);
     expect(requested).toEqual([3, 1]);
@@ -136,8 +202,8 @@ describe("online world platform service", () => {
     const history = await instance.readHistory(true);
     const ids = history.assembled.records.map((item: any) => item.record.id).filter(Boolean);
     expect(ids).toContain("latest-desc");
-    expect(ids).not.toContain("old-desc");
-    expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "newest-first", stoppedBy: "covered-by-snapshot" });
+    expect(ids).toContain("old-desc");
+    expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "newest-first", stoppedBy: "oldest-page" });
   });
 
   it("reads every page when comments are relevance-ranked instead of chronological", async () => {
@@ -236,6 +302,840 @@ describe("online world platform service", () => {
     expect(attempts).toBe(3);
     expect(new Set(posted).size).toBe(1);
     expect(result[0].id).toBe("comment-ok");
+  });
+
+  it("stores long records as one root with native continuation replies and a 980-character hard cap", async () => {
+    const posted: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        posted.push(options.body);
+        return { id: `chunk-${posted.length}`, account_id: "author", created_at: 100 + posted.length, content: options.body.content };
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    const record = { schema: "fyow.snapshot/3", snapshotId: "native-root", state: { archive: crypto.randomBytes(4500).toString("hex") } };
+    const sources = await instance.postRecord(record);
+    expect(posted.length).toBeGreaterThan(3);
+    expect(posted[0].parent_id).toBeUndefined();
+    expect(posted.slice(1).every(body => body.parent_id === "chunk-1" && body.to_account_id === "author")).toBe(true);
+    expect(posted.every(body => body.content.length <= 980)).toBe(true);
+    expect(assembleCommentRecords(sources).records[0].record).toEqual(record);
+    expect(recordPlatformOrder({ sources }).timestamp).toBe(101_000);
+    await expect(instance.postComment("x".repeat(981))).rejects.toThrow(/980/);
+    expect(posted).toHaveLength(sources.length);
+  });
+
+  it("recovers long native reply records across reply pagination before applying the root", async () => {
+    const record = { schema: "fyow.snapshot/3", snapshotId: "paginated-replies", revision: 4, state: { archive: crypto.randomBytes(30_000).toString("hex") } };
+    const chunks = encodeCommentRecord(record);
+    expect(chunks.length).toBeGreaterThan(50);
+    const root = { id: "root", account_id: "author", content: chunks[0], created_at: 100 };
+    const replies = chunks.slice(1).map((content: string, index: number) => ({
+      id: `reply-${index}`, account_id: "author", parent_id: "root", content, created_at: 200 + index
+    }));
+    const endpoints: string[] = [];
+    const instance = service({
+      requestConsole: async (endpoint: string) => {
+        endpoints.push(endpoint);
+        if (endpoint === "/comments/branches/root") return { data: replies.slice(0, 50), has_more: true };
+        if (endpoint === "/comments/branches/root?page=2&limit=50") return { data: replies.slice(50), has_more: false };
+        return [];
+      }
+    });
+    const comments = await instance.hydrateCommentReplies([root]);
+    const assembled = assembleCommentRecords(comments);
+    expect(assembled.records[0].record).toEqual(record);
+    expect(recordPlatformOrder(assembled.records[0])).toEqual({ timestamp: 100_000, commentId: "root" });
+    expect(endpoints).toEqual(["/comments/branches/root", "/comments/branches/root?page=2&limit=50"]);
+  });
+
+  it("registers the first map fragment as the letter entry point instead of sorting reply IDs", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const sources: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const item = {
+          id: sources.length ? `a-reply-${sources.length}` : "z-root", account_id: "player",
+          created_at: 100 + sources.length, content: options.body.content, parent_id: options.body.parent_id
+        };
+        sources.push(item);
+        return item;
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    await instance.publishMapChanges({
+      cells: {},
+      generals: { "large-general": { coreSetting: crypto.randomBytes(1800).toString("hex") } }
+    }, identity);
+    expect(sources.length).toBeGreaterThan(1);
+    expect(instance.world.players.player.commentRootId).toBe("z-root");
+  });
+
+  it("counts only root comments for history pagination when one root embeds over fifty native replies", async () => {
+    const record = { schema: "fyow.snapshot/3", snapshotId: "large-child-page", revision: 4, state: { archive: crypto.randomBytes(30_000).toString("hex") } };
+    const chunks = encodeCommentRecord(record);
+    expect(chunks.length).toBeGreaterThan(50);
+    const root = {
+      id: "root", account_id: "author", content: chunks[0], created_at: 200,
+      children: chunks.slice(1).map((content: string, index: number) => ({
+        id: `reply-${index}`, account_id: "author", content, created_at: index % 2 ? 900_000 : 800_000
+      }))
+    };
+    const firstPage = Array.from({ length: 50 }, (_, index) => ({
+      id: `ordinary-${index}`, account_id: "author", content: "普通评论", created_at: 100 + index
+    }));
+    const endpoints: string[] = [];
+    const instance = service({
+      requestConsole: async (endpoint: string) => {
+        endpoints.push(endpoint);
+        if (endpoint.includes("/branches/")) throw new Error("complete embedded replies need no branch read");
+        const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+        return { data: page === 1 ? firstPage : page === 2 ? [root] : [] };
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season" };
+    const history = await instance.readHistory(false);
+    expect(history.tailPage).toBe(2);
+    expect(history.pageOrder).toBe("oldest-first");
+    expect(history.assembled.records[0].record).toEqual(record);
+    expect(history.pages.get(2).rootCount).toBe(1);
+    expect(history.pages.get(2).length).toBeGreaterThan(50);
+    expect(endpoints.map(endpoint => Number(new URL(`https://test${endpoint}`).searchParams.get("page")))).toEqual([1, 2]);
+    expect(instance.commentRootPages.get("root")).toBe(2);
+  });
+
+  it("hydrates embedded children immediately and falls back to their indexed root page when branches are empty", async () => {
+    const record = { schema: "fyow.snapshot/3", snapshotId: "children-fallback", state: { archive: crypto.randomBytes(2500).toString("hex") } };
+    const chunks = encodeCommentRecord(record);
+    const root = {
+      id: "root", account_id: "author", content: chunks[0], created_at: 100,
+      children: chunks.slice(1).map((content: string, index: number) => ({ id: `reply-${index}`, account_id: "author", content, created_at: 200 }))
+    };
+    const endpoints: string[] = [];
+    const instance = service({
+      requestConsole: async (endpoint: string) => {
+        endpoints.push(endpoint);
+        return endpoint.startsWith("/comments/branches/") ? { data: [] } : { data: [root] };
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    expect(assembleCommentRecords(await instance.hydrateCommentReplies([root])).records[0].record).toEqual(record);
+    expect(endpoints).toEqual([]);
+    instance.commentRootPages.set("root", 4);
+    const bareRoot = { ...root, children: [] };
+    const hydrated = await instance.hydrateCommentReplies([bareRoot]);
+    expect(assembleCommentRecords(hydrated).records[0].record).toEqual(record);
+    expect(endpoints).toEqual(["/comments/branches/root", "/comments/work/1?page=4&limit=50&order=desc&filter_type=all"]);
+  });
+
+  it("does not locally apply truncated or mismatched-author posting responses", async () => {
+    const instance = service({
+      getAccount: () => ({ accountId: "author" }),
+      requestConsole: async (_endpoint: string, options: any = {}) => ({ id: "root", account_id: "author", content: options.body.content.slice(0, -5) })
+    });
+    instance.work = { id: "work" };
+    await expect(instance.postRecord({ schema: "fyow.event/3", eventId: "truncated" })).rejects.toThrow(/正文与提交分片不一致/);
+    instance.requestConsole = async (_endpoint: string, options: any = {}) => ({ id: "root", account_id: "other", content: options.body.content });
+    await expect(instance.postRecord({ schema: "fyow.event/3", eventId: "wrong-author" })).rejects.toThrow(/评论作者/);
+    instance.requestConsole = async (_endpoint: string, options: any = {}) => ({ id: "reply", parent_id: "different-root", account_id: "author", content: options.body.content });
+    await expect(instance.postRecord({ schema: "fyow.event/3", eventId: "wrong-branch" }, { parentId: "expected-root" })).rejects.toThrow(/评论分支/);
+  });
+
+  it("keeps unreadable branches incomplete and reports their read failure", async () => {
+    const diagnostics: any[] = [];
+    const instance = service({
+      requestConsole: async () => { throw new Error("reply endpoint failure"); },
+      onDiagnostic: (entry: any) => diagnostics.push(entry)
+    });
+    const chunks = encodeCommentRecord({ schema: "fyow.snapshot/3", snapshotId: "unreadable-branch", state: { archive: crypto.randomBytes(2000).toString("hex") } });
+    const comments = await instance.hydrateCommentReplies([{ id: "root", account_id: "author", content: chunks[0] }]);
+    const assembled = assembleCommentRecords(comments);
+    expect(assembled.records).toHaveLength(0);
+    expect(assembled.incomplete).toHaveLength(1);
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: "comment-branch-read-failed", rootCommentId: "root", page: 1, error: "reply endpoint failure"
+    }));
+  });
+
+  it("publishes plain world chat without invoking the model and returns platform-timestamped state", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const comments: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "平台账号名" }),
+      getIdentity: async () => identity,
+      now: () => 9_999_999_999_999,
+      requestModel: async () => { throw new Error("world chat must not invoke a model"); },
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const item = { id: `chat-${comments.length + 1}`, account_id: "player", created_at: "2026-09-17T05:00:00.000Z", ...options.body };
+        comments.push(item);
+        return item;
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚", position: { x: 1, y: 1 } };
+    const result = await instance.submitIntent({ type: "world-chat", text: "各位主公安好。", idempotencyKey: "same-chat" });
+    expect(result.state.worldChat).toEqual([{
+      messageId: expect.any(String), displayName: "晴岚", text: "各位主公安好。",
+      createdAt: Date.parse("2026-09-17T05:00:00.000Z"), accountId: "player"
+    }]);
+    expect(result.state.modelUsageEvents).toEqual([]);
+    const sentCount = comments.length;
+    expect(await instance.submitIntent({ type: "world-chat", text: "各位主公安好。", idempotencyKey: "same-chat" })).toMatchObject({ duplicate: true });
+    expect(comments).toHaveLength(sentCount);
+    await expect(instance.submitIntent({ type: "world-chat", text: "<img src=x onerror=alert(1)>" })).rejects.toThrow(/纯文本/);
+    await expect(instance.submitIntent({ type: "world-chat", text: "字".repeat(501) })).rejects.toThrow(/500/);
+    instance.worldChatSendTimes = Array(12).fill(instance.now());
+    await expect(instance.submitIntent({ type: "world-chat", text: "稍后发送" })).rejects.toThrow(/过于频繁/);
+  });
+
+  it("keeps only the newest fifty world-chat records by root platform time and enforces source, bans and reset epochs", () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player" }) });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    const message = (index: number, extra: any = {}) => {
+      const record = signRecord({
+        schema: "fyow.world-chat/1", messageId: `message-${index}`, gameId: "cc.aiero.fyow.grid-conquest",
+        workId: "work", seasonId: "season", accountId: "player", displayName: "晴岚", text: `消息${index}`,
+        createdAt: 100_000 - index, playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey, ...extra
+      }, identity.signingPrivateKey);
+      return { record, sources: [{ id: `root-${String(index).padStart(3, "0")}`, account_id: "player", created_at: 100 + index }] };
+    };
+    const items = Array.from({ length: 65 }, (_, index) => message(index)).reverse();
+    instance.applyWorldChatRecords([...items, items[0]], { replace: true });
+    expect(instance.state().worldChat).toHaveLength(50);
+    expect(instance.worldChat).toHaveLength(50);
+    expect(instance.state().worldChat[0]).toMatchObject({ text: "消息15", createdAt: 115_000 });
+    expect(instance.state().worldChat.at(-1)).toMatchObject({ text: "消息64", createdAt: 164_000 });
+    const wrongAuthor = message(80);
+    wrongAuthor.sources[0]!.account_id = "intruder";
+    expect(instance.applyWorldChatRecord(wrongAuthor)).toBe(false);
+    expect(instance.applyWorldChatRecord(message(80, { workId: "other" }))).toBe(false);
+    expect(instance.applyWorldChatRecord(message(80, { displayName: "冒名玩家" }))).toBe(false);
+    const forged = message(80);
+    forged.record.text = "改过的正文";
+    expect(instance.applyWorldChatRecord(forged)).toBe(false);
+    instance.world.bans.player = { banned: true };
+    expect(instance.state().worldChat).toEqual([]);
+    expect(instance.applyWorldChatRecord(message(81))).toBe(false);
+    instance.world.bans.player.banned = false;
+    instance.world.playerEpochs.player = 1;
+    expect(instance.state().worldChat).toEqual([]);
+    expect(instance.applyWorldChatRecord(message(82))).toBe(false);
+    expect(instance.applyWorldChatRecord(message(83, { playerEpoch: 1 }))).toBe(true);
+  });
+
+  it("deduplicates chat per author and retains the earliest platform root when a retry arrives first", () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player" }) });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    instance.world.players.other = { accountId: "other", displayName: "清音" };
+    const message = (accountId: string, timestamp: number) => ({
+      record: signRecord({
+        schema: "fyow.world-chat/1", messageId: "same-wire-id", gameId: "cc.aiero.fyow.grid-conquest",
+        workId: "work", seasonId: "season", accountId, displayName: instance.world.players[accountId].displayName,
+        text: accountId, playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey
+      }, identity.signingPrivateKey),
+      sources: [{ id: `${accountId}-${timestamp}`, account_id: accountId, created_at: timestamp }]
+    });
+    expect(instance.applyWorldChatRecord(message("player", 200))).toBe(true);
+    expect(instance.applyWorldChatRecord(message("player", 100))).toBe(true);
+    expect(instance.applyWorldChatRecord(message("player", 300))).toBe(false);
+    expect(instance.applyWorldChatRecord(message("other", 150))).toBe(true);
+    expect(instance.state().worldChat).toMatchObject([
+      { accountId: "player", createdAt: 100_000 },
+      { accountId: "other", createdAt: 150_000 }
+    ]);
+  });
+
+  it("continues the separate chat read past a ledger snapshot to recover the newest fifty messages", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const snapshot = signRecord({
+      schema: "fyow.snapshot/3", snapshotId: "new-snapshot", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season", revision: 10,
+      state: {}, stateHash: crypto.createHash("sha256").update("{}").digest("hex"), ledgerCoverage: { version: 1, through: { timestamp: 300_000, commentId: "" } }
+    }, identity.signingPrivateKey);
+    const control = signRecord({
+      schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season",
+      authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey
+    }, identity.signingPrivateKey);
+    const chatComments = Array.from({ length: 65 }, (_, index) => {
+      const record = signRecord({
+        schema: "fyow.world-chat/1", messageId: `history-chat-${index}`, gameId: "cc.aiero.fyow.grid-conquest",
+        workId: "work", seasonId: "season", accountId: "player", displayName: "晴岚", text: `历史${index}`,
+        createdAt: 9_999_999 - index, playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey
+      }, identity.signingPrivateKey);
+      return encodeCommentRecord(record).map((content: string, part: number) => ({
+        id: `chat-${index}-${part}`, account_id: "player", created_at: 100 + index, content
+      }));
+    }).flat();
+    const roots = [
+      ...chatComments,
+      ...Array.from({ length: 80 }, (_, index) => ({ id: `filler-${index}`, account_id: "author", content: "普通评论", created_at: 200 + index })),
+      ...encodeCommentRecord(snapshot).map((content: string, index: number) => ({ id: `snapshot-${index}`, account_id: "author", content, created_at: 400 })),
+      ...encodeCommentRecord(control).map((content: string, index: number) => ({ id: `control-${index}`, account_id: "author", content, created_at: 401 }))
+    ];
+    const instance = service({
+      getAccount: () => ({ accountId: "player" }),
+      requestConsole: async (endpoint: string) => {
+        const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+        return roots.slice((page - 1) * 50, page * 50);
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    const history = await instance.readHistory(true);
+    expect(instance.history.stoppedBy).toBe("covered-by-snapshot");
+    expect(history.assembled.records.filter((item: any) => item.record.schema === "fyow.world-chat/1")).toHaveLength(0);
+    const chats = await instance.readWorldChatHistory(history);
+    instance.applyWorldChatRecords(chats.assembled.records, { replace: true });
+    expect(instance.state().worldChat).toHaveLength(50);
+    expect(instance.state().worldChat[0].text).toBe("历史15");
+    expect(instance.state().worldChat.at(-1).text).toBe("历史64");
+  });
+
+  it("persists an incremental chat watermark even when fewer than fifty messages exist", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const makeChat = (id: string, time: number) => encodeCommentRecord(signRecord({
+      schema: "fyow.world-chat/1", messageId: id, gameId: "cc.aiero.fyow.grid-conquest",
+      workId: "work", seasonId: "season", accountId: "player", displayName: "晴岚", text: id,
+      playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey
+    }, identity.signingPrivateKey)).map((content: string, part: number) => ({ id: `${id}-${part}`, account_id: "player", created_at: time, content }));
+    const roots = [
+      ...makeChat("old-chat", 1),
+      ...Array.from({ length: 155 }, (_, index) => ({ id: `ordinary-${index}`, account_id: "author", created_at: 10 + index, content: "普通评论" }))
+    ];
+    const requested: number[] = [];
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-chat-watermark-"));
+    try {
+      const instance = service({
+        cacheFile: path.join(directory, "cache.json"),
+        getAccount: () => ({ accountId: "player" }),
+        requestConsole: async (endpoint: string) => {
+          const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+          requested.push(page);
+          return roots.slice((page - 1) * 50, page * 50);
+        }
+      });
+      instance.work = { id: "work", authorAccountId: "author" };
+      instance.control = { seasonId: "season", authorityAccountId: "author" };
+      instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+      instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+      instance.historyPageOrder = "oldest-first";
+      const first = await instance.readWorldChatHistory();
+      instance.applyWorldChatRecords(first.assembled.records);
+      expect(first.pagesScanned).toBe(4);
+      expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat"]);
+      instance.saveCache();
+      const cached = instance.loadCache("work");
+      expect(cached.worldChatCursor).toMatchObject({ initialized: true, seasonId: "season", tailPage: 4 });
+
+      instance.worldChat = cached.worldChat;
+      instance.worldChatCursor = cached.worldChatCursor;
+      requested.splice(0);
+      const unchanged = await instance.readWorldChatHistory();
+      instance.applyWorldChatRecords(unchanged.assembled.records);
+      expect(unchanged).toMatchObject({ incremental: true, pagesScanned: 1, reachedHistoryBoundary: true });
+      expect(requested).toEqual([4]);
+      expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat"]);
+
+      roots.push(...makeChat("new-chat", 300));
+      requested.splice(0);
+      const newest = await instance.readWorldChatHistory();
+      instance.applyWorldChatRecords(newest.assembled.records);
+      expect(newest.pagesScanned).toBe(1);
+      expect(requested).toEqual([4]);
+      expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat", "new-chat"]);
+      roots.push(...encodeCommentRecord({ schema: "fyow.snapshot/3", snapshotId: "after-chat", revision: 9 }).map((content: string, index: number) => ({
+        id: `after-chat-${index}`, account_id: "author", created_at: 301, content
+      })));
+      const afterSnapshot = await instance.readWorldChatHistory();
+      instance.applyWorldChatRecords(afterSnapshot.assembled.records);
+      expect(afterSnapshot.pagesScanned).toBe(1);
+      expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat", "new-chat"]);
+      instance.world.bans.player = { banned: true };
+      expect(instance.state().worldChat).toEqual([]);
+      instance.world.bans.player.banned = false;
+      instance.world.playerEpochs.player = 1;
+      expect(instance.state().worldChat).toEqual([]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retries incomplete chat branches across watermark polls without duplicating cached fragments", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const record = signRecord({
+      schema: "fyow.world-chat/1", messageId: "late-branch", gameId: "cc.aiero.fyow.grid-conquest",
+      workId: "work", seasonId: "season", accountId: "player", displayName: "晴岚",
+      text: crypto.randomBytes(250).toString("hex"), playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey
+    }, identity.signingPrivateKey);
+    const chunks = encodeCommentRecord(record);
+    expect(chunks.length).toBeGreaterThan(1);
+    const root = { id: "root", account_id: "player", created_at: 100, content: chunks[0] };
+    let repliesReady = false;
+    const instance = service({ requestConsole: async () => [root], getAccount: () => ({ accountId: "player" }) });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    instance.historyPageOrder = "newest-first";
+    instance.readCommentBranches = async () => repliesReady
+      ? chunks.slice(1).map((content: string, index: number) => ({ id: `reply-${index}`, account_id: "player", parent_id: "root", content, created_at: 200 }))
+      : [];
+    await instance.readWorldChatHistory();
+    await instance.readWorldChatHistory();
+    expect(instance.worldChatCursor.pendingChunks).toHaveLength(1);
+    repliesReady = true;
+    const recovered = await instance.readWorldChatHistory();
+    instance.applyWorldChatRecords(recovered.assembled.records);
+    expect(instance.worldChatCursor.pendingChunks).toHaveLength(0);
+    expect(instance.state().worldChat).toMatchObject([{ messageId: "late-branch", createdAt: 100_000 }]);
+  });
+
+  it("loads the latest fifty chats on cold open and restart while a newer control preserves the existing world", async () => {
+    const authorIdentity = generateOnlineWorldIdentity();
+    const playerIdentity = generateOnlineWorldIdentity();
+    const workId = "4ac2ab60-67ff-459d-ae9a-6274f1802195";
+    const baseTime = Date.parse("2026-09-17T00:00:00.000Z");
+    const program = packProgram({ gameId: "cc.aiero.fyow.grid-conquest", title: "聊天重启测试", html: "<!doctype html><html><body>test</body></html>" });
+    const world = createWorld({ seed: "preserved-world", seasonId: "preserved-season", authorityAccountId: "author", startedAt: baseTime });
+    world.players.player = {
+      accountId: "player", displayName: "晴岚", deviceSigningPublicKey: playerIdentity.signingPublicKey,
+      position: { x: 1, y: 1 }, gold: 100, joinedAt: baseTime, carriedGeneralIds: [], fieldArmySoldiers: 0
+    };
+    world.cells["1,1"] = { ownerAccountId: "player", soldiers: 0, generalIds: [] };
+    world.treasureEpoch = 5;
+    world.treasureSpawns.keep = { id: "keep", epoch: 5, x: 2, y: 1, materialId: "white", spawnedAt: baseTime };
+    const roots: any[] = [];
+    const append = (record: any, accountId: string, createdAt: number) => {
+      const chunks = encodeCommentRecord(record);
+      const rootId = `entry-${String(roots.length).padStart(4, "0")}`;
+      roots.push({
+        id: rootId, account_id: accountId, created_at: createdAt, content: chunks[0],
+        children: chunks.slice(1).map((content: string, index: number) => ({
+          id: `${rootId}-reply-${index}`, account_id: accountId, created_at: createdAt + index + 1, content
+        }))
+      });
+    };
+    const control = (id: string) => signRecord({
+      schema: "fyow.control/3", id, gameId: world.gameId, workId, seasonId: world.seasonId,
+      programHash: program.digest, authorityAccountId: "author", authoritySigningPublicKey: authorIdentity.signingPublicKey,
+      authorityEncryptionPublicKey: authorIdentity.encryptionPublicKey, startedAt: baseTime
+    }, authorIdentity.signingPrivateKey);
+    append(control("original-control"), "author", baseTime + 1);
+    const publicState = JSON.parse(JSON.stringify(world));
+    delete publicState.privatePlayers;
+    const { canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
+    append(signRecord({
+      schema: "fyow.snapshot/3", snapshotId: "existing-world", gameId: world.gameId, workId, seasonId: world.seasonId,
+      state: publicState, stateHash: sha256(Buffer.from(canonicalJson(publicState))), revision: 0
+    }, authorIdentity.signingPrivateKey), "author", baseTime + 2);
+    const appendChat = (index: number) => append(signRecord({
+      schema: "fyow.world-chat/1", messageId: `restart-${index}`, gameId: world.gameId, workId, seasonId: world.seasonId,
+      accountId: "player", displayName: "晴岚", text: `消息${index}`, playerEpoch: 0,
+      deviceSigningPublicKey: playerIdentity.signingPublicKey
+    }, playerIdentity.signingPrivateKey), "player", baseTime + 10 + index * 10);
+    for (let index = 0; index < 65; index += 1) appendChat(index);
+    append(control("updated-control"), "author", baseTime + 655);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-chat-restart-"));
+    const instances: any[] = [];
+    try {
+      const create = () => {
+        const instance = service({
+          cacheFile: path.join(directory, "cache.json"), now: () => baseTime + 10_000,
+          getAccount: () => ({ accountId: "player", username: "玩家" }), getIdentity: async () => playerIdentity,
+          requestConsole: async (endpoint: string, options: any = {}) => {
+            if (options.method === "POST") throw new Error("read-only open should not post comments");
+            if (endpoint.startsWith("/installed-apps/")) return { id: workId, created_by_account_id: "author", description: program.envelope };
+            if (endpoint.startsWith("/comments/branches/")) return [];
+            const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+            return { data: roots.slice((page - 1) * 50, page * 50) };
+          }
+        });
+        instances.push(instance);
+        return instance;
+      };
+      const first = create();
+      await first.open({ workUrl: `https://aigirlfriend.baby/zh/explore/installed/${workId}` });
+      expect(first.control.id).toBe("updated-control");
+      expect(first.state().worldChat.map((item: any) => item.text)).toEqual(Array.from({ length: 50 }, (_, index) => `消息${index + 15}`));
+      first.world.players.player.gold = 777;
+      first.world.privatePlayers.player.materials = { white: 3 };
+      first.close();
+      for (let index = 65; index < 72; index += 1) appendChat(index);
+      append(control("newest-control"), "author", baseTime + 1000);
+      const restarted = create();
+      await restarted.open({ workUrl: `https://aigirlfriend.baby/zh/explore/installed/${workId}` });
+      expect(restarted.control.id).toBe("newest-control");
+      expect(restarted.state().worldChat.map((item: any) => item.text)).toEqual(Array.from({ length: 50 }, (_, index) => `消息${index + 22}`));
+      expect(restarted.world).toMatchObject({ seasonId: "preserved-season", seed: "preserved-world", treasureEpoch: 5 });
+      expect(restarted.world.treasureSpawns.keep).toBeTruthy();
+      expect(restarted.world.players.player.gold).toBe(777);
+      expect(restarted.world.privatePlayers.player.materials.white).toBe(3);
+      expect(restarted.world.cells["1,1"].ownerAccountId).toBe("player");
+    } finally {
+      for (const instance of instances) instance.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("routes author treasure scattering through its own renderer confirmation without a player target", async () => {
+    const renderer = fs.readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    const start = renderer.indexOf('if(event.data.type==="admin"){');
+    const end = renderer.indexOf('if(event.data.type==="preferences"){', start);
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const handler = new AsyncFunction("event", "confirmAction", "api", "onlineWorldState", "replyResult", "replyError", "renderOnlineWorld", "toast", renderer.slice(start, end));
+    const calls: any[] = [];
+    const replies: any[] = [];
+    const errors: any[] = [];
+    const event = { data: { type: "admin", command: { type: "scatter-treasures", count: 12, redAscend: 1, redReroll: 2 } } };
+    const api = { administerOnlineWorld: async (command: any) => { calls.push(command); return { state: { revision: 2 } }; } };
+    await handler(event, async () => true, api, { world: { players: {} } }, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
+    expect(errors).toEqual([]);
+    expect(calls).toEqual([event.data.command]);
+    expect(replies[0]).toMatchObject({ admin: true, state: { revision: 2 } });
+    await handler(event, async () => false, api, null, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
+    expect(calls).toHaveLength(1);
+    expect(replies.at(-1)).toEqual({ cancelled: true });
+    await handler({ data: { type: "admin", command: { ...event.data.command, count: -1 } } }, async () => true, api, null, () => {}, (error: any) => errors.push(error), () => {}, () => {});
+    expect(errors.at(-1).message).toMatch(/数量无效/);
+  });
+
+  it("quotes a march while an action is pending without mutating state or sending a request", async () => {
+    const instance = service({
+      getAccount: () => ({ accountId: "player" }),
+      now: () => 1_000_000,
+      requestConsole: async () => { throw new Error("read-only quote must not use transport"); }
+    });
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚", position: { x: 1, y: 1 }, carriedGeneralIds: [] };
+    const pending = new Promise(() => {});
+    instance.intentInFlight = pending;
+    instance.intentInFlightKey = "pending-action";
+    instance.status = "degraded";
+    const before = JSON.stringify(instance.world);
+    const result = await instance.submitIntent({ type: "quote-march", to: { x: 3, y: 1 }, soldiers: 5, generalIds: [], attack: false, requestKey: "hover:3,1" });
+    expect(result.marchQuote).toMatchObject({ requestKey: "hover:3,1", from: { x: 1, y: 1 }, to: { x: 3, y: 1 }, distance: 2, soldiers: 5 });
+    expect(result.marchQuote.cost).toBeGreaterThan(0);
+    expect(result.marchQuote.durationMs).toBeGreaterThan(0);
+    expect(JSON.stringify(instance.world)).toBe(before);
+    expect(instance.intentInFlight).toBe(pending);
+    expect(instance.intentInFlightKey).toBe("pending-action");
+    instance.world.bans.player = { banned: true };
+    await expect(instance.submitIntent({ type: "quote-march", to: { x: 3, y: 1 }, soldiers: 0 })).rejects.toThrow(/封禁/);
+  });
+
+  it("lets only the author scatter configured treasure batches and excludes materials from public snapshots", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const start = Date.parse("2026-09-17T00:00:00.000Z");
+    const now = start + 6 * 60 * 60 * 1000;
+    const comments: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => identity,
+      now: () => now,
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const item = { id: `treasure-${String(comments.length + 1).padStart(4, "0")}`, account_id: "author", created_at: new Date(now + comments.length).toISOString(), ...options.body };
+        comments.push(item);
+        return item;
+      }
+    });
+    instance.world = createWorld({ seed: "treasure-service", seasonId: "season", authorityAccountId: "author", startedAt: start });
+    instance.world.privatePlayers.author = { materials: { white: 7 } };
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey };
+    const result = await instance.administer({ type: "scatter-treasures", count: 8, redAscend: 2, redReroll: 1 });
+    expect(result.command).toMatchObject({ type: "scatter-treasures", authorityId: expect.any(String) });
+    expect(result.state.world.treasureEpoch).toBe(1);
+    expect(Object.keys(result.state.world.treasureSpawns)).toHaveLength(8);
+    expect(Object.values(result.state.world.treasureSpawns).filter((item: any) => item.materialId === "red-ascend")).toHaveLength(2);
+    expect(Object.values(result.state.world.treasureSpawns).filter((item: any) => item.materialId === "red-reroll")).toHaveLength(1);
+    const records = assembleCommentRecords(comments).records.map((item: any) => item.record);
+    expect(records.find((record: any) => record.schema === "fyow.authority/1")).toMatchObject({ type: "treasure-scatter", treasureEpoch: 1 });
+    const snapshot = records.find((record: any) => record.schema === "fyow.snapshot/3");
+    expect(snapshot.state.treasureSpawns).toEqual(instance.world.treasureSpawns);
+    expect(snapshot.state.privatePlayers).toBeUndefined();
+    const previousCount = comments.length;
+    await instance.administer({ type: "scatter-treasures", count: 8 });
+    expect(comments.length).toBeGreaterThan(previousCount);
+    expect(instance.world.treasureEpoch).toBe(2);
+    instance.getAccount = () => ({ accountId: "guest" });
+    await expect(instance.administer({ type: "scatter-treasures" })).rejects.toThrow(/服主指令/);
+  });
+
+  it("serializes author scattering with player actions and rejects overlapping refreshes", async () => {
+    const identity = generateOnlineWorldIdentity();
+    let release: () => void = () => {};
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const comments: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => { await gate; return identity; },
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const item = { id: `admin-${String(comments.length).padStart(4, "0")}`, account_id: "author", created_at: 100 + comments.length, ...options.body };
+        comments.push(item);
+        return item;
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    const first = instance.administer({ type: "scatter-treasures", count: 5 });
+    await expect(instance.administer({ type: "scatter-treasures", count: 8 })).rejects.toThrow(/上一项行动/);
+    await expect(instance.submitIntent({ type: "join", idempotencyKey: "during-admin" })).rejects.toThrow(/上一项行动/);
+    await expect(instance.sync()).resolves.toMatchObject({ syncing: false });
+    expect(comments).toHaveLength(0);
+    release();
+    await first;
+    expect(instance.world.treasureEpoch).toBe(1);
+    expect(instance.intentInFlight).toBeNull();
+    await instance.administer({ type: "scatter-treasures", count: 8 });
+    expect(instance.world.treasureEpoch).toBe(2);
+  });
+
+  it("orders competing treasure claims by platform time and reconciles a losing local material reward only once", () => {
+    const firstIdentity = generateOnlineWorldIdentity();
+    const secondIdentity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "first" }) });
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world.treasureEpoch = 1;
+    instance.world.treasureSpawns["treasure-1"] = { id: "treasure-1", epoch: 1, x: 2, y: 3, materialId: "white", spawnedAt: 1000 };
+    instance.world.privatePlayers.first = { materials: { white: 2 }, treasureClaimRewards: { "treasure-1": { materialId: "white", reconciled: false } } };
+    const claim = (actor: string, identity: any, timestamp: number) => ({
+      record: signRecord({
+        schema: "fyow.map-delta/1", mapDeltaId: `claim-${actor}`, gameId: "cc.aiero.fyow.grid-conquest",
+        workId: "work", seasonId: "season", actorAccountId: actor, participant: { displayName: actor },
+        playerEpoch: 0, deviceSigningPublicKey: identity.signingPublicKey, deviceEncryptionPublicKey: identity.encryptionPublicKey,
+        changes: { cells: {}, generals: {}, claimedTreasures: { "treasure-1": { treasureId: "treasure-1", epoch: 1, x: 2, y: 3, materialId: "white", accountId: actor, claimedAt: 9_999_999 } } }
+      }, identity.signingPrivateKey),
+      sources: [{ id: `claim-root-${actor}`, account_id: actor, created_at: timestamp }]
+    });
+    expect(instance.applyMapDelta(claim("first", firstIdentity, 300))).toBe(true);
+    expect(instance.world.claimedTreasures["treasure-1"].accountId).toBe("first");
+    expect(instance.world.treasureSpawns["treasure-1"]).toBeUndefined();
+    expect(instance.applyMapDelta(claim("second", secondIdentity, 200))).toBe(true);
+    expect(instance.world.claimedTreasures["treasure-1"].accountId).toBe("second");
+    instance.reconcileTreasureRewards();
+    instance.reconcileTreasureRewards();
+    expect(instance.world.privatePlayers.first.materials.white).toBe(1);
+    const forged = claim("first", firstIdentity, 400);
+    forged.record = signRecord({ ...forged.record, mapDeltaId: "forged-scatter", changes: { ...forged.record.changes, treasureSpawns: { fake: {} } } }, firstIdentity.signingPrivateKey);
+    expect(instance.applyMapDelta(forged)).toBe(false);
+  });
+
+  it("withholds a newly arrived treasure from cultivation until its public claim survives a complete sync", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const rivalIdentity = generateOnlineWorldIdentity();
+    const now = 1_000_000 + 6 * 60 * 60 * 1000;
+    const comments: any[] = [];
+    const makeInstance = () => {
+      const instance = service({
+        getAccount: () => ({ accountId: "player", username: "玩家" }),
+        getIdentity: async () => identity,
+        now: () => now,
+        requestConsole: async (_endpoint: string, options: any = {}) => {
+          const item = { id: `pending-${comments.length}`, account_id: "player", created_at: now + comments.length, ...options.body };
+          comments.push(item);
+          return item;
+        }
+      });
+      instance.work = { id: "work", authorAccountId: "author" };
+      instance.control = { seasonId: "season", authorityAccountId: "author" };
+      instance.world = createWorld({ seed: "held-material", seasonId: "season", authorityAccountId: "author", startedAt: 1_000_000 });
+      instance.world.players.player = {
+        accountId: "player", displayName: "晴岚", joinedAt: 1_000_000, gold: 20_000,
+        position: { x: 1, y: 1 }, carriedGeneralIds: ["general"], fieldArmySoldiers: 0
+      };
+      instance.world.privatePlayers.player = { materials: { white: 0 } };
+      instance.world.generals.general = createFallbackGeneral({ id: "general", name: "青禾", gender: "female", holderAccountId: "player", power: 300 });
+      instance.world.generals.general.status = "carried";
+      instance.world.treasureSpawns["treasure-1"] = { id: "treasure-1", epoch: 1, x: 2, y: 1, materialId: "white", spawnedAt: 1_000_000 };
+      instance.world.treasureEpoch = 1;
+      instance.world.jobs.arrival = {
+        id: "arrival", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
+        generalIds: [], soldiers: 0, attack: false, startedAt: now - 1000, finishAt: now
+      };
+      return instance;
+    };
+    const instance = makeInstance();
+    const cultivation = { type: "cultivate-general", generalId: "general", goldInvestment: 5000, materialId: "white", idempotencyKey: "cultivate" };
+    await expect(instance.submitIntent(cultivation)).rejects.toThrow(/素材不足/);
+    expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+    expect(instance.world.privatePlayers.player.materials.white).toBe(0);
+    expect(instance.world.generals.general.cultivationCount).toBe(0);
+    const own = assembleCommentRecords(comments).records.find((item: any) => item.record.changes?.claimedTreasures?.["treasure-1"]);
+    expect(own).toBeTruthy();
+    expect(instance.pendingTreasureRewards()).toHaveLength(1);
+    instance.reconcileTreasureRewards({ confirmationComplete: false, assembled: { records: [own], incomplete: [] } });
+    expect(instance.world.privatePlayers.player.materials.white).toBe(0);
+    instance.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [own], incomplete: [] } });
+    instance.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [own], incomplete: [] } });
+    expect(instance.world.privatePlayers.player.materials.white).toBe(1);
+    await instance.submitIntent({ ...cultivation, idempotencyKey: "confirmed-cultivate" });
+    expect(instance.world.generals.general.cultivationCount).toBe(1);
+    expect(instance.world.privatePlayers.player.materials.white).toBe(0);
+
+    comments.splice(0);
+    const loser = makeInstance();
+    await loser.settleLocalClock();
+    const loserOwn = assembleCommentRecords(comments).records.find((item: any) => item.record.changes?.claimedTreasures?.["treasure-1"]);
+    const competingRecord = signRecord({
+      ...loserOwn.record, mapDeltaId: "earlier-rival", actorAccountId: "rival",
+      deviceSigningPublicKey: rivalIdentity.signingPublicKey, deviceEncryptionPublicKey: rivalIdentity.encryptionPublicKey,
+      changes: { cells: {}, generals: {}, claimedTreasures: { "treasure-1": { ...loserOwn.record.changes.claimedTreasures["treasure-1"], accountId: "rival" } } }
+    }, rivalIdentity.signingPrivateKey);
+    const competing = { record: competingRecord, sources: [{ id: "earlier", account_id: "rival", created_at: now - 1 }] };
+    loser.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [loserOwn, competing], incomplete: [] } });
+    expect(loser.world.privatePlayers.player.materials.white).toBe(0);
+    expect(loser.world.privatePlayers.player.treasureClaimRewards["treasure-1"].status).toBe("rejected");
+    await expect(loser.submitIntent(cultivation)).rejects.toThrow(/素材不足/);
+    expect(loser.world.generals.general.cultivationCount).toBe(0);
+    expect(loser.world.players.player.gold).toBe(20_000);
+  });
+
+  it("scans past a newer snapshot and known comments when a material claim still needs confirmation", async () => {
+    const comments = [
+      ...Array.from({ length: 50 }, (_, index) => ({ id: `old-${index}`, content: "评论", created_at: 100 + index })),
+      ...encodeCommentRecord({ schema: "fyow.snapshot/3", snapshotId: "pending-snapshot", seasonId: "season", revision: 8 }).map((content: string, index: number) => ({ id: `pending-snapshot-${index}`, content, created_at: 200 })),
+      ...encodeCommentRecord({ schema: "fyow.control/3", id: "control", seasonId: "season" }).map((content: string, index: number) => ({ id: `control-${index}`, content, created_at: 201 }))
+    ];
+    const instance = service({
+      getAccount: () => ({ accountId: "player" }),
+      requestConsole: async (endpoint: string) => {
+        const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+        return comments.slice((page - 1) * 50, page * 50);
+      }
+    });
+    instance.work = { id: "work" };
+    instance.world = createWorld({ seasonId: "season" });
+    instance.world.privatePlayers.player = { materials: { white: 0 }, treasureClaimRewards: {
+      treasure: { status: "pending", materialId: "white", amount: 1, scanFrom: { timestamp: 120_000, commentId: "old-20" } }
+    } };
+    instance.knownCommentIds.add("control-0");
+    const history = await instance.readHistory(false);
+    expect(history.comments.some((comment: any) => comment.id === "old-0")).toBe(true);
+    expect(history.confirmationComplete).toBe(true);
+  });
+
+  it("replays unseen claims and map deltas below snapshot publication without overwriting newer included keys", async () => {
+    const fixture = coverageHarness();
+    const { author, base, map } = fixture;
+    const general = (id: string, holder: string, name: string, x: number) => ({
+      ...createFallbackGeneral({ id, name, gender: "female", holderAccountId: holder, power: 300 }),
+      status: "deployed", location: { x, y: x }
+    });
+    const missed = map("player", 150, {
+      cells: {
+        "2,2": { ownerAccountId: "player", soldiers: 10, generalIds: ["shared"] },
+        "3,3": { ownerAccountId: "player", soldiers: 10, generalIds: ["remote"] }
+      },
+      generals: { shared: general("shared", "player", "较早", 2), remote: general("remote", "player", "远端", 3) },
+      claimedTreasures: { old: { treasureId: "old", epoch: 1, x: 1, y: 1, materialId: "white", accountId: "player", claimedAt: base + 150 } }
+    });
+    const included = map("author", 180, {
+      cells: { "2,2": { ownerAccountId: "author", soldiers: 20, generalIds: ["shared"] } },
+      generals: { shared: general("shared", "author", "较新", 2) }
+    });
+    expect(author.applyMapDelta(included)).toBe(true);
+    author.publicHistoryOrder = { timestamp: base + 100, commentId: "" };
+    await author.administer({ type: "scatter-treasures", count: 2 });
+    const snapshots = assembleCommentRecords(require("../electron/online-world-protocol.cjs").extractCommentItems(fixture.roots)).records
+      .filter((item: any) => item.record.schema === "fyow.snapshot/3");
+    const published = snapshots.at(-1).record;
+    expect(published.ledgerCoverage.through.timestamp).toBe(base + 100);
+    expect(published.state.claimedTreasures.old).toBeUndefined();
+    expect(published.ledgerCoverage.treasureSources.old.retiredOrder.timestamp).toBeGreaterThan(base + 150);
+    expect(author.applyMapDelta(missed)).toBe(true);
+    expect(author.world.claimedTreasures.old.accountId).toBe("player");
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.world.claimedTreasures.old.accountId).toBe("player");
+    expect(reader.world.cells["3,3"].ownerAccountId).toBe("player");
+    expect(reader.world.cells["2,2"].ownerAccountId).toBe("author");
+    expect(reader.world.generals.shared.name).toBe("较新");
+    expect(reader.world.generals.remote.name).toBe("远端");
+    expect(reader.world.treasureEpoch).toBe(2);
+    expect(reader.world.treasureSpawns.old).toBeUndefined();
+    const tooLate = map("player", 500, { claimedTreasures: missed.record.changes.claimedTreasures });
+    expect(reader.validMapDelta(tooLate)).toBe(false);
+  });
+
+  it("holds snapshot coverage before an incomplete root and replays it after late replies arrive", async () => {
+    const fixture = coverageHarness();
+    const pending = fixture.map("player", 150, {
+      cells: { "9,9": { ownerAccountId: "player", soldiers: 10, generalIds: [] } }
+    }, { padding: crypto.randomBytes(2500).toString("hex") });
+    const replies = pending.root.children;
+    expect(replies.length).toBeGreaterThan(1);
+    pending.root.children = [];
+    fixture.append({ schema: "fyow.event/3", eventId: "after-pending" }, "author", fixture.base + 190);
+    await fixture.author.sync(true);
+    expect(fixture.author.history.incomplete).toBeGreaterThan(0);
+    expect(fixture.author.publicHistoryOrder.timestamp).toBe(fixture.base + 149);
+    const published = await fixture.author.publishSnapshot();
+    expect(published.ledgerCoverage.through.timestamp).toBe(fixture.base + 149);
+    expect(published.state.cells["9,9"]).toBeUndefined();
+    pending.root.children = replies.map((reply: any) => ({ ...reply, created_at: fixture.base + 500 }));
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.history.incomplete).toBe(0);
+    expect(reader.world.cells["9,9"].ownerAccountId).toBe("player");
+  });
+
+  it("reads older pages down to signed coverage instead of stopping at the snapshot's publication page", async () => {
+    const fixture = coverageHarness();
+    const ordinary = (time: number) => fixture.roots.push({ id: `ordinary-${time}`, account_id: "author", content: "普通评论", created_at: fixture.base + time, children: [] });
+    for (let time = 11; time < 110; time += 1) ordinary(time);
+    fixture.map("player", 150, { cells: { "7,7": { ownerAccountId: "player", soldiers: 10, generalIds: [] } } });
+    for (let time = 151; time <= 250; time += 1) ordinary(time);
+    fixture.snapshot(fixture.author.world, 300, { version: 1, through: { timestamp: fixture.base + 100, commentId: "" } });
+    fixture.append(signRecord({ ...fixture.author.control, id: "new-control" }, fixture.identities.author.signingPrivateKey), "author", fixture.base + 301);
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.history.tailPage).toBe(5);
+    expect(reader.history.stoppedBy).toBe("covered-by-snapshot");
+    expect(reader.world.cells["7,7"].ownerAccountId).toBe("player");
+    expect(reader.publicMapBaselineOrder.timestamp).toBe(fixture.base + 100);
+  });
+
+  it("replays legacy snapshots conservatively without resurrecting pre-reset data or resetting the new player again", async () => {
+    const fixture = coverageHarness();
+    fixture.map("player", 50, { cells: { "4,4": { ownerAccountId: "player", soldiers: 10, generalIds: [] } } });
+    fixture.append(signRecord({
+      schema: "fyow.authority/1", authorityId: "old-reset", gameId: fixture.author.world.gameId,
+      workId: "work", seasonId: "season", authorityAccountId: "author", type: "player-reset", targetAccountId: "player", playerEpoch: 1
+    }, fixture.identities.author.signingPrivateKey), "author", fixture.base + 70);
+    const resetState = JSON.parse(JSON.stringify(fixture.author.world));
+    resetState.playerEpochs.player = 1;
+    fixture.snapshot(resetState, 100);
+    fixture.map("player", 110, { cells: { "5,5": { ownerAccountId: "player", soldiers: 10, generalIds: [] } } }, { playerEpoch: 1 });
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.publicMapBaselineOrder.timestamp).toBe(0);
+    expect(reader.world.playerEpochs.player).toBe(1);
+    expect(reader.world.cells["4,4"]).toBeUndefined();
+    expect(reader.world.cells["5,5"].ownerAccountId).toBe("player");
+    expect(reader.world.players.player).toBeTruthy();
+    await reader.sync(true);
+    expect(reader.world.playerEpochs.player).toBe(1);
+    expect(reader.world.cells["5,5"].ownerAccountId).toBe("player");
   });
 
   it("serializes player actions so two different clicks cannot mutate the world concurrently", async () => {

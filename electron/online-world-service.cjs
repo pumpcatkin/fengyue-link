@@ -3,9 +3,11 @@ const fs = require("node:fs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const {
   FYOW_SCHEMAS,
+  FYOW_COMMENT_LIMIT,
   canonicalJson,
   sha256,
   encodeCommentRecord,
+  decodeCommentChunk,
   assembleCommentRecords,
   extractCommentItems,
   commentIsFromAuthor,
@@ -25,6 +27,8 @@ const {
   resetPlayerState,
   settleWorld,
   applyIntent,
+  marchQuote,
+  scatterTreasures,
   buildGeneralGenerationRequest,
   buildPlayerProfileContextRequest,
   buildGeneralMemoryUpdateRequest,
@@ -47,6 +51,12 @@ const PENDING_EFFECT_RETRY_BASE_MS = 30 * 1000;
 const PENDING_EFFECT_RETRY_MAX_MS = 15 * 60 * 1000;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 const INITIAL_GENERAL_BASE_POWER = 300;
+const WORLD_CHAT_LIMIT = 50;
+const WORLD_CHAT_TEXT_LIMIT = 500;
+const WORLD_CHAT_SEND_LIMIT = 12;
+const WORLD_CHAT_SCAN_PAGES = MAX_HISTORY_PAGES;
+const REPLY_PAGE_LIMIT = 100;
+const { MATERIAL_BY_ID } = require("./grid-talents.cjs");
 
 function workReference(value, origin) {
   const url = new URL(String(value || ""), origin);
@@ -112,6 +122,17 @@ function commentAccountId(value) {
   return String(value?.account_id || value?.accountId || value?.created_by_account_id || value?.from_account_id || value?.account?.id || value?.user?.id || value?.author?.id || value?.created_by?.id || value?.sender?.id || "");
 }
 
+function commentPageRoots(comments) {
+  if (!Array.isArray(comments)) return [];
+  if (!Array.isArray(comments.rootIds)) return comments.filter(comment => !comment?._fyowRootId);
+  const ids = new Set(comments.rootIds);
+  return comments.filter(comment => ids.has(commentId(comment)));
+}
+
+function commentPageRootCount(comments) {
+  return Number.isSafeInteger(comments?.rootCount) ? comments.rootCount : commentPageRoots(comments).length;
+}
+
 function commentTimestamp(value) {
   const raw = value?.created_at ?? value?.createdAt ?? value?.create_time ?? value?.createTime
     ?? value?.published_at ?? value?.publishedAt ?? value?.timestamp ?? null;
@@ -127,10 +148,10 @@ function commentTimestamp(value) {
 
 function recordPlatformOrder(item) {
   const sources = Array.isArray(item?.sources) ? item.sources : [];
-  const timestamps = sources.map(commentTimestamp).filter(Boolean);
+  const root = item?.root || sources.find(source => decodeCommentChunk(source?.content)?.part === 1) || sources[0];
   return {
-    timestamp: timestamps.length ? Math.max(...timestamps) : 0,
-    commentId: sources.map(commentId).filter(Boolean).sort().at(-1) || ""
+    timestamp: commentTimestamp(root),
+    commentId: commentId(root)
   };
 }
 
@@ -138,6 +159,28 @@ function comparePlatformOrder(left, right) {
   const a = recordPlatformOrder(left);
   const b = recordPlatformOrder(right);
   return a.timestamp - b.timestamp || a.commentId.localeCompare(b.commentId);
+}
+
+function ledgerOrder(value) {
+  return {
+    timestamp: Math.max(0, Number.isFinite(Number(value?.timestamp)) ? Number(value.timestamp) : 0),
+    commentId: String(value?.commentId || "")
+  };
+}
+
+function snapshotCoverage(record) {
+  const coverage = record?.ledgerCoverage;
+  return coverage?.version === 1 && coverage.through && Number.isFinite(Number(coverage.through.timestamp))
+    && Number(coverage.through.timestamp) >= 0 ? coverage : null;
+}
+
+function normalizeWorldChatText(value) {
+  const text = String(value ?? "").normalize("NFC").trim();
+  if (!text) throw new Error("世界聊天内容不能为空");
+  if (Array.from(text).length > WORLD_CHAT_TEXT_LIMIT) throw new Error(`世界聊天内容不能超过 ${WORLD_CHAT_TEXT_LIMIT} 字`);
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) throw new Error("世界聊天内容包含不可见控制字符");
+  if (/[<>]/u.test(text)) throw new Error("世界聊天只支持纯文本");
+  return text;
 }
 
 function cloneJson(value) {
@@ -211,14 +254,19 @@ function changedEntries(before, after) {
 }
 
 function createPublicMapChanges(beforeWorld, afterWorld) {
+  const claims = changedEntries(beforeWorld?.claimedTreasures || {}, afterWorld?.claimedTreasures || {});
+  for (const [id, claim] of Object.entries(claims)) {
+    if (claim) claim.materialId = String(beforeWorld?.treasureSpawns?.[id]?.materialId || claim.materialId || "");
+  }
   return {
     cells: changedEntries(publicCells(beforeWorld), publicCells(afterWorld)),
-    generals: changedEntries(publicGenerals(beforeWorld), publicGenerals(afterWorld))
+    generals: changedEntries(publicGenerals(beforeWorld), publicGenerals(afterWorld)),
+    claimedTreasures: claims
   };
 }
 
 function hasPublicMapChanges(changes) {
-  return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length);
+  return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length || Object.keys(changes?.claimedTreasures || {}).length);
 }
 
 function parseJsonAnswer(value) {
@@ -395,6 +443,9 @@ function normalizeWorldState(value) {
   value.players ||= {};
   value.bans ||= {};
   value.playerEpochs ||= {};
+  value.treasureSpawns ||= {};
+  value.claimedTreasures ||= {};
+  value.treasureEpoch = Math.max(0, Math.trunc(Number(value.treasureEpoch || 0)));
   value.privatePlayers ||= {};
   value.generals ||= {};
   value.jobs ||= {};
@@ -482,12 +533,16 @@ class OnlineWorldService {
     this.knownCommentIds = new Set();
     this.historyTailPage = 1;
     this.historyPageOrder = "unknown";
+    this.commentRootPages = new Map();
     this.history = { pagesRead: 0, commentsRead: 0, stoppedBy: null, incomplete: 0, invalid: 0, tailPage: 1, pageOrder: "unknown" };
     this.pendingMigration = null;
     this.directInbox = [];
     this.seenDirectMessageIds = new Set();
     this.directSendTimes = [];
     this.directReceiveTimes = new Map();
+    this.worldChat = [];
+    this.worldChatSendTimes = [];
+    this.worldChatCursor = null;
     this.localEvents = [];
     this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.appliedMapDeltaIds = new Set();
@@ -495,9 +550,12 @@ class OnlineWorldService {
     this.publicDeltaCountSinceSnapshot = 0;
     this.publicMapOrder = { timestamp: 0, commentId: "" };
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+    this.publicHistoryOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
     this.publicGeneralOrders = {};
     this.publicParticipantOrders = {};
+    this.publicAuthorityOrders = {};
+    this.publicTreasureSources = {};
     this.modelConversationIds = new Set();
     this.modelRequestQueue = Promise.resolve();
     this.modelUsageEvents = [];
@@ -551,7 +609,7 @@ class OnlineWorldService {
 
   state() {
     const account = this.account();
-    const projection = this.world ? projectWorldState(this.world, account.accountId) : null;
+    const projection = this.world ? projectWorldState(this.world, account.accountId, this.now()) : null;
     if (projection && !this.mapFactsCache) {
       this.mapFactsCache = [];
       for (let y = 0; y < GRID_SIZE; y += 1) for (let x = 0; x < GRID_SIZE; x += 1) this.mapFactsCache.push(staticCell(projection.seed, x, y));
@@ -574,6 +632,7 @@ class OnlineWorldService {
       },
       mapFacts: projection ? this.mapFactsCache : [],
       directInbox: this.directInbox.slice(-100),
+      worldChat: this.currentWorldChat().map(({ messageId, displayName, text, createdAt, accountId }) => ({ messageId, displayName, text, createdAt, accountId })),
       modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
       programHtml: this.program?.html || null,
       serverNow: this.now()
@@ -768,10 +827,15 @@ class OnlineWorldService {
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
       publicMapOrder: { ...this.publicMapOrder },
       publicMapBaselineOrder: { ...this.publicMapBaselineOrder },
+      publicHistoryOrder: { ...this.publicHistoryOrder },
       publicCellOrders: this.publicCellOrders,
       publicGeneralOrders: this.publicGeneralOrders,
       publicParticipantOrders: this.publicParticipantOrders,
+      publicAuthorityOrders: this.publicAuthorityOrders,
+      publicTreasureSources: this.publicTreasureSources,
       directInbox: this.directInbox.slice(-100),
+      worldChat: this.currentWorldChat(),
+      worldChatCursor: cloneJson(this.worldChatCursor),
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
       pendingModelEffects: cloneJson(this.pendingModelEffects.slice(-50)),
@@ -780,6 +844,7 @@ class OnlineWorldService {
       knownCommentIds: [...this.knownCommentIds].slice(-500),
       historyTailPage: this.historyTailPage,
       historyPageOrder: this.historyPageOrder,
+      commentRootPages: [...this.commentRootPages].slice(-2000),
       updatedAt: this.now()
     };
     atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
@@ -840,7 +905,14 @@ class OnlineWorldService {
     this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
     this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
     this.historyPageOrder = ["oldest-first", "newest-first", "mixed"].includes(cached?.historyPageOrder) ? cached.historyPageOrder : "unknown";
+    this.commentRootPages = new Map((Array.isArray(cached?.commentRootPages) ? cached.commentRootPages : [])
+      .filter(entry => Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] > 0 && entry[1] <= MAX_HISTORY_PAGES)
+      .slice(-2000));
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
+    this.worldChat = Array.isArray(cached?.worldChat) ? cached.worldChat.slice(-WORLD_CHAT_LIMIT) : [];
+    this.worldChatSendTimes = [];
+    this.worldChatCursor = cached?.worldChatCursor && typeof cached.worldChatCursor === "object"
+      ? cloneJson(cached.worldChatCursor) : null;
     this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
     this.appliedAuthorityIds = new Set(Array.isArray(cached?.appliedAuthorityIds) ? cached.appliedAuthorityIds.slice(-1000) : []);
@@ -853,9 +925,12 @@ class OnlineWorldService {
       timestamp: Number(cached?.publicMapBaselineOrder?.timestamp || 0),
       commentId: String(cached?.publicMapBaselineOrder?.commentId || "")
     };
+    this.publicHistoryOrder = ledgerOrder(cached?.publicHistoryOrder);
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
+    this.publicAuthorityOrders = cached?.publicAuthorityOrders && typeof cached.publicAuthorityOrders === "object" ? cached.publicAuthorityOrders : {};
+    this.publicTreasureSources = cached?.publicTreasureSources && typeof cached.publicTreasureSources === "object" ? cached.publicTreasureSources : {};
     this.modelUsageEvents = Array.isArray(cached?.modelUsageEvents) ? cached.modelUsageEvents.slice(-30).filter(item => item && typeof item === "object") : [];
     this.modelUsageSequence = Math.max(
       Math.max(0, Math.trunc(Number(cached?.modelUsageSequence || 0))),
@@ -878,9 +953,12 @@ class OnlineWorldService {
       this.publicDeltaCountSinceSnapshot = 0;
       this.publicMapOrder = { timestamp: 0, commentId: "" };
       this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+      this.publicHistoryOrder = { timestamp: 0, commentId: "" };
       this.publicCellOrders = {};
       this.publicGeneralOrders = {};
       this.publicParticipantOrders = {};
+      this.publicAuthorityOrders = {};
+      this.publicTreasureSources = {};
     }
     if (cached?.world?.gameId === GRID_GAME_ID) {
       this.control = cached.control || null;
@@ -928,6 +1006,7 @@ class OnlineWorldService {
     if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以初始化新赛季");
     const identity = await this.getIdentity();
     const world = createWorld({ authorityAccountId: account.accountId, startedAt: this.now() });
+    scatterTreasures(world, {}, this.now());
     const programHash = this.currentProgramHash();
     this.control = signRecord({
       schema: FYOW_SCHEMAS.control,
@@ -945,7 +1024,18 @@ class OnlineWorldService {
       updatedAt: world.startedAt
     }, identity.signingPrivateKey);
     this.world = world;
-    await this.postRecord(this.control);
+    this.publicMapOrder = { timestamp: 0, commentId: "" };
+    this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+    this.publicHistoryOrder = { timestamp: 0, commentId: "" };
+    this.publicCellOrders = {};
+    this.publicGeneralOrders = {};
+    this.publicParticipantOrders = {};
+    this.publicAuthorityOrders = {};
+    this.publicTreasureSources = {};
+    this.appliedMapDeltaIds.clear();
+    this.appliedAuthorityIds.clear();
+    const controlSources = await this.postRecord(this.control);
+    this.rememberTreasureSources(world.treasureSpawns, recordPlatformOrder({ sources: controlSources }));
     await this.publishSnapshot();
     this.status = "ready";
     this.saveCache();
@@ -981,7 +1071,7 @@ class OnlineWorldService {
   }
 
   async postComment(content, options = {}) {
-    if (String(content).length > 1000) throw new Error("评论数据超过 1000 字符限制");
+    if (String(content).length > FYOW_COMMENT_LIMIT) throw new Error(`评论数据超过 ${FYOW_COMMENT_LIMIT} 字符限制`);
     const body = { is_anonymous: false, biz_type: 1, content: String(content) };
     if (options.parentId) {
       body.parent_id = String(options.parentId);
@@ -993,15 +1083,32 @@ class OnlineWorldService {
 
   async postRecord(record, options = {}) {
     const responses = [];
-    for (const content of encodeCommentRecord(record)) {
-      const response = await this.retryPlatformWrite(() => this.postComment(content, options));
-      const source = firstObject(response, item => Boolean(commentId(item))) || response || {};
-      responses.push({
+    const chunks = encodeCommentRecord(record);
+    let rootId = String(options.parentId || "");
+    let rootAccountId = String(options.toAccountId || this.work?.authorAccountId || "");
+    for (let index = 0; index < chunks.length; index += 1) {
+      const content = chunks[index];
+      const writeOptions = rootId ? { ...options, parentId: rootId, toAccountId: rootAccountId } : options;
+      const response = await this.retryPlatformWrite(() => this.postComment(content, writeOptions));
+      const source = firstObject(response, item => Boolean(item.id || item.comment_id) && typeof item.content === "string")
+        || firstObject(response, item => Boolean(item.id || item.comment_id)) || response || {};
+      if (typeof source?.content === "string" && source.content !== content) throw new Error("平台返回的评论正文与提交分片不一致");
+      if (commentAccountId(source) && commentAccountId(source) !== this.account().accountId) throw new Error("平台返回的评论作者与当前账号不一致");
+      const sourceParentId = String(source?.parent_id || source?.parentId || source?.root_comment_id || source?.rootCommentId || "");
+      if (sourceParentId && sourceParentId !== String(writeOptions.parentId || "")) throw new Error("平台返回的评论分支与提交分片不一致");
+      const normalized = {
         ...(source && typeof source === "object" ? source : {}),
         id: commentId(source) || commentId(response),
         account_id: commentAccountId(source) || commentAccountId(response) || this.account().accountId,
+        ...(writeOptions.parentId ? { parent_id: String(writeOptions.parentId) } : {}),
         content
-      });
+      };
+      responses.push(normalized);
+      if (index === 0 && !rootId) {
+        rootId = commentId(normalized);
+        rootAccountId = commentAccountId(normalized) || rootAccountId;
+        if (chunks.length > 1 && !rootId) throw new Error("平台没有返回分片根评论编号，无法发布原生回复分片");
+      }
     }
     return responses;
   }
@@ -1021,39 +1128,144 @@ class OnlineWorldService {
 
   async readHistoryPage(page) {
     const payload = await this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`, { timeout: 20000 });
-    return extractCommentItems(payload);
+    const comments = extractCommentItems(payload);
+    for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
+    if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
+    return comments;
+  }
+
+  async readCommentBranches(rootCommentId, maxPages = REPLY_PAGE_LIMIT, options = {}) {
+    const rootId = String(rootCommentId || "");
+    if (!rootId) return [];
+    const result = [];
+    const seen = new Set();
+    let page = 1;
+    while (page <= maxPages) {
+      const endpoint = page === 1
+        ? `/comments/branches/${encodeURIComponent(rootId)}`
+        : `/comments/branches/${encodeURIComponent(rootId)}?page=${page}&limit=${HISTORY_PAGE_SIZE}`;
+      let payload;
+      try {
+        payload = await this.requestConsole(endpoint, { timeout: 15000 });
+      } catch (error) {
+        this.diagnostic({
+          event: "comment-branch-read-failed", rootCommentId: rootId, page,
+          error: error?.message || String(error)
+        });
+        break;
+      }
+      const items = extractCommentItems(payload);
+      const beforeCount = seen.size;
+      for (const item of items) {
+        const id = commentId(item);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          result.push({ ...item, _fyowRootId: rootId });
+        }
+      }
+      const meta = firstObject(payload, item => item && typeof item === "object"
+        && (Object.hasOwn(item, "has_more") || Object.hasOwn(item, "hasMore") || Object.hasOwn(item, "next_page")
+          || Object.hasOwn(item, "nextPage") || Object.hasOwn(item, "total_pages") || Object.hasOwn(item, "totalPages")));
+      const hasMore = meta
+        ? Boolean((meta.has_more ?? meta.hasMore ?? meta.next_page ?? meta.nextPage)
+          || Number(meta.total_pages ?? meta.totalPages ?? 0) > page)
+        : commentPageRootCount(items) >= HISTORY_PAGE_SIZE;
+      if (!hasMore || !commentPageRootCount(items) || seen.size === beforeCount) break;
+      page += 1;
+    }
+    const expectedRoot = options.rootComment;
+    const expectedChunk = decodeCommentChunk(expectedRoot?.content);
+    const missingExpectedRecord = expectedChunk && !assembleCommentRecords([expectedRoot, ...result]).records.some(item => item.id === expectedChunk.id && item.kind === expectedChunk.kind);
+    // The live platform can return an empty branches endpoint while delivering
+    // native replies in the root's children on the main comment list.
+    if (this.work?.id && (!result.length || missingExpectedRecord)) {
+      const hintedPage = this.commentRootPages.get(rootId)
+        || (this.historyPageOrder === "newest-first" ? 1 : Math.max(1, Number(this.historyTailPage || 1)));
+      const candidates = [...new Set([hintedPage, hintedPage + 1, hintedPage - 1])].filter(candidate => candidate >= 1 && candidate <= MAX_HISTORY_PAGES);
+      for (const candidate of candidates) {
+        let comments;
+        try {
+          comments = await this.readHistoryPage(candidate);
+        } catch (error) {
+          this.diagnostic({ event: "comment-root-read-failed", rootCommentId: rootId, page: candidate, error: error?.message || String(error) });
+          continue;
+        }
+        const root = comments.find(item => commentId(item) === rootId);
+        if (!root) continue;
+        for (const item of comments) {
+          const id = commentId(item);
+          if (!id || id === rootId || String(item._fyowRootId || "") !== rootId || seen.has(id)) continue;
+          seen.add(id);
+          result.push(item);
+        }
+        break;
+      }
+    }
+    return result;
+  }
+
+  async hydrateCommentReplies(comments, assembled = null, fetchedRoots = new Set()) {
+    const base = extractCommentItems(Array.isArray(comments) ? comments : []);
+    const current = assembled && base.length === comments?.length ? assembled : assembleCommentRecords(base);
+    const roots = [];
+    const seenRoots = new Set();
+    for (const item of current.incomplete || []) {
+      for (const source of item.sources || []) {
+        const chunk = decodeCommentChunk(source?.content);
+        if (chunk?.part !== 1) continue;
+        const id = commentId(source);
+        if (id && !seenRoots.has(id) && !fetchedRoots.has(id)) {
+          seenRoots.add(id);
+          roots.push(id);
+        }
+      }
+    }
+    const expanded = [...base];
+    const seen = new Set(base.map(commentId).filter(Boolean));
+    for (const rootId of roots.slice(0, 200)) {
+      fetchedRoots.add(rootId);
+      const replies = await this.readCommentBranches(rootId, REPLY_PAGE_LIMIT, { rootComment: base.find(comment => commentId(comment) === rootId) });
+      for (const reply of replies) {
+        const id = commentId(reply);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          expanded.push(reply);
+        }
+      }
+    }
+    return expanded;
   }
 
   async locateHistoryTailPage(readPage) {
     const hintedPage = Math.max(1, Math.trunc(Number(this.historyTailPage || 1)));
     const hinted = await readPage(hintedPage);
-    if (!hinted.length && hintedPage > 1) {
+    if (!commentPageRootCount(hinted) && hintedPage > 1) {
       this.historyTailPage = 1;
       return this.locateHistoryTailPage(readPage);
     }
-    if (hinted.length < HISTORY_PAGE_SIZE) return hintedPage;
+    if (commentPageRootCount(hinted) < HISTORY_PAGE_SIZE) return hintedPage;
     let lower = hintedPage;
     let upper = null;
     let step = 1;
     while (lower < MAX_HISTORY_PAGES) {
       const candidate = Math.min(MAX_HISTORY_PAGES, hintedPage + step);
       const comments = await readPage(candidate);
-      if (!comments.length) {
+      if (!commentPageRootCount(comments)) {
         upper = candidate;
         break;
       }
       lower = candidate;
-      if (comments.length < HISTORY_PAGE_SIZE || candidate === MAX_HISTORY_PAGES) return candidate;
+      if (commentPageRootCount(comments) < HISTORY_PAGE_SIZE || candidate === MAX_HISTORY_PAGES) return candidate;
       step *= 2;
     }
     if (upper == null) return lower;
     while (lower + 1 < upper) {
       const middle = Math.floor((lower + upper) / 2);
       const comments = await readPage(middle);
-      if (!comments.length) upper = middle;
+      if (!commentPageRootCount(comments)) upper = middle;
       else {
         lower = middle;
-        if (comments.length < HISTORY_PAGE_SIZE) return middle;
+        if (commentPageRootCount(comments) < HISTORY_PAGE_SIZE) return middle;
       }
     }
     return lower;
@@ -1063,7 +1275,13 @@ class OnlineWorldService {
     const all = [];
     const seen = new Set();
     const pages = new Map();
+    const fetchedRoots = new Set();
+    const pendingRewards = this.pendingTreasureRewards();
+    const confirmationFloor = pendingRewards.length
+      ? pendingRewards.map(([, reward]) => reward.scanFrom || { timestamp: 0, commentId: "" }).sort(compareOrderValue)[0] : null;
+    let confirmationComplete = !confirmationFloor;
     let stoppedBy = null;
+    let reachedCoverage = false;
     let pagesRead = 0;
     const readPage = async page => {
       if (pages.has(page)) return pages.get(page);
@@ -1076,7 +1294,7 @@ class OnlineWorldService {
     this.historyTailPage = tailPage;
     const firstPageComments = await readPage(1);
     const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
-    const timestamps = comments => comments.map(commentTimestamp).filter(Boolean);
+    const timestamps = comments => commentPageRoots(comments).map(commentTimestamp).filter(Boolean);
     const monotonic = (values, ascending) => values.every((value, index) => !index || (ascending ? values[index - 1] <= value : values[index - 1] >= value));
     const firstTimes = timestamps(firstPageComments);
     const tailTimes = timestamps(tailPageComments);
@@ -1106,8 +1324,20 @@ class OnlineWorldService {
         seen.add(id);
         all.push(comment);
       }
+      const expanded = await this.hydrateCommentReplies(all, assembleCommentRecords(all), fetchedRoots);
+      for (const comment of expanded) {
+        const id = commentId(comment);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        all.push(comment);
+      }
       if (pageOrder === "mixed") continue;
       const assembled = assembleCommentRecords(all);
+      if (confirmationFloor) {
+        confirmationComplete = !assembled.incomplete.length && commentPageRoots(comments).some(comment => commentTimestamp(comment) > 0 && compareOrderValue(
+          { timestamp: commentTimestamp(comment), commentId: commentId(comment) }, confirmationFloor
+        ) <= 0);
+      }
       const decision = historyPageDecision({
         pageComments: comments,
         assembled,
@@ -1115,24 +1345,92 @@ class OnlineWorldService {
         fullScan,
         requireControl: Boolean(fullScan || !this.control)
       });
-      if (decision.stop) {
+      const historyControl = this.verifiedControls(assembled.records)[0]?.record || this.control;
+      const newestSnapshot = this.verifiedSnapshots(assembled.records, historyControl)[0];
+      const replacingSnapshot = newestSnapshot && (!this.world || compareOrderValue(recordPlatformOrder(newestSnapshot), this.publicMapOrder) > 0);
+      const floor = replacingSnapshot
+        ? ledgerOrder(snapshotCoverage(newestSnapshot.record)?.through)
+        : ledgerOrder(this.publicHistoryOrder);
+      const reachedFloor = floor.timestamp > 0 && commentPageRoots(comments).some(comment =>
+        commentTimestamp(comment) > 0 && compareOrderValue({ timestamp: commentTimestamp(comment), commentId: commentId(comment) }, floor) <= 0);
+      if (decision.stop && reachedFloor && (!confirmationFloor || confirmationComplete)) {
         stoppedBy = decision.reason;
+        reachedCoverage = true;
         break;
       }
     }
     if (pageOrder === "mixed") stoppedBy = "mixed-page-order-full-scan";
-    const assembled = assembleCommentRecords(all);
-    this.history = { pagesRead, commentsRead: all.length, stoppedBy: stoppedBy || "oldest-page", incomplete: assembled.incomplete.length, invalid: assembled.invalid.length, tailPage, pageOrder };
-    const newestComments = [...all]
+    const hydrated = await this.hydrateCommentReplies(all, assembleCommentRecords(all), fetchedRoots);
+    const assembled = assembleCommentRecords(hydrated);
+    const hitHistoryCap = tailPage === MAX_HISTORY_PAGES && commentPageRootCount(tailPageComments) >= HISTORY_PAGE_SIZE;
+    if ((!stoppedBy || pageOrder === "mixed") && !hitHistoryCap) reachedCoverage = true;
+    const newestRootTime = commentPageRoots(hydrated).reduce((maximum, comment) => Math.max(maximum, commentTimestamp(comment)), 0);
+    let completeThrough = { timestamp: Math.max(0, newestRootTime - 1), commentId: "" };
+    for (const partial of assembled.incomplete) {
+      const root = (partial.sources || []).find(source => decodeCommentChunk(source.content)?.part === 1);
+      const beforePartial = { timestamp: Math.max(0, commentTimestamp(root) - 1), commentId: "" };
+      if (compareOrderValue(beforePartial, completeThrough) < 0) completeThrough = beforePartial;
+    }
+    if (confirmationFloor && !stoppedBy && !assembled.incomplete.length) confirmationComplete = true;
+    if (confirmationFloor && pageOrder === "mixed" && !assembled.incomplete.length) confirmationComplete = true;
+    this.history = { pagesRead, commentsRead: hydrated.length, stoppedBy: stoppedBy || "oldest-page", incomplete: assembled.incomplete.length, invalid: assembled.invalid.length, tailPage, pageOrder };
+    const newestComments = [...hydrated]
       .sort((left, right) => commentTimestamp(left) - commentTimestamp(right) || commentId(left).localeCompare(commentId(right)))
       .slice(-500);
     for (const comment of newestComments) this.knownCommentIds.add(commentId(comment));
     if (this.knownCommentIds.size > 500) this.knownCommentIds = new Set([...this.knownCommentIds].slice(-500));
-    return { comments: all, assembled };
+    return { comments: hydrated, assembled, pages, tailPage, pageOrder, confirmationComplete, completeThrough: reachedCoverage ? completeThrough : null };
+  }
+
+  verifiedControls(records) {
+    return (records || [])
+      .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === this.work?.id && item.record.gameId === GRID_GAME_ID && this.validAuthorSource(item))
+      .filter(item => String(item.record.authorityAccountId || "") === this.work?.authorAccountId)
+      .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
+      .sort((left, right) => comparePlatformOrder(right, left));
+  }
+
+  verifiedSnapshots(records, control = this.control) {
+    if (!control) return [];
+    return (records || [])
+      .filter(item => item.record?.schema === FYOW_SCHEMAS.snapshot && item.record.seasonId === control.seasonId && item.record.workId === this.work?.id && item.record.gameId === GRID_GAME_ID)
+      .filter(item => this.validAuthorSource(item) && recordPlatformOrder(item).timestamp > 0)
+      .filter(item => verifySignedRecord(item.record, control.authoritySigningPublicKey))
+      .filter(item => item.record.stateHash === sha256(Buffer.from(canonicalJson(item.record.state))))
+      .filter(item => !item.record.ledgerCoverage || (snapshotCoverage(item.record) && compareOrderValue(ledgerOrder(snapshotCoverage(item.record).through), recordPlatformOrder(item)) <= 0))
+      .sort((left, right) => comparePlatformOrder(right, left));
   }
 
   validAuthorSource(item) {
-    return (item.sources || []).some(source => commentIsFromAuthor(source) || commentAccountId(source) === this.work.authorAccountId);
+    const sources = item.sources || [];
+    return sources.length > 0 && sources.every(source => {
+      const accountId = commentAccountId(source);
+      return accountId ? accountId === this.work.authorAccountId : commentIsFromAuthor(source);
+    });
+  }
+
+  rememberTreasureSources(spawns, order = { timestamp: 0, commentId: "" }, retiringEpoch = null) {
+    if (retiringEpoch != null) {
+      for (const source of Object.values(this.publicTreasureSources)) {
+        if (Number(source.spawn?.epoch) >= retiringEpoch) continue;
+        if (!source.retiredOrder || compareOrderValue(order, source.retiredOrder) < 0) source.retiredOrder = { ...order };
+      }
+    }
+    for (const [id, spawn] of Object.entries(spawns || {})) {
+      if (!spawn || !MATERIAL_BY_ID[String(spawn.materialId || "")]) continue;
+      const existing = this.publicTreasureSources[id];
+      if (!existing) this.publicTreasureSources[id] = { spawn: cloneJson(spawn), introducedOrder: { ...order } };
+    }
+  }
+
+  collectTreasureSources(records) {
+    const snapshots = this.verifiedSnapshots(records);
+    const scatters = (records || []).filter(item => item.record?.type === "treasure-scatter" && this.validAuthorityDirective(item));
+    for (const item of [...snapshots, ...scatters].sort(comparePlatformOrder)) {
+      if (item.record.schema === FYOW_SCHEMAS.snapshot) {
+        this.rememberTreasureSources(item.record.state?.treasureSpawns, recordPlatformOrder(item));
+      } else this.rememberTreasureSources(item.record.treasureSpawns, recordPlatformOrder(item), item.record.treasureEpoch);
+    }
   }
 
   validMapDelta(item) {
@@ -1141,13 +1439,16 @@ class OnlineWorldService {
     const actorAccountId = String(record.actorAccountId || "");
     if (!actorAccountId || !record.deviceSigningPublicKey || !verifySignedRecord(record, record.deviceSigningPublicKey)) return false;
     const order = recordPlatformOrder(item);
-    if (!(item.sources || []).some(source => commentAccountId(source) === actorAccountId) || !order.timestamp) return false;
+    if (!(item.sources || []).length || !(item.sources || []).every(source => commentAccountId(source) === actorAccountId) || !order.timestamp) return false;
     const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actorAccountId] || 0)));
     if (Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) !== currentEpoch) return false;
     if (this.world?.bans?.[actorAccountId]?.banned) return false;
     const cells = record.changes?.cells;
     const generals = record.changes?.generals;
+    const treasureClaims = record.changes?.claimedTreasures || {};
     if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
+    if (!treasureClaims || typeof treasureClaims !== "object" || Array.isArray(treasureClaims) || Object.keys(treasureClaims).length > 24) return false;
+    if (Object.hasOwn(record.changes, "treasureSpawns") || Object.hasOwn(record.changes, "treasureEpoch")) return false;
     if (Object.keys(cells).length > GRID_SIZE * GRID_SIZE || Object.keys(generals).length > 100) return false;
     for (const [key, cell] of Object.entries(cells)) {
       const match = key.match(/^(\d+),(\d+)$/);
@@ -1171,6 +1472,15 @@ class OnlineWorldService {
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
     }
+    for (const [id, claim] of Object.entries(treasureClaims)) {
+      const source = this.publicTreasureSources[id];
+      const spawn = this.world?.treasureSpawns?.[id] || this.world?.claimedTreasures?.[id] || source?.spawn;
+      if (!claim || !spawn || String(claim.treasureId || "") !== id || String(claim.accountId || "") !== actorAccountId) return false;
+      if (Number(claim.epoch) !== Number(spawn.epoch) || Number(claim.x) !== Number(spawn.x) || Number(claim.y) !== Number(spawn.y)) return false;
+      if (!MATERIAL_BY_ID[String(claim.materialId || "")] || (spawn.materialId && String(claim.materialId) !== String(spawn.materialId))) return false;
+      if (source?.introducedOrder && compareOrderValue(order, source.introducedOrder) < 0) return false;
+      if (source?.retiredOrder && compareOrderValue(order, source.retiredOrder) >= 0) return false;
+    }
     return true;
   }
 
@@ -1179,6 +1489,12 @@ class OnlineWorldService {
     if (record?.schema !== FYOW_SCHEMAS.authority || record.gameId !== GRID_GAME_ID || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
     if (!this.work?.authorAccountId || String(record.authorityAccountId || "") !== this.work.authorAccountId || String(this.control?.authorityAccountId || "") !== this.work.authorAccountId) return false;
     if (!this.validAuthorSource(item) || !recordPlatformOrder(item).timestamp || !verifySignedRecord(record, this.control.authoritySigningPublicKey)) return false;
+    if (record.type === "treasure-scatter") {
+      const spawns = record.treasureSpawns;
+      if (!Number.isSafeInteger(record.treasureEpoch) || record.treasureEpoch < 0 || !spawns || typeof spawns !== "object" || Array.isArray(spawns) || Object.keys(spawns).length > GRID_SIZE * GRID_SIZE) return false;
+      return Object.entries(spawns).every(([id, spawn]) => spawn && spawn.id === id && validPosition(spawn)
+        && Number.isSafeInteger(spawn.epoch) && spawn.epoch > 0 && spawn.epoch <= record.treasureEpoch && MATERIAL_BY_ID[String(spawn.materialId || "")]);
+    }
     if (!["player-reset", "player-ban", "player-unban"].includes(String(record.type || ""))) return false;
     return Boolean(String(record.targetAccountId || "").trim());
   }
@@ -1200,8 +1516,22 @@ class OnlineWorldService {
     const order = recordPlatformOrder(item);
     if (!id || this.appliedAuthorityIds.has(id) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     normalizeWorldState(this.world);
-    const target = String(record.targetAccountId);
-    if (record.type === "player-reset") {
+    const target = String(record.targetAccountId || "");
+    const authorityKey = record.type === "treasure-scatter" ? "treasure-scatter" : `${record.type === "player-reset" ? "reset" : "ban"}:${target}`;
+    if (compareOrderValue(order, this.publicAuthorityOrders[authorityKey] || this.publicMapBaselineOrder) <= 0) return false;
+    if (record.type === "treasure-scatter") {
+      if (record.treasureEpoch < this.world.treasureEpoch) return false;
+      this.rememberTreasureSources(this.world.treasureSpawns);
+      this.rememberTreasureSources(record.treasureSpawns, order, record.treasureEpoch);
+      this.world.treasureEpoch = record.treasureEpoch;
+      this.world.treasureSpawns = Object.fromEntries(Object.entries(record.treasureSpawns).filter(([treasureId]) => !this.world.claimedTreasures[treasureId]).map(([treasureId, spawn]) => [treasureId, cloneJson(spawn)]));
+    } else if (record.type === "player-reset") {
+      const targetEpoch = Number(record.playerEpoch);
+      if (Number.isSafeInteger(targetEpoch) && targetEpoch <= Number(this.world.playerEpochs[target] || 0)) {
+        this.appliedAuthorityIds.add(id);
+        this.publicAuthorityOrders[authorityKey] = order;
+        return false;
+      }
       const ownedCells = Object.entries(this.world.cells).filter(([, cell]) => String(cell?.ownerAccountId || "") === target).map(([key]) => key);
       const ownedGenerals = Object.entries(this.world.generals).filter(([, general]) => String(general?.holderAccountId || "") === target).map(([generalId]) => generalId);
       resetPlayerState(this.world, target, Number(record.playerEpoch));
@@ -1222,6 +1552,7 @@ class OnlineWorldService {
     }
     this.world.revision = Number(this.world.revision || 0) + 1;
     this.appliedAuthorityIds.add(id);
+    this.publicAuthorityOrders[authorityKey] = order;
     if (this.appliedAuthorityIds.size > 1000) this.appliedAuthorityIds = new Set([...this.appliedAuthorityIds].slice(-1000));
     if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     return true;
@@ -1254,6 +1585,14 @@ class OnlineWorldService {
       else this.world.generals[id] = publicGeneralState(general);
       this.publicGeneralOrders[id] = order;
     }
+    for (const [id, claim] of Object.entries(record.changes.claimedTreasures || {})) {
+      const previous = this.world.claimedTreasures?.[id];
+      const previousOrder = previous?.platformOrder;
+      if (previous && (!previousOrder || compareOrderValue(order, previousOrder) >= 0)) continue;
+      this.world.claimedTreasures ||= {};
+      this.world.claimedTreasures[id] = { ...cloneJson(claim), platformOrder: order };
+      delete this.world.treasureSpawns[id];
+    }
     if (compareOrderValue(order, this.publicParticipantOrders[actorAccountId] || this.publicMapBaselineOrder) > 0) {
       const existing = this.world.players[actorAccountId] || { accountId: actorAccountId };
       this.world.players[actorAccountId] = {
@@ -1263,7 +1602,7 @@ class OnlineWorldService {
         displayName: String(record.participant?.displayName || existing.displayName || actorAccountId).slice(0, 40),
         deviceSigningPublicKey: record.deviceSigningPublicKey,
         deviceEncryptionPublicKey: record.deviceEncryptionPublicKey,
-        commentRootId: existing.commentRootId || item.sources.map(commentId).filter(Boolean).sort()[0] || null
+        commentRootId: existing.commentRootId || order.commentId || null
       };
       if (actorAccountId !== this.account().accountId) delete this.world.players[actorAccountId].position;
       this.publicParticipantOrders[actorAccountId] = order;
@@ -1271,7 +1610,7 @@ class OnlineWorldService {
     this.world.revision = Number(this.world.revision || 0) + 1;
     this.appliedMapDeltaIds.add(String(record.mapDeltaId));
     if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
-    this.publicMapOrder = order;
+    if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     this.publicDeltaCountSinceSnapshot += 1;
     return true;
   }
@@ -1281,6 +1620,214 @@ class OnlineWorldService {
       .filter(item => item.record?.schema === FYOW_SCHEMAS.mapDelta)
       .sort(comparePlatformOrder)
       .reduce((count, item) => count + Number(this.applyMapDelta(item)), 0);
+  }
+
+  currentWorldChat() {
+    const entries = (this.worldChat || [])
+      .filter(item => item && String(item.messageId || "") && String(item.text || ""))
+      .filter(item => {
+        const actor = String(item.accountId || "");
+        if (!actor || item.seasonId !== this.control?.seasonId || this.world?.bans?.[actor]?.banned) return false;
+        const epoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actor] || 0)));
+        return Math.max(0, Math.trunc(Number(item.playerEpoch || 0))) === epoch;
+      })
+      .sort((left, right) => Number(left.platformTimestamp || left.createdAt || 0) - Number(right.platformTimestamp || right.createdAt || 0)
+        || String(left.commentId || left.messageId).localeCompare(String(right.commentId || right.messageId)));
+    return entries.slice(-WORLD_CHAT_LIMIT).map(item => ({ ...item, createdAt: Number(item.platformTimestamp || item.createdAt || 0) }));
+  }
+
+  validWorldChat(item) {
+    const record = item?.record;
+    if (!record || record.schema !== FYOW_SCHEMAS.worldChat || record.gameId !== GRID_GAME_ID
+      || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
+    const actorAccountId = String(record.accountId || "");
+    const player = this.world?.players?.[actorAccountId];
+    if (!actorAccountId || !player || this.world?.bans?.[actorAccountId]?.banned) return false;
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(record.messageId || "")) || !record.deviceSigningPublicKey || !verifySignedRecord(record, record.deviceSigningPublicKey)) return false;
+    const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actorAccountId] || 0)));
+    if (Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) !== currentEpoch) return false;
+    const displayName = String(record.displayName || "").trim();
+    if (!displayName || displayName !== String(player.displayName || "").trim()) return false;
+    let text;
+    try { text = normalizeWorldChatText(record.text); } catch { return false; }
+    if (text !== String(record.text)) return false;
+    const sources = Array.isArray(item.sources) ? item.sources : [];
+    if (!sources.length || !recordPlatformOrder(item).timestamp) return false;
+    if (!sources.every(source => commentAccountId(source) === actorAccountId)) return false;
+    return true;
+  }
+
+  applyWorldChatRecord(item) {
+    if (!this.validWorldChat(item)) return false;
+    const record = item.record;
+    const order = recordPlatformOrder(item);
+    const messageId = String(record.messageId);
+    const existingIndex = this.worldChat.findIndex(candidate => String(candidate.messageId) === messageId
+      && String(candidate.accountId) === String(record.accountId)
+      && Number(candidate.playerEpoch || 0) === Number(record.playerEpoch || 0));
+    if (existingIndex >= 0) {
+      const existing = this.worldChat[existingIndex];
+      if (compareOrderValue(order, { timestamp: Number(existing.platformTimestamp || existing.createdAt || 0), commentId: existing.commentId || "" }) >= 0) return false;
+      this.worldChat.splice(existingIndex, 1);
+    }
+    this.worldChat.push({
+      messageId,
+      displayName: String(record.displayName).slice(0, 40),
+      text: String(record.text),
+      createdAt: Number(order.timestamp),
+      platformTimestamp: Number(order.timestamp),
+      commentId: String(order.commentId || ""),
+      accountId: String(record.accountId),
+      seasonId: String(record.seasonId),
+      playerEpoch: Math.max(0, Math.trunc(Number(record.playerEpoch || 0)))
+    });
+    this.worldChat = this.worldChat
+      .sort((left, right) => Number(left.platformTimestamp || 0) - Number(right.platformTimestamp || 0)
+        || String(left.commentId || "").localeCompare(String(right.commentId || "")))
+      .slice(-WORLD_CHAT_LIMIT);
+    return true;
+  }
+
+  applyWorldChatRecords(records, { replace = false } = {}) {
+    const candidates = (records || [])
+      .filter(item => item?.record?.schema === FYOW_SCHEMAS.worldChat)
+      .sort(comparePlatformOrder);
+    if (replace) this.worldChat = [];
+    let applied = 0;
+    for (const item of candidates) if (this.applyWorldChatRecord(item)) applied += 1;
+    this.worldChat = this.currentWorldChat().slice(-WORLD_CHAT_LIMIT);
+    return applied;
+  }
+
+  consumeWorldChatBudget() {
+    const now = this.now();
+    this.worldChatSendTimes = this.worldChatSendTimes.filter(timestamp => now - timestamp < DIRECT_RATE_WINDOW_MS);
+    if (this.worldChatSendTimes.length >= WORLD_CHAT_SEND_LIMIT) throw new Error("世界聊天发送过于频繁，请稍后再试");
+    this.worldChatSendTimes.push(now);
+  }
+
+  async submitWorldChat(intent, account) {
+    const actor = this.world.players?.[account.accountId];
+    if (!actor) throw new Error("请先加入在线游戏世界");
+    const text = normalizeWorldChatText(intent.text);
+    const playerEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[account.accountId] || 0)));
+    const messageId = sha256(Buffer.from(canonicalJson({
+      workId: this.work.id, seasonId: this.control.seasonId, accountId: account.accountId, playerEpoch, idempotencyKey: intent.idempotencyKey
+    }))).slice(0, 48);
+    if (this.currentWorldChat().some(message => message.messageId === messageId && message.accountId === account.accountId)) return { duplicate: true, state: this.state() };
+    this.consumeWorldChatBudget();
+    const identity = await this.getIdentity();
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.worldChat,
+      messageId,
+      gameId: GRID_GAME_ID,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      accountId: account.accountId,
+      displayName: String(actor.displayName || account.username || "玩家").trim().slice(0, 40),
+      text,
+      createdAt: this.now(),
+      playerEpoch,
+      deviceSigningPublicKey: identity.signingPublicKey
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    let item = { record, sources };
+    if (!recordPlatformOrder(item).timestamp) {
+      const history = await this.readWorldChatHistory();
+      item = history.assembled.records.find(candidate => candidate.record.messageId === record.messageId && candidate.record.accountId === account.accountId) || item;
+    }
+    if (!this.applyWorldChatRecord(item)) throw new Error("世界聊天发布后未通过来源与签名校验");
+    const message = this.currentWorldChat().find(candidate => candidate.messageId === record.messageId && candidate.accountId === account.accountId) || null;
+    this.saveCache();
+    this.notify();
+    return {
+      event: null,
+      mapDelta: null,
+      effects: [],
+      deferredEffects: [],
+      snapshotWarning: null,
+      dialogue: null,
+      worldChat: message,
+      state: this.state()
+    };
+  }
+
+  async readWorldChatHistory(history = null) {
+    if (!this.work) return { comments: [], assembled: { records: [], incomplete: [], invalid: [] } };
+    const seasonId = String(this.control?.seasonId || "");
+    const cursor = this.worldChatCursor?.seasonId === seasonId && this.worldChatCursor?.initialized
+      ? this.worldChatCursor : null;
+    let comments = Array.isArray(cursor?.pendingChunks) ? cloneJson(cursor.pendingChunks).slice(-512) : [];
+    const seen = new Set(comments.map(commentId).filter(Boolean));
+    let pagesRead = 0;
+    const pages = history?.pages || new Map();
+    const fetchedRoots = new Set();
+    const recent = new Map();
+    const readPage = async page => {
+      if (pages.has(page)) return pages.get(page);
+      const result = await this.readHistoryPage(page);
+      pages.set(page, result);
+      pagesRead += 1;
+      return result;
+    };
+    const tailPage = history?.tailPage || await this.locateHistoryTailPage(readPage);
+    this.historyTailPage = tailPage;
+    const knownOrder = history?.pageOrder || this.historyPageOrder;
+    const pageOrder = ["newest-first", "oldest-first", "mixed"].includes(knownOrder) ? knownOrder : "mixed";
+    const count = Math.min(tailPage, WORLD_CHAT_SCAN_PAGES);
+    const scanPages = Array.from({ length: count }, (_, index) => pageOrder === "newest-first" ? index + 1 : tailPage - index);
+    let assembled = { records: [], incomplete: [], invalid: [] };
+    let newestOrder = cursor?.order || { timestamp: 0, commentId: "" };
+    let reachedHistoryBoundary = false;
+    let pagesScanned = 0;
+    for (const page of scanPages) {
+      const pageComments = await readPage(page);
+      pagesScanned += 1;
+      if (!commentPageRootCount(pageComments)) break;
+      const pageOrders = commentPageRoots(pageComments).map(comment => ({ timestamp: commentTimestamp(comment), commentId: commentId(comment) }))
+        .filter(order => order.timestamp && order.commentId);
+      for (const order of pageOrders) if (compareOrderValue(order, newestOrder) > 0) newestOrder = order;
+      for (const comment of pageComments) {
+        const id = commentId(comment);
+        if (!id || seen.has(id) || decodeCommentChunk(comment.content)?.kind !== "WCHAT") continue;
+        seen.add(id);
+        comments.push(comment);
+      }
+      comments = (await this.hydrateCommentReplies(comments, assembleCommentRecords(comments), fetchedRoots))
+        .filter(comment => decodeCommentChunk(comment.content)?.kind === "WCHAT");
+      assembled = assembleCommentRecords(comments);
+      for (const item of assembled.records.filter(candidate => this.validWorldChat(candidate))) {
+        const key = `${item.record.accountId}:${item.record.messageId}`;
+        const previous = recent.get(key);
+        if (!previous || comparePlatformOrder(item, previous) < 0) recent.set(key, item);
+      }
+      const newest = [...recent.entries()].sort((left, right) => comparePlatformOrder(right[1], left[1])).slice(0, WORLD_CHAT_LIMIT);
+      recent.clear();
+      for (const [key, item] of newest) recent.set(key, item);
+      const missingRoot = assembled.incomplete.some(item => !(item.sources || []).some(source => decodeCommentChunk(source.content)?.part === 1));
+      if (cursor && pageOrder !== "mixed" && !missingRoot && pageOrders.some(order => compareOrderValue(order, cursor.order) <= 0)) {
+        reachedHistoryBoundary = true;
+        break;
+      }
+      if (pageOrder !== "mixed" && !assembled.incomplete.length && recent.size >= WORLD_CHAT_LIMIT) break;
+      comments = assembled.incomplete.slice(-512).flatMap(item => item.sources || []);
+    }
+    this.worldChatCursor = {
+      seasonId,
+      initialized: true,
+      order: newestOrder,
+      tailPage,
+      pageOrder,
+      pendingChunks: assembled.incomplete.flatMap(item => item.sources || []).slice(-512)
+    };
+    return {
+      comments,
+      assembled: { ...assembled, records: [...recent.values()].sort(comparePlatformOrder) },
+      pagesRead,
+      pagesScanned,
+      incremental: Boolean(cursor),
+      reachedHistoryBoundary
+    };
   }
 
   applyPublicLedger(records) {
@@ -1311,41 +1858,46 @@ class OnlineWorldService {
     this.notify();
     try {
       if (this.lastClockCalibrationMono == null || this.monotonicNow() - this.lastClockCalibrationMono > 60 * 60 * 1000) await this.calibrateClock().catch(() => null);
-      const history = await this.readHistory(Boolean(fullScan || !this.control));
-      const controls = history.assembled.records
-        .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === this.work.id && item.record.gameId === GRID_GAME_ID && this.validAuthorSource(item))
-        .filter(item => String(item.record.authorityAccountId || "") === this.work.authorAccountId)
-        .filter(item => verifySignedRecord(item.record, item.record.authoritySigningPublicKey))
-        .sort((left, right) => comparePlatformOrder(right, left));
+      const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+      const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) this.control = controls[0].record;
       if (this.control) {
         if (this.control.programHash !== this.currentProgramHash()) await this.refreshWorkProgram();
         if (this.control.programHash !== this.currentProgramHash()) throw new Error("作品详细介绍中的游戏程序尚未由作者签名启用");
-        const snapshots = history.assembled.records
-          .filter(item => item.record?.schema === FYOW_SCHEMAS.snapshot && item.record.seasonId === this.control.seasonId && item.record.workId === this.work.id && item.record.gameId === GRID_GAME_ID)
-          .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
-          .filter(item => item.record.stateHash === sha256(Buffer.from(canonicalJson(item.record.state))))
-          .sort((left, right) => comparePlatformOrder(right, left));
+        const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;
         const snapshotOrder = recordPlatformOrder(snapshotItem);
         const snapshotIsNewer = snapshot && (!this.world || compareOrderValue(snapshotOrder, this.publicMapOrder) > 0);
         if (snapshotIsNewer) {
           const localOverlay = this.captureLocalOverlay();
+          const coverage = snapshotCoverage(snapshot);
           this.world = normalizeWorldState(cloneJson(snapshot.state));
           this.restoreLocalOverlay(localOverlay);
           this.publicMapOrder = snapshotOrder;
-          this.publicMapBaselineOrder = snapshotOrder;
-          this.appliedMapDeltaIds.clear();
-          this.appliedAuthorityIds.clear();
+          this.publicMapBaselineOrder = ledgerOrder(coverage?.through);
+          this.publicHistoryOrder = ledgerOrder(coverage?.through);
+          this.appliedMapDeltaIds = new Set(coverage?.appliedMapDeltaIds || []);
+          this.appliedAuthorityIds = new Set(coverage?.appliedAuthorityIds || []);
           this.publicDeltaCountSinceSnapshot = 0;
-          this.publicCellOrders = {};
-          this.publicGeneralOrders = {};
-          this.publicParticipantOrders = {};
+          this.publicCellOrders = cloneJson(coverage?.cellOrders || {});
+          this.publicGeneralOrders = cloneJson(coverage?.generalOrders || {});
+          this.publicParticipantOrders = cloneJson(coverage?.participantOrders || {});
+          this.publicAuthorityOrders = cloneJson(coverage?.authorityOrders || {});
+          this.publicTreasureSources = cloneJson(coverage?.treasureSources || {});
         }
         normalizeWorldState(this.world);
         bindWorldAuthority(this.world, this.control);
-        if (this.world) this.applyPublicLedger(history.assembled.records);
+        if (this.world) {
+          this.collectTreasureSources(history.assembled.records);
+          this.applyPublicLedger(history.assembled.records);
+          if (history.completeThrough && compareOrderValue(history.completeThrough, this.publicHistoryOrder) > 0) this.publicHistoryOrder = { ...history.completeThrough };
+        }
+        if (this.world) this.reconcileTreasureRewards(history);
+        if (this.world) {
+          const chatHistory = await this.readWorldChatHistory(history);
+          this.applyWorldChatRecords(chatHistory.assembled.records);
+        }
         if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
         if (this.world) await this.retryPendingModelEffects(1);
@@ -1454,13 +2006,20 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
+    if (String(intent.type || "") === "quote-march") {
+      const accountId = this.account().accountId;
+      if (!accountId || !this.world?.players?.[accountId]) throw new Error("请先加入在线游戏世界");
+      if (this.world.bans?.[accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁");
+      const quote = marchQuote(cloneJson(this.world), accountId, intent.to, intent.soldiers, intent.generalIds, Boolean(intent.attack), this.now());
+      return { marchQuote: { ...quote, requestKey: intent.requestKey } };
+    }
     if (this.syncInFlight) await this.syncInFlight;
     if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
     if (this.control?.programHash && this.control.programHash !== this.currentProgramHash()) throw new Error("伴生作品程序版本尚未同步到当前客户端");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
     if (this.intentInFlight) {
-      if (String(normalized.type || "") === "join" || key === this.intentInFlightKey) return this.intentInFlight;
+      if ((String(normalized.type || "") === "join" && this.intentInFlightKey.startsWith("join:")) || key === this.intentInFlightKey) return this.intentInFlight;
       throw new Error("上一项行动仍在处理中，请等待完成");
     }
     const running = this.submitIntentNow(normalized);
@@ -1487,6 +2046,7 @@ class OnlineWorldService {
       return { duplicate: true, restored: true, state: this.state() };
     }
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
+    if (normalized.type === "world-chat") return this.submitWorldChat(normalized, account);
     const previousPreferences = cloneJson(this.localPreferences);
     if (normalized.type === "prepare-join") {
       try {
@@ -1544,7 +2104,7 @@ class OnlineWorldService {
     }, identity.signingPrivateKey);
     const sources = await this.postRecord(record);
     const order = recordPlatformOrder({ sources });
-    const rootId = sources.map(commentId).filter(Boolean).sort()[0] || null;
+    const rootId = order.commentId || null;
     if (actor && rootId && !actor.commentRootId) actor.commentRootId = rootId;
     this.appliedMapDeltaIds.add(record.mapDeltaId);
     this.publicDeltaCountSinceSnapshot += 1;
@@ -1554,18 +2114,31 @@ class OnlineWorldService {
       this.publicParticipantOrders[this.account().accountId] = order;
       if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     }
+    for (const [id, claim] of Object.entries(changes.claimedTreasures || {})) {
+      this.world.claimedTreasures[id] = { ...cloneJson(claim), ...(order.timestamp ? { platformOrder: order } : {}) };
+      delete this.world.treasureSpawns[id];
+      const preferences = this.world.privatePlayers[this.account().accountId] ||= {};
+      preferences.treasureClaimRewards ||= {};
+      const pending = preferences.treasureClaimRewards[id] || {};
+      preferences.treasureClaimRewards[id] = {
+        ...pending, materialId: claim.materialId, status: "pending", amount: 1,
+        mapDeltaId: record.mapDeltaId, platformOrder: order, scanFrom: pending.scanFrom || { ...this.publicMapBaselineOrder }
+      };
+    }
     return record;
   }
 
   async applyLocalIntent(intent, actorAccountId, options = {}) {
     if (String(actorAccountId) !== this.account().accountId) throw new Error("只能在本机执行当前玩家的行动");
+    const actionTime = this.now();
+    if (!options.internal) await this.settleLocalClock(actionTime);
     const identity = await this.getIdentity();
     bindWorldAuthority(this.world, this.control);
-    const actionTime = this.now();
     const beforeWorld = cloneJson(this.world);
     const outcome = applyIntent(this.world, intent, { actorAccountId, actorAccountName: this.account().username, authorityAccountId: this.control.authorityAccountId, now: actionTime });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
     this.world = outcome.state;
+    this.holdTreasureRewards(beforeWorld);
     if (intent.type === "join") {
       const player = this.world.players[actorAccountId];
       player.accountName = this.account().username;
@@ -1646,12 +2219,13 @@ class OnlineWorldService {
     }
   }
 
-  async settleLocalClock() {
+  async settleLocalClock(nowValue = this.now()) {
     if (!this.world) return [];
     const beforeWorld = cloneJson(this.world);
-    const settled = settleWorld(this.world, this.now());
+    const settled = settleWorld(this.world, nowValue);
     if (!settled.effects.length) return [];
     this.world = normalizeWorldState(settled.state);
+    this.holdTreasureRewards(beforeWorld);
     this.world.revision = Number(this.world.revision || 0) + 1;
     const event = {
       schema: FYOW_SCHEMAS.event,
@@ -1776,11 +2350,118 @@ class OnlineWorldService {
     return queued;
   }
 
+  pendingTreasureRewards() {
+    const preferences = this.world?.privatePlayers?.[this.account().accountId];
+    return Object.entries(preferences?.treasureClaimRewards || {}).filter(([, reward]) => reward?.status === "pending");
+  }
+
+  holdTreasureRewards(beforeWorld) {
+    const accountId = this.account().accountId;
+    const preferences = this.world?.privatePlayers?.[accountId];
+    if (!preferences) return;
+    for (const [id, claim] of Object.entries(this.world.claimedTreasures || {})) {
+      if (claim?.accountId !== accountId || beforeWorld?.claimedTreasures?.[id]) continue;
+      const materialId = String(beforeWorld?.treasureSpawns?.[id]?.materialId || claim.materialId || "");
+      if (!MATERIAL_BY_ID[materialId]) continue;
+      preferences.materials ||= {};
+      preferences.materials[materialId] = Math.max(0, Number(preferences.materials[materialId] || 0) - 1);
+      preferences.treasureClaimRewards ||= {};
+      preferences.treasureClaimRewards[id] = {
+        materialId, amount: 1, status: "pending", scanFrom: { ...this.publicMapBaselineOrder },
+        playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0)))
+      };
+    }
+  }
+
+  reconcileTreasureRewards(history = null) {
+    const accountId = this.account().accountId;
+    const preferences = this.world?.privatePlayers?.[accountId];
+    if (!preferences?.treasureClaimRewards) return;
+    // Upgrade prerelease caches whose rewards were credited at publication.
+    for (const reward of Object.values(preferences.treasureClaimRewards)) {
+      if (reward.status || reward.reconciled) continue;
+      preferences.materials ||= {};
+      preferences.materials[reward.materialId] = Math.max(0, Number(preferences.materials[reward.materialId] || 0) - 1);
+      reward.status = "pending";
+      reward.amount = 1;
+      reward.scanFrom = { timestamp: 0, commentId: "" };
+    }
+    if (!history?.confirmationComplete || history.assembled?.incomplete?.length || this.world.bans?.[accountId]?.banned) return;
+    const candidates = (history.assembled?.records || []).filter(item => this.validMapDelta(item)).sort(comparePlatformOrder);
+    for (const [id, reward] of this.pendingTreasureRewards()) {
+      const matching = candidates.filter(item => item.record.changes?.claimedTreasures?.[id]);
+      const ownPublished = matching.find(item => item.record.actorAccountId === accountId
+        && (!reward.mapDeltaId || item.record.mapDeltaId === reward.mapDeltaId));
+      if (!ownPublished) continue;
+      const earliest = matching[0];
+      const claim = earliest.record.changes.claimedTreasures[id];
+      const order = recordPlatformOrder(earliest);
+      const current = this.world.claimedTreasures?.[id];
+      const currentWins = current?.platformOrder && compareOrderValue(current.platformOrder, order) < 0;
+      const winner = currentWins ? current : { ...cloneJson(claim), platformOrder: order };
+      this.world.claimedTreasures[id] = winner;
+      delete this.world.treasureSpawns[id];
+      reward.status = winner.accountId === accountId ? "confirmed" : "rejected";
+      reward.confirmedAt = this.now();
+      if (reward.status === "confirmed") {
+        preferences.materials ||= {};
+        preferences.materials[reward.materialId] = Number(preferences.materials[reward.materialId] || 0) + Number(reward.amount || 1);
+      }
+    }
+  }
+
+  async scatterPublicTreasures(options = {}) {
+    if (!this.world || !this.control || !this.isAuthority() || this.account().accountId !== this.work?.authorAccountId) return null;
+    const next = cloneJson(this.world);
+    scatterTreasures(next, { count: options.count, redAscend: options.redAscend, redReroll: options.redReroll }, this.now());
+    const identity = await this.getIdentity();
+    if (identity.signingPublicKey !== this.control.authoritySigningPublicKey) throw new Error("当前设备不是本赛季登记的作者设备");
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.authority,
+      authorityId: crypto.randomUUID(),
+      gameId: GRID_GAME_ID,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      authorityAccountId: this.account().accountId,
+      type: "treasure-scatter",
+      treasureEpoch: next.treasureEpoch,
+      treasureSpawns: cloneJson(next.treasureSpawns),
+      issuedAt: this.now()
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    if (!this.applyAuthorityDirective({ record, sources })) throw new Error("奇珍刷新记录发布后未通过作者身份与时间戳校验");
+    await this.publishSnapshot();
+    return record;
+  }
+
   async administer(command = {}) {
+    if (this.syncInFlight) await this.syncInFlight;
+    if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
+    if (this.intentInFlight) throw new Error("上一项行动仍在处理中，请等待完成");
+    const running = this.administerNow(command);
+    this.intentInFlight = running;
+    this.intentInFlightKey = `admin:${String(command.type || "")}`;
+    try {
+      return await running;
+    } finally {
+      if (this.intentInFlight === running) {
+        this.intentInFlight = null;
+        this.intentInFlightKey = "";
+      }
+    }
+  }
+
+  async administerNow(command = {}) {
     if (!this.work || !this.control || !this.world) throw new Error("请先开启在线游戏服务器");
     const account = this.account();
     if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId || !this.isAuthority()) throw new Error("服主指令仅对伴生作品作者开放");
     const type = String(command.type || "");
+    if (["scatter-treasures", "treasure-scatter"].includes(type)) {
+      const record = await this.scatterPublicTreasures(command);
+      this.saveCache();
+      this.notify();
+      return { command: { type: "scatter-treasures", authorityId: record?.authorityId || null }, state: this.state() };
+    }
     if (!["player-reset", "player-ban", "player-unban"].includes(type)) throw new Error("未知服主指令");
     const targetAccountId = String(command.targetAccountId || "").trim();
     if (!targetAccountId) throw new Error("请选择目标玩家");
@@ -1814,7 +2495,13 @@ class OnlineWorldService {
 
   async publishSnapshot() {
     const identity = await this.getIdentity();
-    const state = projectWorldState(this.world, null);
+    this.rememberTreasureSources(this.world.treasureSpawns);
+    const through = ledgerOrder(this.publicHistoryOrder);
+    for (const [id, source] of Object.entries(this.publicTreasureSources)) {
+      if (source.retiredOrder && compareOrderValue(source.retiredOrder, through) <= 0) delete this.publicTreasureSources[id];
+    }
+    const state = projectWorldState(this.world, null, this.now());
+    delete state.privatePlayers;
     const snapshotId = crypto.randomUUID();
     const snapshot = signRecord({
       schema: FYOW_SCHEMAS.snapshot,
@@ -1825,18 +2512,24 @@ class OnlineWorldService {
       revision: Number(this.world.revision || 0),
       state,
       stateHash: sha256(Buffer.from(canonicalJson(state))),
+      ledgerCoverage: {
+        version: 1,
+        through,
+        cellOrders: cloneJson(this.publicCellOrders),
+        generalOrders: cloneJson(this.publicGeneralOrders),
+        participantOrders: cloneJson(this.publicParticipantOrders),
+        authorityOrders: cloneJson(this.publicAuthorityOrders),
+        treasureSources: cloneJson(this.publicTreasureSources),
+        appliedMapDeltaIds: [...this.appliedMapDeltaIds],
+        appliedAuthorityIds: [...this.appliedAuthorityIds]
+      },
       createdAt: this.now()
     }, identity.signingPrivateKey);
     const sources = await this.postRecord(snapshot);
     const order = recordPlatformOrder({ sources });
     if (order.timestamp) {
       this.publicMapOrder = order;
-      this.publicMapBaselineOrder = order;
-      this.appliedMapDeltaIds.clear();
-      this.appliedAuthorityIds.clear();
-      this.publicCellOrders = {};
-      this.publicGeneralOrders = {};
-      this.publicParticipantOrders = {};
+      this.publicMapBaselineOrder = through;
       this.publicDeltaCountSinceSnapshot = 0;
     }
     return snapshot;
@@ -2054,8 +2747,8 @@ class OnlineWorldService {
     const accountId = this.account().accountId;
     const rootId = this.world.players?.[accountId]?.commentRootId;
     if (!rootId) return [];
-    const branches = await this.requestConsole(`/comments/branches/${encodeURIComponent(rootId)}`, { timeout: 15000 });
-    const assembledWakes = assembleCommentRecords(extractContentItems(branches));
+    const branches = await this.readCommentBranches(rootId);
+    const assembledWakes = assembleCommentRecords(branches);
     const wakes = assembledWakes.records
       .map(item => item.record)
       .filter(record => record?.schema === FYOW_SCHEMAS.directWake && record.workId === this.work.id && record.seasonId === this.control.seasonId && record.toAccountId === accountId)

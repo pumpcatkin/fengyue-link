@@ -166,6 +166,59 @@ if (process.type === "renderer") {
       assert.equal(zoomed, "1.25×");
       const panned = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');viewport.scrollTo(1000,1000);viewport.setPointerCapture=()=>{};viewport.hasPointerCapture=()=>false;viewport.dispatchEvent(new PointerEvent('pointerdown',{button:2,pointerId:7,clientX:500,clientY:500,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointermove',{button:2,buttons:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointerup',{button:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));return viewport.scrollLeft>1000&&viewport.scrollTop>1000})()`);
       assert.equal(panned, true);
+      await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#dialogue-modal').classList.add('hidden');
+        document.querySelector('#general-modal').classList.add('hidden');
+        const now = hostTime();
+        payload.world.jobs = {
+          mining: { id:'mining', type:'mining', accountId:'a', x:4, y:7, auto:true, lastSettledAt:now, cycleMs:60000, yieldPerCycle:125 },
+          training: { id:'training', type:'training', accountId:'a', x:4, y:7, amount:40, finishAt:now+120000 },
+          marching: { id:'marching', type:'march', accountId:'a', from:{x:4,y:7}, to:{x:10,y:10}, finishAt:now+540000, soldiers:30, generalIds:['g1'] }
+        };
+        selected = {x:10,y:10};
+        setZoom(1);
+        renderJobs();
+        draw();
+      })()`);
+      await settle();
+      await embeddedGameFrame.executeJavaScript(`centerMap({x:7,y:8}, 'instant')`);
+      await settle();
+      const hoverTask = async (x, y) => embeddedGameFrame.executeJavaScript(`(() => {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = rect.left + canvas.clientLeft + ${x} * canvas.clientWidth / 64;
+        const clientY = rect.top + canvas.clientTop + ${y} * canvas.clientHeight / 64;
+        canvas.dispatchEvent(new PointerEvent('pointermove', {clientX, clientY, bubbles:true}));
+        const tip = document.querySelector('#map-task-tooltip');
+        return {text:tip.textContent, hidden:tip.classList.contains('hidden'), left:tip.getBoundingClientRect().left, right:tip.getBoundingClientRect().right, width:innerWidth};
+      })()`);
+      const mineTip = await hoverTask(4.2, 7.2);
+      assert.equal(mineTip.hidden, false);
+      assert(mineTip.text.includes("采矿") && mineTip.text.includes("125 金币") && mineTip.text.includes("本轮剩余"));
+      assert(mineTip.left >= 0 && mineTip.right <= mineTip.width);
+      await settle();
+      fs.writeFileSync(path.join(outputDir, "map-task-mining.png"), (await window.webContents.capturePage()).toPNG());
+      const trainingTip = await hoverTask(4.8, 7.2);
+      assert.equal(trainingTip.hidden, false);
+      assert(trainingTip.text.includes("练兵") && trainingTip.text.includes("40 士兵") && trainingTip.text.includes("剩余"));
+      await settle();
+      fs.writeFileSync(path.join(outputDir, "map-task-training.png"), (await window.webContents.capturePage()).toPNG());
+      const marchTip = await hoverTask(8, 7.5);
+      assert.equal(marchTip.hidden, false);
+      assert(marchTip.text.includes("起点 (4, 7) → 目标 (10, 10)") && marchTip.text.includes("剩余"));
+      await settle();
+      fs.writeFileSync(path.join(outputDir, "map-task-march.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`delete payload.world.jobs.marching; draw()`);
+      const previewTip = await hoverTask(8, 7.5);
+      assert(previewTip.text.includes("行军路线预览") && previewTip.text.includes("预计耗时：9分00秒"));
+      await embeddedGameFrame.executeJavaScript(`setZoom(1.5)`);
+      await settle();
+      await embeddedGameFrame.executeJavaScript(`centerMap({x:5,y:7}, 'instant')`);
+      await settle();
+      assert.equal((await hoverTask(4.2, 7.2)).hidden, false, "mining hover lost alignment after zoom");
+      await embeddedGameFrame.executeJavaScript(`delete payload.world.jobs.mining; draw()`);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#map-task-tooltip').classList.contains('hidden')`), true, "removed task leaves a stale tooltip");
+      await embeddedGameFrame.executeJavaScript(`viewport.dispatchEvent(new Event('scroll'))`);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`mapPointer`), null);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#return-library').click()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-setup').classList.contains('hidden')`), true);

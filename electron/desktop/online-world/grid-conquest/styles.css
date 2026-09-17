@@ -53,6 +53,12 @@ main { display: grid; width: min(1700px, 100%); height: 100%; grid-template-rows
   background: var(--board-dark); overscroll-behavior: contain; scrollbar-color: var(--line) var(--paper-deep);
 }
 .map-viewport.panning { cursor: grabbing; user-select: none; }
+.map-task-tooltip {
+  position: fixed; z-index: 8; max-width: 280px; pointer-events: none;
+  border: 2px solid var(--line); border-radius: 8px; background: #fff4dfee;
+  padding: 7px 9px; color: var(--ink); box-shadow: 3px 3px 0 var(--shadow);
+  font-size: 12px; font-weight: 800; line-height: 1.55; white-space: pre-line;
+}
 canvas {
   display: block; width: 2048px; height: 2048px; border: 4px solid var(--line); background: #a9bd81;
   box-shadow: 5px 5px 0 var(--shadow); cursor: crosshair; image-rendering: pixelated; transform-origin: top left;

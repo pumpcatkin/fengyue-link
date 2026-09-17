@@ -16,6 +16,8 @@ let mapCssSize = 2048;
 let mapCentered = false;
 let panState = null;
 let suppressMapClick = false;
+let mapPointer = null;
+let mapTaskOverlays = [];
 let receivedAt = Date.now();
 let serverNow = Date.now();
 let toastTimer = null;
@@ -222,6 +224,160 @@ function ownerColor(owner, rank) {
   return palette[(Math.abs(hash) + Math.min(4, Math.floor(Number(rank || 0) / 3))) % palette.length];
 }
 
+function validMapPosition(point) {
+  return Boolean(point && Number.isInteger(point.x) && point.x >= 0 && point.x < 64
+    && Number.isInteger(point.y) && point.y >= 0 && point.y < 64);
+}
+
+// Match the rules engine: move horizontally first, then vertically.
+function marchMapRoute(from, to) {
+  if (!validMapPosition(from) || !validMapPosition(to) || (from.x === to.x && from.y === to.y)) return null;
+  const points = [{ x: from.x + .5, y: from.y + .5 }];
+  if (from.x !== to.x) points.push({ x: to.x + .5, y: from.y + .5 });
+  if (from.y !== to.y) points.push({ x: to.x + .5, y: to.y + .5 });
+  return { from, to, points, durationMs: Math.min(3600000, (Math.abs(to.x - from.x) + Math.abs(to.y - from.y)) * 60000) };
+}
+
+function buildMapTaskOverlays() {
+  const accountId = ownAccountId();
+  if (!accountId || !ownPlayer()) return [];
+  const jobs = Object.values(payload?.world?.jobs || {}).filter(job => job?.accountId === accountId);
+  const overlays = [];
+  for (const job of jobs) {
+    if (job.type === "march") {
+      const route = marchMapRoute(job.from, job.to);
+      if (route) overlays.push({ type: "march", job, ...route, preview: false });
+    } else if (["mining", "training"].includes(job.type) && validMapPosition(job)) {
+      // Non-overlapping corner badges leave the centre free for the player and generals.
+      overlays.push({ type: job.type, job, x: job.x + (job.type === "mining" ? .045 : .575), y: job.y + .045, width: .38, height: .38 });
+    }
+  }
+  if (!jobs.some(job => job.type === "march")) {
+    const route = marchMapRoute(ownPlayer()?.position, selected);
+    if (route) overlays.unshift({ type: "march", ...route, preview: true });
+  }
+  return overlays;
+}
+
+function mapSegmentDistance(point, from, to) {
+  const dx = to.x - from.x, dy = to.y - from.y;
+  const lengthSquared = dx * dx + dy * dy;
+  const progress = lengthSquared ? Math.max(0, Math.min(1, ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared)) : 0;
+  return Math.hypot(point.x - from.x - progress * dx, point.y - from.y - progress * dy);
+}
+
+function mapTaskAt(point, pixelsPerCell) {
+  if (!point || !Number.isFinite(pixelsPerCell) || pixelsPerCell <= 0) return null;
+  // Badge hit areas take precedence when an army crosses a working tile.
+  const badge = mapTaskOverlays.find(item => item.type !== "march"
+    && point.x >= item.x && point.x <= item.x + item.width && point.y >= item.y && point.y <= item.y + item.height);
+  if (badge) return badge;
+  const tolerance = Math.max(.18, Math.min(.45, 7 / pixelsPerCell));
+  return mapTaskOverlays.find(item => item.type === "march"
+    && item.points.slice(1).some((to, index) => mapSegmentDistance(point, item.points[index], to) <= tolerance)) || null;
+}
+
+function mapTaskDescription(item, now = hostTime()) {
+  if (item.type === "march" && item.preview) {
+    return `行军路线预览\n起点 (${item.from.x}, ${item.from.y}) → 目标 (${item.to.x}, ${item.to.y})\n预计耗时：${formatDuration(item.durationMs)}\n点击「向这里行军」后出发`;
+  }
+  const job = item.job;
+  const finish = job.type === "mining" ? Number(job.lastSettledAt) + Number(job.cycleMs) : Number(job.finishAt);
+  const remaining = finish > now ? formatDuration(finish - now) : "等待结算";
+  if (job.type === "mining") {
+    return `采矿 · (${job.x}, ${job.y})\n本轮剩余：${remaining}\n本轮预计获得：${formatNumber(job.yieldPerCycle)} 金币\n${job.auto ? "自动连续开采" : "单次开采"}`;
+  }
+  if (job.type === "training") {
+    const cell = dynamicCell(job.x, job.y);
+    const expected = Math.max(0, Math.min(Number(job.amount || 0), fact(job.x, job.y).garrisonCap - Number(cell.soldiers || 0)));
+    return `练兵 · (${job.x}, ${job.y})\n剩余：${remaining}\n预计新增：${formatNumber(expected)} 士兵${expected < Number(job.amount) ? `（计划 ${formatNumber(job.amount)} 人，受驻军上限限制）` : ""}`;
+  }
+  return `${job.attack ? "进攻行军" : "行军中"}\n起点 (${job.from.x}, ${job.from.y}) → 目标 (${job.to.x}, ${job.to.y})\n剩余：${remaining}\n随军：${formatNumber(job.soldiers)} 士兵 · ${(job.generalIds || []).length} 名将领`;
+}
+
+function mapCanvasPoint(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  // The 4px canvas border is outside the drawing surface, including when zoomed.
+  const scale = rect.width / canvas.offsetWidth;
+  const left = rect.left + canvas.clientLeft * scale, top = rect.top + canvas.clientTop * scale;
+  const width = canvas.clientWidth * scale, height = canvas.clientHeight * scale;
+  if (width <= 0 || height <= 0 || clientX < left || clientY < top || clientX >= left + width || clientY >= top + height) return null;
+  return { x: (clientX - left) / width * 64, y: (clientY - top) / height * 64, pixelsPerCell: width / 64 };
+}
+
+function hideMapTaskTooltip() {
+  mapPointer = null;
+  document.querySelector("#map-task-tooltip").classList.add("hidden");
+}
+
+function renderMapTaskTooltip() {
+  const tooltip = document.querySelector("#map-task-tooltip");
+  const point = mapPointer && !panState ? mapCanvasPoint(mapPointer.x, mapPointer.y) : null;
+  const item = point && mapTaskAt(point, point.pixelsPerCell);
+  if (!item) { tooltip.classList.add("hidden"); return; }
+  tooltip.textContent = mapTaskDescription(item);
+  tooltip.classList.remove("hidden");
+  const left = Math.max(8, Math.min(mapPointer.x + 14, window.innerWidth - tooltip.offsetWidth - 8));
+  const top = mapPointer.y > tooltip.offsetHeight + 22 ? mapPointer.y - tooltip.offsetHeight - 14 : mapPointer.y + 18;
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${Math.max(8, Math.min(top, window.innerHeight - tooltip.offsetHeight - 8))}px`;
+}
+
+function drawMapTasks(size) {
+  mapTaskOverlays = buildMapTaskOverlays();
+  context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
+  for (const item of mapTaskOverlays.filter(overlay => overlay.type === "march")) {
+    const color = item.preview ? "#375d6c" : "#973c2d";
+    context.beginPath();
+    item.points.forEach((point, index) => {
+      if (index) context.lineTo(point.x * size, point.y * size);
+      else context.moveTo(point.x * size, point.y * size);
+    });
+    context.strokeStyle = "#fff5d9"; context.lineWidth = size * .12; context.stroke();
+    context.setLineDash(item.preview ? [size * .18, size * .13] : []);
+    context.strokeStyle = color; context.lineWidth = size * .065; context.stroke();
+    context.setLineDash([]);
+    const from = item.points[0], to = item.points.at(-1), previous = item.points.at(-2);
+    context.fillStyle = "#fff5d9"; context.strokeStyle = color; context.lineWidth = size * .055;
+    context.beginPath(); context.arc(from.x * size, from.y * size, size * .15, 0, Math.PI * 2); context.fill(); context.stroke();
+    context.beginPath(); context.arc(to.x * size, to.y * size, size * .19, 0, Math.PI * 2); context.fill(); context.stroke();
+    context.save();
+    context.translate(to.x * size, to.y * size);
+    context.rotate(Math.atan2(to.y - previous.y, to.x - previous.x));
+    context.fillStyle = color;
+    context.beginPath(); context.moveTo(size * .115, 0); context.lineTo(-size * .075, -size * .095);
+    context.lineTo(-size * .075, size * .095); context.closePath(); context.fill();
+    context.restore();
+  }
+  for (const item of mapTaskOverlays.filter(overlay => overlay.type !== "march")) {
+    context.save();
+    context.translate(item.x * size, item.y * size);
+    context.scale(item.width * size / 24, item.height * size / 24);
+    context.fillStyle = item.type === "mining" ? "#fff0be" : "#e8eef4";
+    context.strokeStyle = "#4b3829"; context.lineWidth = 1.6;
+    context.beginPath(); context.roundRect(0, 0, 24, 24, 4); context.fill(); context.stroke();
+    if (item.type === "mining") {
+      // Hand-drawn pickaxe: wood shaft and steel head, no font or image assets.
+      context.strokeStyle = "#805126"; context.lineWidth = 3.2;
+      context.beginPath(); context.moveTo(6, 19); context.lineTo(15, 6); context.stroke();
+      context.fillStyle = "#68828a"; context.strokeStyle = "#354b53"; context.lineWidth = 1.2;
+      context.beginPath(); context.moveTo(4, 6); context.quadraticCurveTo(13, 1, 21, 15);
+      context.lineTo(15, 10); context.lineTo(11, 7); context.closePath(); context.fill(); context.stroke();
+    } else {
+      // Crossed swords distinguish recruiting from resource collection.
+      context.strokeStyle = "#354b63"; context.lineWidth = 2.6;
+      context.beginPath(); context.moveTo(7, 18); context.lineTo(18, 5); context.moveTo(6, 5); context.lineTo(18, 18); context.stroke();
+      context.strokeStyle = "#bb8031"; context.lineWidth = 2.8;
+      context.beginPath(); context.moveTo(4, 14); context.lineTo(10, 19); context.moveTo(14, 19); context.lineTo(20, 14); context.stroke();
+    }
+    context.restore();
+  }
+  context.restore();
+  renderMapTaskTooltip();
+}
+
 function draw() {
   context.clearRect(0, 0, canvas.width, canvas.height);
   const size = canvas.width / 64;
@@ -249,18 +405,20 @@ function draw() {
     context.globalAlpha = 1; context.strokeStyle = "#3d2c20"; context.lineWidth = 6;
     context.strokeRect(selected.x * size + 3, selected.y * size + 3, size - 6, size - 6);
   }
+  drawMapTasks(size);
   const player = ownPlayer();
   if (player?.position) {
     const px = (player.position.x + .5) * size;
     const py = (player.position.y + .5) * size;
-    context.fillStyle = "#fff8e5"; context.strokeStyle = "#993d33"; context.lineWidth = 4;
-    context.beginPath(); context.moveTo(px, py - size * .34); context.lineTo(px + size * .28, py);
-    context.lineTo(px, py + size * .34); context.lineTo(px - size * .28, py); context.closePath();
+    context.fillStyle = "#fff8e5"; context.strokeStyle = "#993d33"; context.lineWidth = size * .08;
+    context.beginPath(); context.moveTo(px, py - size * .25); context.lineTo(px + size * .20, py);
+    context.lineTo(px, py + size * .25); context.lineTo(px - size * .20, py); context.closePath();
     context.fill(); context.stroke();
   }
 }
 
 function updateMapScale(preserveCenter = true) {
+  hideMapTaskTooltip();
   const previous = mapCssSize || canvas.getBoundingClientRect().width || 2048;
   const centerX = (viewport.scrollLeft + viewport.clientWidth / 2 - canvas.offsetLeft) / previous;
   const centerY = (viewport.scrollTop + viewport.clientHeight / 2 - canvas.offsetTop) / previous;
@@ -939,16 +1097,23 @@ document.querySelector("#join-form").addEventListener("submit", event => event.p
 
 canvas.addEventListener("click", event => {
   if (suppressMapClick) { suppressMapClick = false; return; }
-  const rect = canvas.getBoundingClientRect();
-  selected = {
-    x: Math.max(0, Math.min(63, Math.floor((event.clientX - rect.left) / rect.width * 64))),
-    y: Math.max(0, Math.min(63, Math.floor((event.clientY - rect.top) / rect.height * 64)))
-  };
+  const point = mapCanvasPoint(event.clientX, event.clientY);
+  if (!point) return;
+  selected = { x: Math.floor(point.x), y: Math.floor(point.y) };
   renderCell(); draw();
 });
+canvas.addEventListener("pointermove", event => {
+  if (panState || event.buttons) { hideMapTaskTooltip(); return; }
+  mapPointer = { x: event.clientX, y: event.clientY };
+  renderMapTaskTooltip();
+});
+canvas.addEventListener("pointerleave", hideMapTaskTooltip);
+viewport.addEventListener("scroll", hideMapTaskTooltip, { passive: true });
+window.addEventListener("blur", hideMapTaskTooltip);
 viewport.addEventListener("contextmenu", event => event.preventDefault());
 viewport.addEventListener("pointerdown", event => {
   if (event.button !== 2) return;
+  hideMapTaskTooltip();
   panState = { x: event.clientX, y: event.clientY, left: viewport.scrollLeft, top: viewport.scrollTop };
   suppressMapClick = false; viewport.classList.add("panning"); viewport.setPointerCapture(event.pointerId); event.preventDefault();
 });
@@ -1090,5 +1255,6 @@ window.addEventListener("message", event => {
 setInterval(() => {
   renderClock();
   document.querySelectorAll("[data-finish]").forEach(node => { node.textContent = formatDuration(Number(node.dataset.finish) - hostTime()); });
+  renderMapTaskTooltip();
 }, 1000);
 host("ready");

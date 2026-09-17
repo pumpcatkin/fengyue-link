@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
-const { createBundledGridCard, configurationDigest } = require("../electron/online-world-card.cjs");
+const { createBundledGridCard, configurationDigest, normalizeConfiguration } = require("../electron/online-world-card.cjs");
 const { FYOW_SCHEMAS, encodeCommentRecord, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
@@ -485,6 +485,19 @@ async function runModelProbe(window, workId) {
   };
 }
 
+function programOnlyReadbackChecks(exported, desired) {
+  const actual = normalizeConfiguration(exported);
+  return {
+    name: actual.app.name === desired.app.name,
+    summary: actual.app.summary === desired.app.summary,
+    description: actual.app.description === desired.app.description,
+    preText: actual.pre_text === desired.pre_text,
+    prePrompt: actual.pre_prompt === desired.pre_prompt,
+    postText: actual.post_text === desired.post_text,
+    worldBooksPreserved: JSON.stringify(actual.world_book) === JSON.stringify(desired.world_book)
+  };
+}
+
 async function readAllComments(window, workId) {
   const comments = [];
   const seen = new Set();
@@ -574,7 +587,7 @@ async function activateSavedProgram(window, card, workId) {
 async function main() {
   const card = createBundledGridCard();
   const workId = card.companion.workId;
-  const desired = card.companion.configuration;
+  let desired = card.companion.configuration;
   const platformSession = session.fromPartition(`fyow-configure-grid-${Date.now()}`, { cache: false });
   await platformSession.setProxy({ mode: "system" });
   const window = new BrowserWindow({
@@ -682,6 +695,12 @@ async function main() {
     const beforeResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
     if (!beforeResponse.ok) throw new Error(`读取创作配置失败：HTTP ${beforeResponse.status}`);
     const before = findConfig(unwrap(beforeResponse));
+    const programOnly = process.env.FYOW_PROGRAM_ONLY === "1";
+    if (programOnly) {
+      desired = normalizeConfiguration(before, card.companion);
+      desired.app.description = card.companion.configuration.app.description;
+    }
+    const checkReadback = programOnly ? programOnlyReadbackChecks : readbackChecks;
     if (process.env.FYOW_INSPECT) {
       const count = Math.max(1, Math.min(30, Number.parseInt(process.env.FYOW_INSPECT, 10) || 1));
       const samples = [before];
@@ -707,7 +726,7 @@ async function main() {
       return;
     }
     if (process.env.FYOW_VERIFY_ONLY === "1") {
-      const checks = readbackChecks(before, desired);
+      const checks = checkReadback(before, desired);
       if (!Object.values(checks).every(value => value === true || value === desired.world_book.length)) throw new Error(`创作配置回读不一致：${JSON.stringify(checks)}`);
       process.stdout.write(`${JSON.stringify({ ok:true, workId, page:`${ORIGIN}/zh/app/${workId}/configuration`, verifiedStatus:beforeResponse.status, checks, descriptionCharacters:desired.app.description.length, programDigest:card.program.digest, configurationSha256:configurationDigest(before) }, null, 2)}\n`);
       return;
@@ -732,7 +751,7 @@ async function main() {
     const verifyResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
     if (!verifyResponse.ok) throw new Error(`回读创作配置失败：HTTP ${verifyResponse.status}`);
     const verified = findConfig(unwrap(verifyResponse));
-    const checks = readbackChecks(verified, desired);
+    const checks = checkReadback(verified, desired);
     if (!Object.values(checks).every(value => value === true || value === desired.world_book.length)) {
       throw new Error(`保存后回读不一致：${JSON.stringify({ checks, exported: shapeOf(verified), app: shapeOf(verified?.app) })}`);
     }

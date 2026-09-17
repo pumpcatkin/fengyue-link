@@ -1,5 +1,14 @@
 # Grid balance simulation
 
+## 落地状态说明
+
+已经落地：每格 30 秒行军、按小时产出的采矿公式及旧采矿任务迁移、五次修炼的
+时间/金币区间、单次消耗一件素材、108 种天赋与叠加效果上限。
+并非所有旧数值都重新设计：练兵基础价格与耗时、将领发现概率仍沿用下文列出的公式。
+目前是离线确定性测算与规则测试，不是 20 名真实玩家的长期联机实测。
+首修“6 小时”是硬解锁时间，不是完成承诺：样本中材料竞争使平均首次完成延至 15.90 小时。
+多领地收入滚雪球、实际宝物抢占和玩家战斗博弈仍需在线数据校准，本轮 UI 更新不擅自改经济。
+
 `scripts/simulate-grid-balance.cjs` is a deterministic 20-player, 30-day measurement pass for the 64x64 world. It is a planning model, not a replacement for server settlement. A seed gives the same cells, rolls, and report every time.
 
 The requested GPT-6 delegation was not available in this session's subagent selector; the calculation and audit used `gpt-5.6-sol` plus the reproducible Node simulation and engine regression tests, not GPT-6.

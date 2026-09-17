@@ -12,7 +12,7 @@ const dialogueSubmit = source.slice(
 function createHarness() {
   const history: any = { children: [], replaceChildren() { this.children = []; }, append(...nodes: any[]) { this.children.push(...nodes); }, scrollTop: 0, scrollHeight: 0 };
   const input: any = { value: "", listeners: {}, addEventListener(type: string, listener: (event: any) => void) { this.listeners[type] = listener; } };
-  const button: any = { click: null, addEventListener(_type: string, listener: () => void) { this.click = listener; } };
+  const button: any = { click: null, setAttribute() {}, addEventListener(_type: string, listener: () => void) { this.click = listener; } };
   const labels: Record<string, any> = { "#dialogue-history": history, "#dialogue-input": input, "#dialogue-send": button, "#dialogue-general": {}, "#dialogue-mode": {} };
   const general: any = { name: "赤岚·霜牙", status: "carried", interactionHistory: [] };
   const requests = new Map<string, any>();

@@ -59,14 +59,10 @@
       </div>
     </section>
     <section id="online-world-page" class="online-world-page hidden">
-      <header class="online-world-toolbar">
-        <span><small>在线游戏世界</small><b id="online-world-title">联机游戏</b><em id="online-world-status">选择一张游戏卡</em></span>
-        <div><button id="online-world-initialize" class="primary hidden" type="button">服主开服</button><button id="online-world-activate-program" class="hidden" type="button">签名启用程序</button><button id="online-world-migrate" class="hidden" type="button">重置并迁移</button><button id="online-world-back" type="button">返回主页</button></div>
-      </header>
       <section id="online-world-setup" class="online-world-library">
         <header class="online-world-library-head">
-          <span><small>在线游戏世界</small><h1>联机游戏</h1></span>
-          <div><button id="online-world-export-card" class="hidden" type="button">导出完整游戏卡</button><button id="online-world-import-card" type="button">＋ 从文件导入游戏卡</button></div>
+          <span><small>在线游戏世界</small><h1 id="online-world-title">游戏库</h1></span>
+          <div><button id="online-world-import-card" type="button">＋ 导入游戏卡</button><button id="online-world-back" type="button">返回主页</button></div>
         </header>
         <div id="online-world-library-grid" class="online-world-library-grid" role="list" aria-label="已导入游戏卡"></div>
         <div id="online-world-detail" class="online-world-detail hidden" role="dialog" aria-modal="true" aria-labelledby="online-world-detail-title">
@@ -77,7 +73,7 @@
           </form>
         </div>
       </section>
-      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="online-world/grid-conquest/index.html" title="猎艳疆土游戏前端"></iframe>
+      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" src="about:blank" title="猎艳疆土游戏前端"></iframe>
     </section>
     <div class="app-shell hidden" id="multiplayer-page">
       <aside class="sidebar">
@@ -96,7 +92,7 @@
               <label>编辑后的模型回复<textarea id="message-edit-value" placeholder="输入新的回复内容"></textarea></label>
               <div class="split"><button id="cancel-message-edit">取消</button><button id="confirm-message-edit" class="primary">保存并同步</button></div>
             </div>
-            <span id="message-tool-note">仅房主可操作；访客会重试写入相同结果，刷新不会在访客端再次消耗积分。</span>
+            <span id="message-tool-note">仅房主可操作。刷新回复可能消耗积分。</span>
           </div>
           <div class="conversation-card"><small>房间成员</small><div id="member-list" class="member-list"><div class="empty-small">成员将在认证后显示在这里</div></div></div>
           <hr>
@@ -165,7 +161,7 @@
         </section>
         <section class="panel plugin-panel" data-panel="plugins">
           <small class="plugin-compatibility-note">插件不一定适合所有作品，请根据具体情况进行尝试或使用</small>
-          <header class="plugin-panel-head"><span><b>联机插件</b><small>由房主统一执行并同步结果</small></span><em id="plugin-stack-status">处理栈空闲</em></header>
+          <header class="plugin-panel-head"><span><b>联机插件</b><small>由房主设置，对所有成员生效</small></span><em id="plugin-stack-status" class="hidden"></em></header>
           <section class="plugin-group">
             <div class="plugin-group-title"><span><b>对话信息处理</b><small>按顺序阻塞输入或输出流程</small></span></div>
             <details class="plugin-card plugin-disclosure" id="effect-judge-card">
@@ -190,9 +186,9 @@
                 <p>每位玩家只收到自己的正文、个人状态和公共信息，保留作品原有格式。</p>
                 <label>每名玩家独立正文目标字数<input id="perspective-split-words" type="number" min="100" max="10000" step="100" value="800"></label>
                 <button id="save-perspective-split" class="primary">保存字数设置</button>
-                <small class="plugin-cost-warning">整理失败或超时会重新加载后台整理作品页，新建会话并更换模型后重发；优先使用可用的 Gemini Flash、DeepSeek V4 Flash，每轮最多尝试 3 次，每次可能消耗积分。请先配置视角整理作品的提示词。</small>
+                <small class="plugin-cost-warning">等待较久时会自动重试，重试可能再次消耗积分，你可以随时取消。请先配置视角整理作品的提示词。</small>
                 <small>停用时只移除本插件的“两段正文”前置词。3 次均失败时返回失败提示，不使用原文。</small>
-                <small>空白会话首次启用时，会先建立平台会话并立即终止初始化输出；平台可能产生少量计费。</small>
+                <small>空白会话首次启用可能消耗少量积分。</small>
                 <small id="perspective-split-last-run"></small>
               </div>
             </details>
@@ -215,7 +211,7 @@
           <small id="room-chat-status" class="room-chat-status">尚未加入房间</small>
           <form id="room-chat-form" class="room-chat-compose">
             <textarea id="room-chat-input" maxlength="1000" placeholder="输入房间聊天；Enter 发送，Shift+Enter 换行"></textarea>
-            <button id="send-room-chat" class="primary" type="submit">发送</button>
+            <button id="send-room-chat" class="primary send-icon" type="submit" aria-label="发送房间消息" title="发送 · Enter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-8-8 18-2-8-8-2Z"/><path d="m11 13 10-10"/></svg></button>
           </form>
         </section>
 
@@ -225,7 +221,7 @@
           <pre id="session-log">暂时没有联机日志</pre>
         </section>
         <section class="panel hidden" data-admin-only data-panel="settings">
-          <div class="notice">每个实例使用独立 Cookie、缓存和本地存储，可以同时登录不同风月账号。</div>
+          <div class="notice">不同窗口可以分别登录不同的风月账号。</div>
           <label>新实例名称<input id="new-profile" placeholder="例如 host / player2"></label>
           <button class="primary" id="new-instance">打开独立账号实例</button>
         </section>
@@ -238,7 +234,7 @@
         </header>
         <section id="surface-slot">
           <canvas id="game-frame" class="game-frame hidden" aria-label="作品对话实时画面"></canvas>
-          <div class="stage-placeholder"><img class="orb" src="assets/cat-pumpkin-logo.png" alt=""><h1 id="placeholder-title">正在启动账号后端</h1><p id="placeholder-copy">登录、私信和作品页面由隔离浏览器会话在后台处理。</p></div>
+          <div class="stage-placeholder"><img class="orb" src="assets/cat-pumpkin-logo.png" alt=""><h1 id="placeholder-title">正在准备</h1><p id="placeholder-copy"></p></div>
         </section>
         <footer><textarea id="round-input" placeholder="请输入文本；需房间成员全体点击确认。"></textarea><div class="round-submit-area"><button class="primary" id="submit-round">确认本轮输入</button><small id="round-flow-status" class="round-flow-status hidden" role="status" aria-live="polite"></small></div></footer>
       </main>
@@ -307,7 +303,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.15.0</div>
+    <div id="app-version" aria-label="当前版本">v0.15.1</div>
     <div id="model-loading" class="model-loading hidden" role="status" aria-live="polite">
       <span class="model-loading-logo" aria-hidden="true">✦</span>
       <div><strong id="model-loading-title">正在生成</strong><small id="model-loading-detail"></small></div>

@@ -603,8 +603,8 @@ function renderPowerTraining() {
     const count = Number(target.entity.cultivationCount || 0);
     document.querySelector("#training-level").textContent = `${count} / 5 次`;
     if (!quote || !quote.remaining) {
-      preview.textContent = count >= 5 ? "五次修炼已完成。" : "正在等待修炼条件同步。";
-      button.disabled = true; button.textContent = count >= 5 ? "修炼圆满" : "等待同步"; return;
+      preview.textContent = count >= 5 ? "五次修炼已完成。" : "暂时还不能修炼，请稍后再试。";
+      button.disabled = true; button.textContent = count >= 5 ? "修炼圆满" : "暂不可用"; return;
     }
     const gold = document.querySelector("#cultivation-gold");
     gold.min = String(quote.goldMin); gold.max = String(quote.goldMax);
@@ -836,6 +836,33 @@ function renderInbox() {
   });
 }
 
+function resizeGamePanels(change) {
+  const center = {
+    x: (viewport.scrollLeft + viewport.clientWidth / 2 - canvas.offsetLeft) / mapCssSize,
+    y: (viewport.scrollTop + viewport.clientHeight / 2 - canvas.offsetTop) / mapCssSize
+  };
+  change();
+  requestAnimationFrame(() => {
+    updateMapScale(false);
+    viewport.scrollTo({
+      left: canvas.offsetLeft + center.x * mapCssSize - viewport.clientWidth / 2,
+      top: canvas.offsetTop + center.y * mapCssSize - viewport.clientHeight / 2
+    });
+  });
+}
+function setSocialOpen(open) {
+  const panel = document.querySelector("#social-sidebar");
+  const toggle = document.querySelector("#toggle-social");
+  if (!open && panel.contains(document.activeElement)) toggle.focus();
+  resizeGamePanels(() => {
+    document.querySelector(".layout").classList.toggle("social-collapsed", !open);
+    panel.inert = !open;
+    panel.setAttribute("aria-hidden", String(!open));
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", open ? "收起通讯" : "展开通讯");
+    toggle.title = open ? "收起通讯" : "展开通讯";
+  });
+}
 function switchSocialTab(tab) {
   socialTab = tab;
   document.querySelectorAll("[data-social-tab]").forEach(button => button.classList.toggle("active", button.dataset.socialTab === tab));
@@ -864,6 +891,7 @@ function renderWorldChat() {
     worldChatFingerprint = fingerprint;
   }
   document.querySelector("#world-chat-send").disabled = !ownPlayer() || pendingHostKeys.has("intent:world-chat");
+  document.querySelector("#world-chat-send").setAttribute("aria-busy", String(pendingHostKeys.has("intent:world-chat")));
 }
 function renderConversations() {
   const list = document.querySelector("#general-conversations"); list.replaceChildren();
@@ -916,9 +944,10 @@ function renderOwnerCommands() {
   document.querySelector("#owner-account").textContent = owner
     ? `服主：${payload?.serverOwnerName || payload?.account?.username || "作品作者"}`
     : "";
-  document.querySelector("#owner-server-status").textContent = payload?.initialized ? "已开服 · 后台静默同步" : "尚未开服";
-  document.querySelector("#owner-open-server").disabled = !owner || Boolean(payload?.initialized);
-  document.querySelector("#owner-open-server").textContent = payload?.initialized ? "已经开服" : "开服";
+  document.querySelector("#owner-server-status").textContent = payload?.programUpdateAvailable ? "有更新待发布" : payload?.initialized ? "已开服" : "尚未开服";
+  document.querySelector("#owner-open-server").disabled = !owner || Boolean(payload?.control || payload?.initialized);
+  document.querySelector("#owner-open-server").textContent = payload?.control || payload?.initialized ? "已经开服" : "开服";
+  document.querySelector("#owner-publish-program").disabled = !owner || !payload?.control;
   document.querySelector("#owner-migrate-server").disabled = !owner || !payload?.initialized;
   const entries = ownerPlayerEntries();
   fillOwnerPlayerSelect("#owner-reset-player", entries);
@@ -966,7 +995,7 @@ function openGeneral(id) {
   document.querySelector("#general-holder").textContent = accountLabel(general.holderAccountId);
   document.querySelector("#general-appearance").textContent = redactAccountIds(general.appearanceSetting || "沿用旧档案，暂无独立外观分类。");
   document.querySelector("#general-core-setting").textContent = redactAccountIds(general.coreSetting || general.setting || "暂无核心设定");
-  document.querySelector("#general-talent").textContent = general.talentSummary?.text || general.talentSummary?.name || "天赋待同步";
+  document.querySelector("#general-talent").textContent = general.talentSummary?.text || general.talentSummary?.name || "暂无天赋信息";
   document.querySelector("#general-talent").className = `rarity-${general.talentSummary?.rarity || "white"}`;
   const service = document.querySelector("#general-service-history"); service.replaceChildren();
   const records = [
@@ -995,6 +1024,10 @@ function renderDialogue() {
   const history = document.querySelector("#dialogue-history"); history.replaceChildren();
   const lines = general.interactionHistory || [];
   const outgoing = [...dialogueRequests.values()].filter(item => item.generalId === dialogueGeneralId);
+  const sendButton = document.querySelector("#dialogue-send");
+  const waiting = outgoing.some(item => item.status === "sending");
+  sendButton.disabled = waiting;
+  sendButton.setAttribute("aria-busy", String(waiting));
   if (!lines.length && !outgoing.length) { const p = document.createElement("p"); p.textContent = "尚无对话记录。"; history.append(p); }
   lines.forEach(item => {
     const user = document.createElement("p"); user.className = "user"; user.textContent = redactAccountIds(`${item.speakerName || accountLabel(item.accountId)}：${item.userText || "交谈"}`);
@@ -1028,6 +1061,7 @@ function openDialogue(id) {
   const general = allGenerals()[id];
   if (!canInteract(general)) { showToast("当前所在位置不支持与这名将领交互"); return; }
   dialogueGeneralId = id;
+  setSocialOpen(true);
   switchSocialTab("generals");
   document.querySelector("#general-conversations").classList.add("hidden");
   document.querySelector("#general-modal").classList.add("hidden");
@@ -1038,10 +1072,13 @@ function openDialogue(id) {
 
 function renderAll() {
   renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); draw();
+  const notice = document.querySelector("#connection-notice");
+  notice.textContent = payload?.programUpdateAvailable ? "游戏更新尚未发布。请服主在「服主指令」中发布后继续。" : ["degraded", "error"].includes(payload?.status) ? "连接中断，暂时无法操作。恢复后即可继续。" : "";
+  notice.classList.toggle("hidden", !notice.textContent);
   const player = ownPlayer();
   const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
-  document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);
-  if (payload?.initialized && !player && !banned) renderJoinWizard();
+  document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned || Boolean(payload?.programUpdateAvailable));
+  if (payload?.initialized && !player && !banned && !payload?.programUpdateAvailable) renderJoinWizard();
   if (generalDetailId && !document.querySelector("#general-modal").classList.contains("hidden")) {
     if (allGenerals()[generalDetailId]) openGeneral(generalDetailId); else document.querySelector("#general-modal").classList.add("hidden");
   }
@@ -1318,12 +1355,16 @@ viewport.addEventListener("wheel", event => { event.preventDefault(); stepZoom(e
 window.addEventListener("resize", () => updateMapScale(true));
 
 document.querySelector("#return-library").addEventListener("click", () => host("library"));
+document.querySelector("#toggle-social").addEventListener("click", event => setSocialOpen(event.currentTarget.getAttribute("aria-expanded") !== "true"));
 document.querySelector("#toggle-selected-area").addEventListener("click", event => {
-  const collapsed = document.querySelector(".map-workspace").classList.toggle("area-collapsed");
-  event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
-  event.currentTarget.setAttribute("aria-label", collapsed ? "展开选中的区域" : "收起选中的区域");
-  event.currentTarget.textContent = collapsed ? "⌃" : "⌄";
-  requestAnimationFrame(() => updateMapScale(true));
+  const toggle = event.currentTarget;
+  resizeGamePanels(() => {
+    const collapsed = document.querySelector(".map-workspace").classList.toggle("area-collapsed");
+    document.querySelector("#area-content").inert = collapsed;
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", collapsed ? "展开选中的区域" : "收起选中的区域");
+    toggle.title = collapsed ? "展开选中的区域" : "收起选中的区域";
+  });
 });
 document.querySelectorAll("[data-social-tab]").forEach(button => button.addEventListener("click", () => switchSocialTab(button.dataset.socialTab)));
 document.querySelector("#world-chat-form").addEventListener("submit", event => {
@@ -1344,6 +1385,7 @@ document.querySelector("#deploy-confirm").addEventListener("click", () => {
   deployGeneralId = null;
 });
 document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
+document.querySelector("#owner-publish-program").addEventListener("click", () => host("admin", { command: { type: "publish-program" } }, { expectResult: true, key: "admin:publish-program" }));
 document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
 document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
 document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }, { expectResult: true, key: "admin:open-server" }));
@@ -1489,7 +1531,7 @@ window.addEventListener("message", event => {
       renderDialogue();
     }
     playSound(resultSound(event.data.result));
-    if (event.data.result?.deferredEffects?.length) showToast("领地变化已经生效，将领生成会在后台自动重试");
+    if (event.data.result?.deferredEffects?.length) showToast("领地已占领，新将领稍后到来");
   }
 });
 

@@ -144,6 +144,7 @@ let onlineWorldFrameReady = false;
 let onlineWorldProgramHash = "builtin-preview";
 let onlineWorldProgramUrl = null;
 let onlineWorldMigrationTarget = null;
+let onlineWorldClosePromise = Promise.resolve();
 let activePage = "home";
 let profileEditorDirty = false;
 let profileEditorId = null;
@@ -292,11 +293,11 @@ function renderModelSelector(next){
   document.querySelector("#model-note").textContent=models.error
     ? `读取失败：${models.error}`
     : models.changing
-      ? "正在切换模型并更新作品页面…"
+      ? "正在切换模型…"
       : next.room?.role==="guest"
-        ? `房主：${roomModel?.label||roomModel?.model||"等待同步"} · 本机：${ownModel?.label||ownModel?.model||"自动选择中"}（优先 Grok；缺失时选其他实测型号）`
+        ? `房主：${roomModel?.label||roomModel?.model||"待选择"} · 本机：${ownModel?.label||ownModel?.model||"自动选择"}`
         : ownModel
-          ? `自动选模已启用 · 价格 ${formatModelPrice(ownModel.priceCoefficient)} · 出字率 ${formatSuccessRate(ownModel.successRate)}；发送时按优先级重选`
+          ? `自动选择模型 · 价格 ${formatModelPrice(ownModel.priceCoefficient)} · 出字率 ${formatSuccessRate(ownModel.successRate)}`
           : "发送时自动选择模型";
 }
 
@@ -346,7 +347,7 @@ function renderRoomChat(next){
       const body=document.createElement("p");
       name.textContent=message.displayName||"未命名玩家";
       time.dateTime=message.sentAtIso||new Date(Number(message.sentAt)||0).toISOString();
-      const deliveryLabel=message.optimistic?(message.deliveryStatus==="error"?" · 发送失败":message.deliveryStatus==="retrying"?" · 重试中":" · 发送中"):"";
+      const deliveryLabel=message.optimistic?(message.deliveryStatus==="error"?" · 发送失败":" · 发送中"):"";
       time.textContent=`${formatRoomChatTime(message.sentAt)}${deliveryLabel}`;
       time.title=`发送时间：${time.dateTime}（Unix ${Number(message.sentAt)||0} ms）`;
       body.textContent=message.text||"";
@@ -372,22 +373,16 @@ function renderRoomChat(next){
       : pending?.status==="error"
         ? `${chat.error||"发送失败"}；可以重新发送`
         : pending
-          ? `${pending.status==="retrying"?"网络波动，正在重试":"已发送给房主，等待房主确认并回传"}（第 ${pending.attempts||1} 次）`
-          : chat.syncStatus==="retrying"
-            ? `最新消息广播失败，房主正在重试：${chat.error||"网络异常"}`
-            : chat.syncStatus==="recovering"
-              ? "检测到聊天消息缺口，正在向房主请求恢复"
-              : chat.syncStatus==="error"
-                ? chat.error||"房间聊天恢复失败"
-            : chat.syncStatus==="syncing"
-                ? "正在同步聊天"
-                : "聊天已同步";
+          ? "发送中…"
+          : chat.syncStatus==="error" ? "聊天暂时不可用，请检查网络" : "";
+  status.classList.toggle("hidden",!status.textContent);
   const input=document.querySelector("#room-chat-input");
   const button=document.querySelector("#send-room-chat");
   const locked=!next.room||next.room.status!=="waiting"||Boolean(pending&&pending.status!=="error");
   input.disabled=locked;
   button.disabled=locked;
-  button.textContent=pending&&pending.status!=="error"?"等待房主":"发送";
+  button.setAttribute("aria-busy",String(Boolean(pending&&pending.status!=="error")));
+  button.setAttribute("aria-label",pending&&pending.status!=="error"?"正在发送房间消息":"发送房间消息");
 }
 
 function renderWorkSettings(next){
@@ -415,7 +410,7 @@ function renderWorkSettings(next){
   for(const id of ["save-work-memory","save-work-global"])document.getElementById(id).disabled=Boolean(locked);
   document.querySelector("#refresh-work-settings").disabled=guest||!next.work||settings.loading||settings.saving;
   document.querySelector("#work-global-count").textContent=settings.global?`${settings.characters??0} 字`:"尚未读取";
-  document.querySelector("#work-settings-note").textContent=settings.error|| (settings.saving?"正在保存并验证平台设置…":settings.loading?"正在读取平台设置…":guest?"房主的作品配置 · 只读":"修改后写入平台；全局配置与当前会话配置各自保留。");
+  document.querySelector("#work-settings-note").textContent=settings.error|| (settings.saving?"正在保存…":settings.loading?"正在加载设置…":guest?"房主的作品配置 · 只读":"保存后对当前作品生效。");
 }
 
 function renderPerspectivePlugin(next){
@@ -456,12 +451,12 @@ function renderPluginPanel(next){
   }
   const stackStatus=document.querySelector("#plugin-stack-status");
   stackStatus.classList.toggle("running",Boolean(plugins.busy)||["processing-input","processing-output"].includes(round?.status));
-  stackStatus.textContent=round?.status==="processing-input"?"正在处理玩家输入":round?.status==="processing-output"?"正在处理模型输出":plugins.busy?"插件正在运行":next.room?.role==="guest"?"由房主统一执行":"处理栈空闲";
+  stackStatus.textContent=plugins.busy||["processing-input","processing-output"].includes(round?.status)?"正在准备本轮回复":next.room?.role==="guest"?"由房主设置":"";
+  stackStatus.classList.toggle("hidden",!stackStatus.textContent);
 
   const runs=[...(plugins.currentRuns||[]),...(plugins.lastRuns||[])];
   const run=runs.find(item=>item.pluginId==="effect-judge")||null;
-  const runNeedsAttention=["running","error"].includes(run?.status);
-  if(runNeedsAttention)effectCard.open=true;
+  if(run?.status==="error")effectCard.open=true;
   const contextAvailable=Boolean(definition.contextAvailable);
   effectSummaryState.className=run?.status==="error"?"error":run?.status==="running"?"running":definition.enabled&&contextAvailable?"active":"";
   effectSummaryState.textContent=run?.status==="error"?"上轮已降级":run?.status==="running"?"处理中":definition.enabled&&!contextAvailable?"等待上文":definition.enabled?"已启用":"未启用";
@@ -474,23 +469,18 @@ function renderPluginPanel(next){
 function activeConversationFlow(next){
   if(!next.room)return "";
   const round=next.room.round;
-  const running=(next.plugins?.currentRuns||[]).find(run=>run?.status==="running");
-  const phase=round?.status==="processing-output"?"output":"input";
-  const configured=(next.plugins?.definitions||[]).find(plugin=>plugin?.enabled&&plugin?.phase===phase);
-  const pluginName=String(running?.name||running?.pluginId||configured?.name||configured?.id||"").trim();
   const operation=next.room.messageOperation;
   if(next.messageOperationBusy||["running","syncing"].includes(operation?.status)){
     if(operation?.action==="edit")return "正在保存编辑内容";
     if(operation?.action==="delete")return "正在删除上一条对话";
     if(operation?.action==="refresh")return "正在刷新上一条对话";
-    return "正在同步对话记录";
+    return "正在更新对话";
   }
   if(next.room.role==="guest"&&next.room.historySync?.status&&next.room.historySync.status!=="ready"&&next.room.historySync.status!=="error")return "正在准备对话记录";
-  if(next.room.role==="host"&&next.room.promptSync?.status==="syncing")return "正在准备多人对话";
-  if(round?.status==="processing-input")return pluginName?`插件${pluginName}处理输入信息中`:"插件处理输入信息中";
+  if(round?.status==="processing-input")return "正在准备本轮回复";
   if(round?.status==="generating")return next.room.role==="guest"?"等待房主生成对话内容":"正在生成对话内容";
-  if(round?.status==="processing-output")return pluginName?`插件${pluginName}处理输出信息中`:"插件处理输出信息中";
-  if(round?.status==="syncing")return "正在同步对话记录";
+  if(round?.status==="processing-output")return "正在整理本轮回复";
+  if(round?.status==="syncing")return "本轮回复即将就绪";
   if(round?.status==="collecting"&&round.readyCount>0&&round.readyCount<round.totalCount)return "已确认，等待其他成员";
   return "";
 }
@@ -663,7 +653,8 @@ function renderOnlineWorldProfileChoices(){
   const select=document.querySelector("#online-world-profile");
   if(!select)return;
   const items=state?.characterProfiles?.items||[];
-  const previous=onlineWorldState?.localPreferences?.characterProfileId||onlineWorldEnteredProfileId||select.value||state?.characterProfiles?.selectedId;
+  const selectedActiveCard=selectedOnlineWorldCardId===onlineWorldState?.card?.cardId;
+  const previous=(selectedActiveCard?onlineWorldState?.localPreferences?.characterProfileId:null)||onlineWorldEnteredProfileId||select.value||state?.characterProfiles?.selectedId;
   select.replaceChildren();
   if(!items.length){
     const option=document.createElement("option");option.value="";option.textContent="请先填写角色设定";select.append(option);
@@ -672,7 +663,7 @@ function renderOnlineWorldProfileChoices(){
     option.value=profile.id;option.textContent=profile.label||profile.displayName||"未命名设定";
     option.selected=profile.id===previous;select.append(option);
   }
-  const ownPlayer=onlineWorldState?.world?.players?.[onlineWorldState?.account?.accountId];
+  const ownPlayer=selectedActiveCard&&onlineWorldState?.world?.players?.[onlineWorldState?.account?.accountId];
   select.disabled=Boolean(ownPlayer);
   document.querySelector("#online-world-open").disabled=!items.length||!selectedOnlineWorldCardId;
 }
@@ -687,6 +678,11 @@ function showOnlineWorldDetails(card){
 
 function closeOnlineWorldDetails(){document.querySelector("#online-world-detail").classList.add("hidden")}
 
+function closeCardAuthorMenus(except = null){
+  document.querySelectorAll(".online-world-author-menu").forEach(menu=>{if(menu!==except)menu.classList.add("hidden")});
+  document.querySelectorAll(".online-world-author-badge").forEach(button=>button.setAttribute("aria-expanded",String(button.nextElementSibling===except)));
+}
+
 function renderOnlineWorldCards(library={}){
   library=library||{};
   onlineWorldCards=Array.isArray(library.cards)?library.cards:onlineWorldCards;
@@ -694,6 +690,7 @@ function renderOnlineWorldCards(library={}){
   const grid=document.querySelector("#online-world-library-grid");
   grid.replaceChildren();
   for(const card of onlineWorldGalleryCards()){
+    const item=document.createElement("article");item.className="online-world-card";item.setAttribute("role","listitem");
     const button=document.createElement("button");
     button.type="button";button.className="online-world-card-tile";button.dataset.cardId=card.cardId;button.dataset.cover=String(card.coverIndex);button.setAttribute("aria-label",`查看《${card.title}》`);
     const cover=document.createElement("span");cover.className="online-world-cover";
@@ -701,10 +698,43 @@ function renderOnlineWorldCards(library={}){
     const series=document.createElement("small");series.textContent="ONLINE GAME WORLD";
     const title=document.createElement("strong");title.textContent=card.title;
     cover.append(mark,series,title);button.append(cover);
-    button.addEventListener("click",()=>showOnlineWorldDetails(card));grid.append(button);
+    button.addEventListener("click",()=>{closeCardAuthorMenus();showOnlineWorldDetails(card)});item.append(button);
+    if(card.isCurrentUserAuthor){
+      const badge=document.createElement("button");badge.type="button";badge.className="online-world-author-badge";
+      badge.textContent="作者";badge.setAttribute("aria-label",`《${card.title}》作者操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
+      const menu=document.createElement("div");menu.className="online-world-author-menu hidden";menu.setAttribute("role","menu");menu.setAttribute("aria-label",`《${card.title}》作者操作`);
+      const heading=document.createElement("strong");heading.textContent=card.title;
+      const exportButton=document.createElement("button");exportButton.type="button";exportButton.textContent="导出游戏卡";exportButton.setAttribute("role","menuitem");
+      exportButton.addEventListener("click",()=>invoke(async()=>{
+        exportButton.disabled=true;
+        try{const result=await api.exportOnlineWorldCard(card.cardId);if(!result.canceled)toast(`《${card.title}》已导出`)}
+        finally{exportButton.disabled=false;closeCardAuthorMenus();badge.focus()}
+      }).catch(()=>{}));
+      menu.append(heading,exportButton);
+      badge.addEventListener("click",()=>{
+        const open=menu.classList.contains("hidden");closeCardAuthorMenus(open?menu:null);
+        menu.classList.toggle("hidden",!open);badge.setAttribute("aria-expanded",String(open));if(open)exportButton.focus();
+      });
+      menu.addEventListener("keydown",event=>{if(event.key==="Escape"){event.stopPropagation();closeCardAuthorMenus();badge.focus()}});
+      item.append(badge,menu);
+    }
+    grid.append(item);
   }
-  document.querySelector("#online-world-title").textContent="联机游戏";
+  document.querySelector("#online-world-title").textContent="游戏库";
   renderOnlineWorldProfileChoices();
+}
+
+function unloadOnlineWorldProgram(){
+  onlineWorldFrameReady=false;onlineWorldProgramHash=null;
+  if(onlineWorldProgramUrl){URL.revokeObjectURL(onlineWorldProgramUrl);onlineWorldProgramUrl=null}
+  if(onlineWorldFrame.getAttribute("src")!=="about:blank")onlineWorldFrame.src="about:blank";
+}
+
+async function returnToOnlineWorldLibrary(){
+  onlineWorldInLibrary=true;closeOnlineWorldDetails();renderOnlineWorld(onlineWorldState);
+  onlineWorldClosePromise=api.closeOnlineWorld();
+  const next=await onlineWorldClosePromise;
+  if(onlineWorldInLibrary)renderOnlineWorld(next);
 }
 
 function loadOnlineWorldProgram(next){
@@ -720,43 +750,32 @@ function loadOnlineWorldProgram(next){
 }
 
 function followOnlineWorldMigration(next){
+  if(onlineWorldInLibrary)return;
   const migration=next?.migration;
   if(!migration?.url||migration.workId===next?.work?.id||onlineWorldMigrationTarget===migration.workId)return;
   onlineWorldMigrationTarget=migration.workId;
   setTimeout(async()=>{
+    if(onlineWorldInLibrary)return;
     try{
       const profile=selectedOnlineWorldProfile();
       const migrated=await api.followOnlineWorldMigration({displayName:profile?.displayName||state?.account?.username||"玩家",orientation:"any"});
       renderOnlineWorldCards(await api.listOnlineWorldCards());
-      renderOnlineWorld(migrated);toast("游戏卡已按照作者签名指令迁移到新作品");
+      renderOnlineWorld(migrated);toast("已转入新的游戏服务器");
     }catch(error){toast(`游戏卡迁移地址暂时不可用：${friendlyError(error)}`)}
   },500);
 }
 
 function renderOnlineWorld(next){
-  const wasInitialized=Boolean(onlineWorldState?.initialized);
   onlineWorldState=next;
-  if(!wasInitialized&&next?.initialized)onlineWorldInLibrary=false;
-  loadOnlineWorldProgram(next);
-  const status=document.querySelector("#online-world-status");
   const serverOwner=Boolean(next?.isServerOwner||next?.isAuthor);
-  const messages={closed:"尚未打开游戏卡",opening:"正在读取伴生作品",syncing:"正在同步评论账本",ready:`已同步 · 修订 ${next?.revision||0}`,"needs-initialization":serverOwner?"已确认服主身份 · 可以开服":"等待服主开服",degraded:"使用缓存，等待重新同步",error:"读取失败"};
-  status.textContent=next?.syncing?messages.syncing:(messages[next?.status]||next?.status||messages.closed);
   const initialized=Boolean(next?.initialized);
   const gameVisible=(initialized||serverOwner)&&!onlineWorldInLibrary;
+  if(gameVisible)loadOnlineWorldProgram(next);else unloadOnlineWorldProgram();
   onlineWorldPage.classList.toggle("game-active",gameVisible);
   settingsToggle.classList.toggle("hidden",gameVisible);
   document.querySelector("#online-world-setup").classList.toggle("hidden",gameVisible);
   onlineWorldFrame.classList.toggle("hidden",!gameVisible);
-  document.querySelector(".online-world-toolbar").classList.toggle("hidden",gameVisible);
-  const initializeButton=document.querySelector("#online-world-initialize");
-  initializeButton.classList.toggle("hidden",!serverOwner||initialized);
-  initializeButton.disabled=!["work-description","card-package"].includes(next?.program?.source);
-  initializeButton.title=serverOwner?"平台伴生作品作者专用：创建首个在线赛季":"";
-  document.querySelector("#online-world-activate-program").classList.toggle("hidden",!serverOwner||!initialized);
-  document.querySelector("#online-world-export-card").classList.toggle("hidden",!serverOwner||!next?.work);
-  document.querySelector("#online-world-migrate").classList.toggle("hidden",!serverOwner||!initialized);
-  document.querySelector("#online-world-title").textContent=next?.work?(next?.card?.title||"猎艳疆土"):"联机游戏";
+  document.querySelector("#online-world-title").textContent="游戏库";
   renderOnlineWorldProfileChoices();
   postOnlineWorldState();
   followOnlineWorldMigration(next);
@@ -885,7 +904,7 @@ function renderDomainList(){
 
 function renderDomainNote(next=state){
   if(!next)return;
-  domainNote.textContent=(next.domainSelected?`${next.originLocked?"本次会话已锁定":"当前选择"}：${new URL(next.origin).host}`:"请选择节点后登录")+(domainDirectory?.probing?" · 延迟正在后台检测":"");
+  domainNote.textContent=next.domainSelected?`当前节点：${new URL(next.origin).host}`:"请选择节点后登录";
 }
 
 async function refreshDomains(force=false){
@@ -924,9 +943,9 @@ function render(next){
   const modelJob=modelJobs.find(job=>job.stage!=="queued")||modelJobs[0];
   document.querySelector("#model-loading").classList.toggle("hidden",!modelJob);
   if(modelJob){
-    const stage={queued:"等待前一项完成",selecting:"正在选择模型",generating:"正在生成",waiting:"正在切换模型"}[modelJob.stage]||"正在加载";
+    const stage=modelJob.stage==="queued"?"排队中":"请稍候";
     document.querySelector("#model-loading-title").textContent=`${modelJob.label} · ${stage}`;
-    document.querySelector("#model-loading-detail").textContent=[modelJob.model?`${modelJob.model}${modelJob.provider?`（${modelJob.provider}）`:""}`:null,modelJob.attempt?`第 ${modelJob.attempt} 次尝试`:null,modelJob.stage==="waiting"?`${Math.ceil(modelJob.retryAfterMs/1000)} 秒后重试`:null,modelJob.points!=null?`已消耗 ${modelJob.points} 积分`:null,modelJobs.length>1?`共 ${modelJobs.length} 项`:null].filter(Boolean).join(" · ");
+    document.querySelector("#model-loading-detail").textContent=[modelJob.points!=null?`已消耗 ${modelJob.points} 积分`:null,"完成后自动显示结果，可随时取消"].filter(Boolean).join(" · ");
   }
   state=next;
   renderReleaseVerificationResult(next);
@@ -1090,13 +1109,13 @@ function render(next){
     document.querySelector("#room-id").textContent=next.room.status==="joining"?"正在加入":next.room.status==="join-error"?"加入房间失败":`房间 ${next.room.id}`;
     const round=next.room.round;
     const lastResultCopy=round?.lastResult?` · 上轮 ${round.lastResult.model||"未知模型"} / ${round.lastResult.points?.total??0} 积分`:"";
-    const roundStage=round?.status==="processing-input"?" · 插件正在处理输入":round?.status==="generating"?" · 模型生成中":round?.status==="processing-output"?" · 插件正在处理输出":round?.status==="syncing"?round.resultAckTotal?` · 访客同步回执 ${round.resultAckCount}/${round.resultAckTotal}`:" · 等待房主开放下一轮":round?.error?` · 上次失败：${round.error}`:"";
+    const roundStage=["processing-input","generating","processing-output","syncing"].includes(round?.status)?" · 等待本轮回复":round?.error?" · 本轮失败，请重试":"";
     const roundCopy=round?` · 第 ${round.number} 轮 ${round.readyCount}/${round.totalCount} 已确认${roundStage}${lastResultCopy}`:"";
     const saveCopy=` · 会话：${next.room.save?.name||"新的对话"}`;
     const history=next.room.historySync;
-    const historyCopy=next.room.role!=="guest"||!history||history.status==="ready"?"":history.status==="announcing"?" · 等待房主确认会话锚点":history.status==="error"?` · 会话锚定失败：${history.error||"未知错误"}`:" · 正在新建或恢复访客会话";
+    const historyCopy=next.room.role!=="guest"||!history||history.status==="ready"?"":history.status==="error"?" · 加入失败，请重新加入":" · 正在加入";
     const promptSync=next.room.promptSync;
-    const promptCopy=next.room.role!=="host"||!promptSync?"":promptSync.status==="syncing"?" · 正在写入多人会话提示词":promptSync.status==="ready"?` · 多人提示词已同步（${promptSync.memberCount} 人）`:promptSync.status==="error"?` · 多人提示词失败：${promptSync.error||"未知错误"}`:" · 多人提示词将在首轮发送前写入";
+    const promptCopy=next.room.role==="host"&&promptSync?.status==="error"?" · 房间准备失败，请重试":"";
     document.querySelector("#room-summary").textContent=next.room.error||`房主：${next.room.hostUsername} · ${next.room.work?.title||"已选作品"} · ${next.room.memberCount||1} 人${saveCopy}${historyCopy}${promptCopy}${roundCopy}`;
     invitePanel.classList.toggle("hidden",next.room.role!=="host"||!next.room.inviteUrl);
     document.querySelector("#room-invite-url").value=next.room.inviteUrl||"";
@@ -1120,12 +1139,12 @@ function render(next){
   document.querySelector("#cancel-message-edit").disabled=Boolean(next.messageOperationBusy);
   const operation=next.room?.messageOperation;
   document.querySelector("#message-tool-note").textContent=operation?.status==="syncing"
-    ? `${operation.action} 已写入房主，正在等待访客回执 ${operation.ackCount}/${operation.ackTotal}`
+    ? "正在更新所有成员的对话"
     : operation?.status==="error"
       ? `同步失败：${operation.error||"访客端操作失败"}`
       : operation?.status==="completed"
         ? "最近一次记录操作已在全体成员端完成。"
-        : "仅房主可操作；访客会重试写入相同结果，刷新不会在访客端再次消耗积分。";
+        : "仅房主可操作。刷新回复可能消耗积分。";
   const memberList=document.querySelector("#member-list");
   memberList.replaceChildren();
   const visibleMembers=(next.room?.members||[]).filter(member=>String(member.id)!==String(next.account?.accountId));
@@ -1144,7 +1163,7 @@ function render(next){
       actions.className="member-actions";
       const badge=document.createElement("em");
       const ready=next.room.round?.readyNames?.includes(member.displayName);
-      badge.textContent=member.historyStatus&&member.historyStatus!=="ready"?(member.historyStatus==="announcing"?"确认锚点中":"准备会话中"):ready?"本轮已确认":member.id===next.account?.accountId?"本机":"等待输入";
+      badge.textContent=member.historyStatus&&member.historyStatus!=="ready"?"正在加入":ready?"本轮已确认":member.id===next.account?.accountId?"本机":"等待输入";
       actions.append(badge);
       if(next.room.role==="host"&&String(member.id)!==String(next.account?.accountId)){
         const remove=document.createElement("button");
@@ -1155,7 +1174,7 @@ function render(next){
         remove.addEventListener("click",async()=>{
           const confirmed=await confirmAction(`将“${member.displayName||member.platformName||"该成员"}”移出房间？`,{title:"移出成员",acceptText:"移出"});
           if(!confirmed)return;
-          invoke(async()=>{const result=await api.removeRoomMember(member.id);toast(result.promptUpdated?"成员已移出房间":"成员已移出，提示词将在下一轮重新同步")}).catch(()=>{});
+          invoke(async()=>{await api.removeRoomMember(member.id);toast("成员已移出房间")}).catch(()=>{});
         });
         actions.append(remove);
       }
@@ -1182,7 +1201,7 @@ function render(next){
   const historyReady=next.room?.role!=="guest"||next.room?.historySync?.status==="ready";
   roundButton.disabled=!next.room||next.room.status!=="waiting"||roundStatus!=="collecting"||ownReady||!historyReady;
   roundInput.disabled=!next.room||next.room.status!=="waiting"||roundStatus!=="collecting"||ownReady||!historyReady;
-  roundButton.textContent=!historyReady?"正在准备会话锚点":ownReady?"本轮已确认":roundStatus==="processing-input"?"插件处理输入中":roundStatus==="generating"?"房主生成中":roundStatus==="processing-output"?"插件处理输出中":roundStatus==="syncing"?"同步记录中":roundStatus==="error"?"同步失败":"确认本轮输入";
+  roundButton.textContent=!historyReady?"正在加入":ownReady?"本轮已确认":["processing-input","generating","processing-output","syncing"].includes(roundStatus)?"等待本轮回复":roundStatus==="error"?"请重试":"确认本轮输入";
   const flowStatus=document.querySelector("#round-flow-status");
   const flowCopy=activeConversationFlow(next);
   flowStatus.textContent=flowCopy;
@@ -1202,9 +1221,13 @@ document.querySelector("#online-world-import-card").addEventListener("click",()=
   if(!result.canceled)toast(`已导入《${result.imported.title}》`);
 }).catch(()=>{}));
 document.querySelector("#online-world-detail").addEventListener("click",event=>{if(event.target===event.currentTarget)closeOnlineWorldDetails()});
+document.addEventListener("click",event=>{if(!event.target.closest(".online-world-author-badge,.online-world-author-menu"))closeCardAuthorMenus()});
 document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!document.querySelector("#online-world-detail").classList.contains("hidden"))closeOnlineWorldDetails()});
 document.querySelector("#online-world-profile").addEventListener("change",renderOnlineWorldProfileChoices);
-document.querySelector("#online-world-back").addEventListener("click",()=>{closeOnlineWorldDetails();showPage("home")});
+document.querySelector("#online-world-back").addEventListener("click",async()=>{
+  try{await returnToOnlineWorldLibrary()}catch(error){toast(friendlyError(error))}
+  showPage("home");
+});
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();
   const card=onlineWorldGalleryCards().find(item=>item.cardId===selectedOnlineWorldCardId);
@@ -1215,28 +1238,13 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
   const button=document.querySelector("#online-world-open");button.disabled=true;button.textContent="正在开始…";
   renderOnlineWorldProfileChoices();
   try{
+    await onlineWorldClosePromise;
     const next=await api.openOnlineWorld({cardId:card.cardId,characterProfileId:profile.id,displayName:profile.displayName||state?.account?.username||"玩家",orientation:"any"});
     closeOnlineWorldDetails();
     onlineWorldInLibrary=!next?.initialized&&!next?.isServerOwner;renderOnlineWorld(next);
-  }catch(error){onlineWorldEnteredProfileId=null;renderOnlineWorld({...onlineWorldState,status:"error",error:friendlyError(error)});toast(friendlyError(error))}
+    if(onlineWorldInLibrary){await returnToOnlineWorldLibrary();toast("游戏尚未开服，请稍后再来")}
+  }catch(error){onlineWorldEnteredProfileId=null;await returnToOnlineWorldLibrary();toast(friendlyError(error))}
   finally{button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
-});
-document.querySelector("#online-world-export-card").addEventListener("click",()=>invoke(async()=>{
-  const result=await api.exportOnlineWorldCard();
-  renderOnlineWorldCards(await api.listOnlineWorldCards());
-  if(!result.canceled)toast("完整游戏卡已导出，包含伴生作品创作页配置快照");
-}).catch(()=>{}));
-document.querySelector("#online-world-initialize").addEventListener("click",async()=>{
-  if(!await confirmAction("这会以伴生作品作者作为服主，在评论区写入赛季控制记录和第一份地图快照。",{title:"服主开服",acceptText:"立即开服"}))return;
-  invoke(async()=>{const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);toast("开服成功，在线赛季已经启动")}).catch(()=>{});
-});
-document.querySelector("#online-world-activate-program").addEventListener("click",async()=>{
-  if(!await confirmAction("这会重新读取作品详细介绍，并用作者密钥签名启用其中的游戏程序包。",{title:"启用详情程序",acceptText:"签名启用"}))return;
-  invoke(async()=>{renderOnlineWorld(await api.activateOnlineWorldProgram());toast("详情程序已经签名启用")}).catch(()=>{});
-});
-document.querySelector("#online-world-migrate").addEventListener("click",async()=>{
-  if(!await confirmAction("这会导出当前作品配置、创建同配置的新作品并搬迁赛季账本；所有回读校验成功后，才会在旧作品评论区发布签名重置指令。",{title:"重置并迁移在线游戏卡",acceptText:"建立迁移作品"}))return;
-  invoke(async()=>{const result=await api.migrateOnlineWorld();await api.copyText(result.url);toast(result.redirectPublished?"迁移配置已回读验证，地址已复制；发布新作品后即可完成切换":`迁移草稿地址已复制；${result.importError||"请在创作页补全配置"}`)}).catch(()=>{});
 });
 window.addEventListener("message",async event=>{
   if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest"||event.data?.protocol!==ONLINE_WORLD_HOST_PROTOCOL)return;
@@ -1256,18 +1264,25 @@ window.addEventListener("message",async event=>{
     postOnlineWorldState();return;
   }
   if(event.data.type==="library"){
-    onlineWorldInLibrary=true;closeOnlineWorldDetails();renderOnlineWorld(onlineWorldState);return;
+    try{await returnToOnlineWorldLibrary();renderOnlineWorldCards(await api.listOnlineWorldCards())}catch(error){toast(friendlyError(error))}return;
   }
+  if(onlineWorldInLibrary)return;
   if(event.data.type==="admin"){
     const command={...(event.data.command||{})};
     try{
+      if(!onlineWorldState?.isServerOwner)throw new Error("仅本游戏服主可使用此操作");
+      if(command.type==="publish-program"){
+        if(!await confirmAction("将作品介绍中的新版游戏发布给本服玩家？现有地图和玩家进度会保留。",{title:"发布游戏更新",acceptText:"发布更新"})){replyResult({cancelled:true});return}
+        const next=await api.activateOnlineWorldProgram();renderOnlineWorld(next);
+        replyResult({admin:true,state:next});toast("游戏更新已发布");return;
+      }
       if(command.type==="open-server"){
-        if(!await confirmAction("这会以伴生作品作者账号作为服主，在评论区发布赛季控制记录与第一份覆盖快照。",{title:"服主开服",acceptText:"立即开服"})){replyResult({cancelled:true});return}
+        if(!await confirmAction("开启本游戏服务器，让玩家开始加入？",{title:"服主开服",acceptText:"立即开服"})){replyResult({cancelled:true});return}
         const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);
         replyResult({admin:true,state:next});toast("开服成功");return;
       }
       if(command.type==="migrate-server"){
-        if(!await confirmAction("这会复制伴生作品配置与公共地图，建立新作品，并在旧评论区发布作者签名的搬迁指令。",{title:"搬迁并重置服务器",acceptText:"开始搬迁"})){replyResult({cancelled:true});return}
+        if(!await confirmAction("将游戏迁移到新的作品地址？当前公共地图会保留，玩家将转入新地址。",{title:"搬迁服务器",acceptText:"开始搬迁"})){replyResult({cancelled:true});return}
         const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
         replyResult({admin:true,migration:result});
         toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
@@ -1278,7 +1293,7 @@ window.addEventListener("message",async event=>{
         if(!await confirmAction(`这会替换尚未领取的散落批次，在未占领区域放置 ${count} 个宝物，其中赤曜升格 ${redAscend} 个、赤曜洗髓 ${redReroll} 个。`,{title:"重新散落宝物",acceptText:"确认散落"})){replyResult({cancelled:true});return}
         const result=await api.administerOnlineWorld({type:"scatter-treasures",count,redAscend,redReroll});
         if(result?.state)renderOnlineWorld(result.state);
-        replyResult({...result,admin:true});toast("宝物散落批次已发布");return;
+        replyResult({...result,admin:true});toast("宝物已重新散落");return;
       }
       if(!["player-reset","player-ban","player-unban"].includes(command.type))throw new Error("未知服主指令");
       const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
@@ -1287,8 +1302,8 @@ window.addEventListener("message",async event=>{
       const copy=command.type==="player-reset"
         ? {text:`重置 ${label} 的玩家数据？该玩家会被移出本局，下次进入需要重新完成开局流程。`,title:"重置玩家数据",acceptText:"确认重置"}
         : command.type==="player-ban"
-          ? {text:`封禁 ${label}？封禁记录会上传评论区，其所有游戏操作将被其他客户端忽略。`,title:"封禁玩家",acceptText:"确认封禁"}
-          : {text:`解除 ${label} 的封禁？解除记录同样会由作者签名并上传评论区。`,title:"解除封禁",acceptText:"确认解封"};
+          ? {text:`封禁 ${label}？该账号将被禁止加入和参与本游戏。`,title:"封禁玩家",acceptText:"确认封禁"}
+          : {text:`解除 ${label} 的封禁，允许该账号重新加入？`,title:"解除封禁",acceptText:"确认解封"};
       if(!await confirmAction(copy.text,{title:copy.title,acceptText:copy.acceptText})){replyResult({cancelled:true});return}
       const result=await api.administerOnlineWorld(command);
       if(result?.state)renderOnlineWorld(result.state);
@@ -1446,7 +1461,7 @@ document.querySelector("#save-perspective-split").addEventListener("click",()=>i
   perspectiveEditorDirty=false;toast("字数已保存，启用时自动写入前置词");
 }).catch(()=>{}));
 document.querySelector("#refresh-conversations").addEventListener("click",()=>invoke(async()=>{await api.refreshConversations();toast("平台会话列表已刷新")}).catch(()=>{}));
-document.querySelector("#conversation-list").addEventListener("change",event=>{const conversationId=event.currentTarget.value;if(!conversationId)return;invoke(async()=>{await api.selectConversation(conversationId);toast("已切换并长期锚定此平台会话")}).catch(()=>{})});
+document.querySelector("#conversation-list").addEventListener("change",event=>{const conversationId=event.currentTarget.value;if(!conversationId)return;invoke(async()=>{await api.selectConversation(conversationId);toast("已切换会话")}).catch(()=>{})});
 document.querySelector("#new-conversation").addEventListener("click",()=>invoke(async()=>{await api.newConversation();toast("已新建会话")}).catch(()=>{}));
 document.querySelector("#rename-conversation").addEventListener("click",()=>{
   const id=document.querySelector("#conversation-list").value;
@@ -1527,15 +1542,15 @@ document.querySelector("#save-effect-judge").addEventListener("click",()=>invoke
   pluginEditorDirty=false;
   toast(payload.enabled?"效果判定已启用，将在全员确认后执行":"效果判定已停用");
 }).catch(()=>{}));
-document.querySelector("#refresh-latest").addEventListener("click",async()=>{if(!await confirmAction("刷新会调用房主平台模型并可能消耗积分，确定继续吗？",{title:"刷新上一条回复",acceptText:"确认刷新"}))return;invoke(async()=>{await api.runMessageOperation("refresh","");toast("回复已刷新，正在同步给访客")}).catch(()=>{})});
+document.querySelector("#refresh-latest").addEventListener("click",async()=>{if(!await confirmAction("刷新会调用房主平台模型并可能消耗积分，确定继续吗？",{title:"刷新上一条回复",acceptText:"确认刷新"}))return;invoke(async()=>{await api.runMessageOperation("refresh","");toast("回复已刷新")}).catch(()=>{})});
 document.querySelector("#edit-latest").addEventListener("click",()=>{document.querySelector("#message-edit-value").value=state?.room?.round?.lastResult?.output||"";document.querySelector("#message-edit-form").classList.remove("hidden");document.querySelector("#message-edit-value").focus()});
 document.querySelector("#cancel-message-edit").addEventListener("click",()=>document.querySelector("#message-edit-form").classList.add("hidden"));
-document.querySelector("#confirm-message-edit").addEventListener("click",event=>invoke(async()=>{const button=event.currentTarget;button.disabled=true;try{await api.runMessageOperation("edit",document.querySelector("#message-edit-value").value);document.querySelector("#message-edit-form").classList.add("hidden");toast("房主平台回复已由脚本编辑，正在同步给访客")}finally{button.disabled=false}}).catch(()=>{}));
+document.querySelector("#confirm-message-edit").addEventListener("click",event=>invoke(async()=>{const button=event.currentTarget;button.disabled=true;try{await api.runMessageOperation("edit",document.querySelector("#message-edit-value").value);document.querySelector("#message-edit-form").classList.add("hidden");toast("回复已保存")}finally{button.disabled=false}}).catch(()=>{}));
 document.addEventListener("keydown",event=>{
   if(event.key!=="Escape")return;
   if(settingsOpen)void setSettingsOpen(false).catch(error=>toast(friendlyError(error)));
 });
-document.querySelector("#delete-latest").addEventListener("click",async()=>{if(!await confirmAction("确定删除最近一条 AI 回复并同步删除所有访客端的对应回复吗？",{title:"删除上一条回复",acceptText:"删除"}))return;invoke(async()=>{await api.runMessageOperation("delete","");toast("回复已删除，正在同步给访客")}).catch(()=>{})});
+document.querySelector("#delete-latest").addEventListener("click",async()=>{if(!await confirmAction("确定删除所有成员的最近一条 AI 回复吗？",{title:"删除上一条回复",acceptText:"删除"}))return;invoke(async()=>{await api.runMessageOperation("delete","");toast("回复已删除")}).catch(()=>{})});
 document.querySelector("#show-intro").addEventListener("click",()=>state?.work?invoke(()=>api.showIntro()).catch(()=>{}):toast("请先选择作品"));
 document.querySelector("#show-game").addEventListener("click",()=>{conversationAttentionKey=null;renderSurfaceButtons();invoke(()=>api.showGame()).catch(()=>{})});
 slot.addEventListener("wheel",event=>{
@@ -1610,7 +1625,7 @@ document.querySelector("#submit-round").addEventListener("click",()=>invoke(asyn
 document.querySelector("#copy-logs").addEventListener("click",()=>invoke(async()=>{const entries=orderedSessionLogs();if(!entries.length)throw new Error("当前还没有日志");await api.copyText(entries.map(entry=>JSON.stringify(entry)).join("\n"));toast(`已复制 ${entries.length} 条本次运行日志`)}).catch(()=>{}));
 window.addEventListener("resize",syncSurfaceBounds);
 new ResizeObserver(syncSurfaceBounds).observe(slot);
-api.onState(next=>{const previous=state;consumeStateEffects(next,previous);render(next);if(next.roundCompleted)toast("本轮结果已同步，对话界面已经开放");if(next.roundError)toast(next.roundError);if(next.workLoadError)toast(next.workLoadError);if(next.introUnavailable)toast("平台预览页尚未返回作品介绍视窗");if(next.protocolError)toast(`会话同步重试中：${next.protocolError}`);if(next.messageOperationCompleted)toast("记录操作已在全体成员端完成");if(next.messageOperationError)toast(`记录同步失败：${next.messageOperationError}`);if(next.hostModelChanged)toast("房主已更换平台模型");if(next.roomChatError)toast(next.roomChatError);if(next.appUpdateChanged&&next.appUpdate?.status==="ready")toast(next.appUpdate.message);if(next.appUpdateChanged&&next.appUpdate?.status==="error"&&next.releaseSecurity?.verified)toast(next.appUpdate.message)});
+api.onState(next=>{const previous=state;consumeStateEffects(next,previous);render(next);if(next.roundCompleted)toast("本轮回复已就绪");if(next.roundError)toast(next.roundError);if(next.workLoadError)toast(next.workLoadError);if(next.introUnavailable)toast("作品介绍暂时不可用");if(next.protocolError)console.warn("会话同步重试",next.protocolError);if(next.messageOperationCompleted)toast("所有成员的对话已更新");if(next.messageOperationError)toast(`对话更新失败：${next.messageOperationError}`);if(next.hostModelChanged)toast("房主已更换平台模型");if(next.roomChatError)toast(next.roomChatError);if(next.appUpdateChanged&&next.appUpdate?.status==="ready")toast(next.appUpdate.message);if(next.appUpdateChanged&&next.appUpdate?.status==="error"&&next.releaseSecurity?.verified)toast(next.appUpdate.message)});
 api.onGameFrame(frame=>{if(frame?.reset){resetGameFrame();return}if(!frame?.bytes||state?.backgroundPages?.gamePresentationAllowed===false)return;pendingGameFrame=frame;void drainGameFrames()});
 api.onOnlineWorldState(next=>renderOnlineWorld(next));
 api.onLog(entry=>{if(state?.isAdmin)receiveSessionLog(entry)});

@@ -16,8 +16,12 @@
         <span class="points-balance" aria-label="平台剩余积分"><small>剩余积分</small><b id="points-balance-value">—</b></span>
         <button id="sound-toggle" class="sound-toggle" type="button" aria-label="调整游戏音效">音效 60%</button>
       </header>
-      <section class="layout">
-        <section class="social-sidebar panel" aria-label="通讯">
+      <section class="layout social-collapsed">
+        <div class="social-dock">
+        <button id="toggle-social" class="dock-toggle social-toggle" type="button" aria-expanded="false" aria-controls="social-sidebar" aria-label="展开通讯" title="展开通讯">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg><span>通讯</span><svg class="dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+        </button>
+        <section id="social-sidebar" class="social-sidebar panel" aria-label="通讯" aria-hidden="true" inert>
           <header><span><small>疆土驿站</small><b>通讯</b></span></header>
           <nav class="social-tabs" aria-label="通讯频道">
             <button type="button" data-social-tab="world" class="active">世界</button>
@@ -26,15 +30,15 @@
           </nav>
           <section id="social-world" class="social-page">
             <div id="world-chat-messages" class="chat-messages" aria-live="polite"></div>
-            <form id="world-chat-form" class="chat-composer"><textarea id="world-chat-input" maxlength="500" placeholder="与这片大陆的主公交谈…"></textarea><button id="world-chat-send" type="submit">发送</button></form>
+            <form id="world-chat-form" class="chat-composer"><textarea id="world-chat-input" maxlength="500" aria-label="世界聊天内容" placeholder="与这片大陆的主公交谈…"></textarea><button id="world-chat-send" class="send-icon" type="submit" aria-label="发送世界消息" title="发送 · Enter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-8-8 18-2-8-8-2Z"/><path d="m11 13 10-10"/></svg></button></form>
             <small class="chat-note">公开频道 · 保留最近 50 条</small>
           </section>
           <section id="social-generals" class="social-page hidden">
             <div id="general-conversations" class="conversation-list"></div>
             <section id="dialogue-modal" class="social-thread hidden">
-              <header><span><small id="dialogue-mode">将领互动</small><b id="dialogue-general">—</b></span><button id="close-dialogue" type="button">‹</button></header>
+              <header><span><small id="dialogue-mode">将领互动</small><b id="dialogue-general">—</b></span><button id="close-dialogue" type="button" aria-label="返回将领列表" title="返回将领列表">‹</button></header>
               <div id="dialogue-history" class="dialogue-history"></div>
-              <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" placeholder="想和将领说什么？"></textarea><button id="dialogue-send" class="primary" type="button">发送</button></form>
+              <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" aria-label="将领对话内容" placeholder="想和将领说什么？"></textarea><button id="dialogue-send" class="primary send-icon" type="button" aria-label="发送将领消息" title="发送 · Enter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-8-8 18-2-8-8-2Z"/><path d="m11 13 10-10"/></svg></button></form>
             </section>
           </section>
           <section id="social-letters" class="social-page hidden">
@@ -42,6 +46,7 @@
             <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
           </section>
         </section>
+        </div>
         <div class="map-workspace">
         <div class="map-card">
           <div id="map-viewport" class="map-viewport">
@@ -56,8 +61,8 @@
           </div>
         </div>
         <section id="selected-area" class="selected-area panel" aria-label="选中的区域">
-          <button id="toggle-selected-area" class="collapse-grip" type="button" aria-expanded="true" aria-label="收起选中的区域">⌄</button>
-          <div class="area-content">
+          <button id="toggle-selected-area" class="dock-toggle collapse-grip" type="button" aria-expanded="true" aria-controls="area-content" aria-label="收起选中的区域" title="收起选中的区域"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg><span>区域</span><svg class="dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></button>
+          <div id="area-content" class="area-content">
             <section class="area-facts">
               <header><b>选中的区域</b><small id="cell-coordinate">请选择地图格子</small></header>
               <div class="cell-facts"><span><small>人口</small><b id="cell-population">—</b></span><span><small>资源</small><b id="cell-resource">—</b></span><span><small>驻军 / 上限</small><b id="cell-garrison">—</b></span><div class="power-crest"><i aria-hidden="true">⚔</i><div><small>守备战力</small><b id="cell-power">—</b></div></div></div>
@@ -200,22 +205,26 @@
 
     <section id="owner-command-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="owner-command-title">
       <article class="paper-modal owner-command-modal">
-        <header><span><small>伴生作品作者专用</small><h1 id="owner-command-title">服主指令</h1><p id="owner-account">—</p></span><button id="close-owner-command" type="button">关闭</button></header>
+        <header><span><small>仅本游戏服主可用</small><h1 id="owner-command-title">服主指令</h1><p id="owner-account">—</p></span><button id="close-owner-command" type="button">关闭</button></header>
         <div class="owner-server-state"><span><small>服务器状态</small><b id="owner-server-status">尚未开服</b></span><button id="owner-open-server" class="primary" type="button">开服</button></div>
         <section class="owner-command-section">
+          <h2>游戏更新</h2><p>将作品介绍中的新版游戏发布给本服玩家，保留当前地图和玩家进度。</p>
+          <button id="owner-publish-program" type="button">发布游戏更新</button>
+        </section>
+        <section class="owner-command-section">
           <h2>玩家数据</h2>
-          <p>重置后清除该玩家的领地、部署将领与本地角色进度，并提高玩家世代号；该账号下次进入时重新完成开局流程。</p>
+          <p>重置后清除该玩家的领地、部署将领与角色进度。该玩家下次进入时需要重新创建角色。</p>
           <div class="owner-command-row"><select id="owner-reset-player" aria-label="选择需要重置的玩家"></select><button id="owner-reset-player-button" type="button">重置玩家数据</button></div>
         </section>
         <section class="owner-command-section">
           <h2>封禁管理</h2>
-          <p>封禁记录由作品作者签名后写入评论区。列表仅显示玩家名和风月昵称，被封账号无法创建角色，其游戏操作与书信会被所有客户端忽略。</p>
+          <p>被封账号将被禁止加入和参与本游戏。你可以随时解除封禁。</p>
           <div class="owner-command-row"><select id="owner-ban-player" aria-label="选择需要管理封禁状态的玩家"></select><button id="owner-ban-player-button" class="danger" type="button">封禁玩家</button></div>
           <div id="owner-ban-list" class="owner-ban-list">当前没有封禁账号</div>
         </section>
         <section class="owner-command-section migration-command">
           <h2>服务器搬迁</h2>
-          <p>复制伴生作品配置与公共地图快照，建立新作品，再在旧评论区发布作者签名的定向搬迁记录。</p>
+          <p>将游戏迁移到新的作品地址，保留公共地图，并让玩家转入新地址。</p>
           <button id="owner-migrate-server" type="button">搬迁并重置服务器</button>
         </section>
         <section class="owner-command-section">
@@ -224,14 +233,14 @@
           <div class="owner-command-row"><label>普通材料数量<input id="treasure-count" type="number" min="1" max="1000" value="240"></label><label>升红材料<input id="treasure-red-ascend" type="number" min="0" max="20" value="0"></label><label>重塑材料<input id="treasure-red-reroll" type="number" min="0" max="20" value="0"></label></div>
           <button id="owner-scatter-treasures" type="button">重新散落天材地宝</button>
         </section>
-        <footer><small>公共账本每累计 32 条地图变更会由在线服主自动写入覆盖快照；新客户端读到完整快照后即可跳过更旧页面。</small></footer>
       </article>
     </section>
 
     <section id="banned-notice" class="overlay hidden" role="dialog" aria-modal="true">
-      <article class="paper-modal banned-modal"><small>猎艳疆土</small><h1>该风月账号已被服主封禁</h1><p>本账号无法创建角色或提交游戏操作。解封状态会随评论区后台同步自动更新。</p><button id="banned-return-library" type="button">返回游戏库</button></article>
+      <article class="paper-modal banned-modal"><small>猎艳疆土</small><h1>该风月账号已被服主封禁</h1><p>你已被禁止加入本游戏。如有疑问，请联系服主。</p><button id="banned-return-library" type="button">返回游戏库</button></article>
     </section>
 
+    <div id="connection-notice" class="connection-notice hidden" role="status"></div>
     <div id="toast" class="toast hidden" role="status"></div>
     <script src="game.js"></script>
   </body>

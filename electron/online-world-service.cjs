@@ -566,6 +566,7 @@ class OnlineWorldService {
     this.intentInFlightKey = "";
     this.pendingModelEffects = [];
     this.pollTimer = null;
+    this.syncPaused = false;
     this.mapFactsCache = null;
   }
 
@@ -590,6 +591,7 @@ class OnlineWorldService {
       card: this.card ? summarizeGameCard(this.card) : null,
       work: this.work ? { ...this.work, description: undefined } : null,
       initialized: Boolean(this.control && this.world),
+      programUpdateAvailable: Boolean(this.control?.programHash && this.control.programHash !== this.currentProgramHash()),
       isAuthor: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
       isServerOwner: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
       serverOwnerName: this.work?.authorName || null,
@@ -851,11 +853,13 @@ class OnlineWorldService {
   }
 
   startPolling() {
+    this.syncPaused = false;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = setInterval(() => void this.sync(false).catch(() => {}), POLL_INTERVAL_MS);
   }
 
   close() {
+    this.syncPaused = true;
     this.onClose?.();
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
@@ -863,6 +867,19 @@ class OnlineWorldService {
     this.saveCache();
     this.status = "closed";
     this.notify();
+  }
+
+  async pause() {
+    this.close();
+    await Promise.allSettled([this.syncInFlight, this.intentInFlight, this.joinInFlight].filter(Boolean));
+    this.saveCache();
+    this.status = "closed";
+    this.notify();
+    return this.state();
+  }
+
+  assertSyncActive() {
+    if (this.syncPaused) throw new Error("游戏已暂停");
   }
 
   currentProgramHash() {
@@ -882,6 +899,8 @@ class OnlineWorldService {
   }
 
   async open({ card, workUrl, orientation, displayName } = {}) {
+    await this.pause();
+    this.syncPaused = false;
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
     const origin = String(this.getOrigin?.() || "").replace(/\/$/, "");
@@ -975,32 +994,45 @@ class OnlineWorldService {
       orientation: this.localPreferences.orientation,
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
-    this.startPolling();
     await this.sync(true);
-    await this.ensureLocalPlayerContext();
-    this.status = this.control && this.world ? "ready" : "needs-initialization";
+    this.assertSyncActive();
+    if (this.status !== "needs-program-update") await this.ensureLocalPlayerContext();
+    this.assertSyncActive();
+    this.status = this.control && this.world ? (this.control.programHash !== this.currentProgramHash() ? "needs-program-update" : "ready") : "needs-initialization";
+    this.startPolling();
     this.notify();
     return this.state();
   }
 
-  async exportGameCard() {
-    if (!this.card || !this.work) throw new Error("请先打开一张游戏卡");
-    if (this.account().accountId !== this.work.authorAccountId) throw new Error("只有伴生作品作者可以导出包含创作页的完整游戏卡");
-    const payload = await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 });
+  async isGameCardAuthor(card) {
+    const accountId = this.account().accountId;
+    if (!accountId || card?.companion?.authorAccountId !== accountId) return false;
+    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(card.companion.workId)}`, { timeout: 8000 });
+    return this.account().accountId === accountId && normalizeWorkDetail(payload, card.companion.workId).authorAccountId === accountId;
+  }
+
+  async exportGameCard(selectedCard = this.card) {
+    if (!selectedCard) throw new Error("请先选择一张游戏卡");
+    const card = validateGameCard(selectedCard);
+    if (!await this.isGameCardAuthor(card)) throw new Error("只有伴生作品作者可以导出包含创作页的完整游戏卡");
+    const payload = await this.requestConsole(`/apps/${encodeURIComponent(card.companion.workId)}/model-config/export`, { timeout: 30000 });
     const exported = exportedConfig(payload);
-    return createExportedGameCard(this.card, exported);
+    return createExportedGameCard(card, exported);
   }
 
   async refreshWorkProgram() {
     if (!this.work) return null;
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`);
-    this.work = { ...normalizeWorkDetail(payload, this.work.id), url: this.work.url };
+    const detail = normalizeWorkDetail(payload, this.work.id);
+    if (this.card?.companion?.authorAccountId && detail.authorAccountId !== this.card.companion.authorAccountId) throw new Error("作品作者已变更，请重新获取游戏卡");
+    this.work = { ...detail, url: this.work.url };
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(this.card) || builtInGridProgram();
     return this.program;
   }
 
   async initialize() {
     if (!this.work) throw new Error("请先选择伴生作品");
+    if (this.control || this.world) throw new Error("本游戏已经开服");
     if (!isVerifiedProgram(this.program)) throw new Error("游戏卡中尚未包含有效游戏程序包");
     const account = this.account();
     if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以初始化新赛季");
@@ -1044,11 +1076,32 @@ class OnlineWorldService {
   }
 
   async activateProgramUpdate() {
+    if (this.intentInFlight) throw new Error("上一项操作仍在处理中，请等待完成");
+    if (this.syncInFlight) await this.syncInFlight;
+    if (this.intentInFlight) throw new Error("上一项操作仍在处理中，请等待完成");
+    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
+    const running = this.activateProgramUpdateNow();
+    this.intentInFlight = running;
+    this.intentInFlightKey = "admin:publish-program";
+    try {
+      return await running;
+    } finally {
+      if (this.intentInFlight === running) {
+        this.intentInFlight = null;
+        this.intentInFlightKey = "";
+      }
+    }
+  }
+
+  async activateProgramUpdateNow() {
     if (!this.work || !this.control || this.account().accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以启用游戏程序更新");
+    if (!this.world) throw new Error("游戏数据尚未就绪，请重新进入后发布更新");
     const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`);
-    this.work = { ...normalizeWorkDetail(payload, this.work.id), url: this.work.url };
-    const program = parseProgram(this.work.description, GRID_GAME_ID);
+    const detail = normalizeWorkDetail(payload, this.work.id);
+    if (detail.authorAccountId !== this.account().accountId || (this.card?.companion?.authorAccountId && detail.authorAccountId !== this.card.companion.authorAccountId)) throw new Error("仅当前作品作者可以发布游戏更新");
+    const program = parseProgram(detail.description, GRID_GAME_ID);
     if (!program) throw new Error("伴生作品详细介绍尚未包含有效游戏程序包");
+    this.work = { ...detail, url: this.work.url };
     this.program = program;
     const identity = await this.getIdentity();
     const unsigned = {
@@ -1127,7 +1180,9 @@ class OnlineWorldService {
   }
 
   async readHistoryPage(page) {
+    this.assertSyncActive();
     const payload = await this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`, { timeout: 20000 });
+    this.assertSyncActive();
     const comments = extractCommentItems(payload);
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
     if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
@@ -1141,13 +1196,16 @@ class OnlineWorldService {
     const seen = new Set();
     let page = 1;
     while (page <= maxPages) {
+      this.assertSyncActive();
       const endpoint = page === 1
         ? `/comments/branches/${encodeURIComponent(rootId)}`
         : `/comments/branches/${encodeURIComponent(rootId)}?page=${page}&limit=${HISTORY_PAGE_SIZE}`;
       let payload;
       try {
         payload = await this.requestConsole(endpoint, { timeout: 15000 });
+        this.assertSyncActive();
       } catch (error) {
+        if (this.syncPaused) throw error;
         this.diagnostic({
           event: "comment-branch-read-failed", rootCommentId: rootId, page,
           error: error?.message || String(error)
@@ -1187,6 +1245,7 @@ class OnlineWorldService {
         try {
           comments = await this.readHistoryPage(candidate);
         } catch (error) {
+          if (this.syncPaused) throw error;
           this.diagnostic({ event: "comment-root-read-failed", rootCommentId: rootId, page: candidate, error: error?.message || String(error) });
           continue;
         }
@@ -1840,7 +1899,7 @@ class OnlineWorldService {
   }
 
   async sync(fullScan = false) {
-    if (!this.work || this.intentInFlight) return this.state();
+    if (this.syncPaused || !this.work || this.intentInFlight) return this.state();
     if (this.syncInFlight) return this.syncInFlight;
     const running = this.syncNow(fullScan);
     this.syncInFlight = running;
@@ -1856,14 +1915,18 @@ class OnlineWorldService {
     this.syncing = true;
     this.error = null;
     this.notify();
+    let pendingProgramUpdate = false;
     try {
       if (this.lastClockCalibrationMono == null || this.monotonicNow() - this.lastClockCalibrationMono > 60 * 60 * 1000) await this.calibrateClock().catch(() => null);
       const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+      this.assertSyncActive();
       const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) this.control = controls[0].record;
       if (this.control) {
         if (this.control.programHash !== this.currentProgramHash()) await this.refreshWorkProgram();
-        if (this.control.programHash !== this.currentProgramHash()) throw new Error("作品详细介绍中的游戏程序尚未由作者签名启用");
+        this.assertSyncActive();
+        pendingProgramUpdate = this.control.programHash !== this.currentProgramHash();
+        if (pendingProgramUpdate && this.account().accountId !== this.work.authorAccountId) throw new Error("游戏更新尚未发布，请稍后再试");
         const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;
@@ -1896,20 +1959,24 @@ class OnlineWorldService {
         if (this.world) this.reconcileTreasureRewards(history);
         if (this.world) {
           const chatHistory = await this.readWorldChatHistory(history);
+          this.assertSyncActive();
           this.applyWorldChatRecords(chatHistory.assembled.records);
         }
         if (this.world) this.recoverOwnLocalPlayerState();
-        if (this.world) await this.settleLocalClock();
-        if (this.world) await this.retryPendingModelEffects(1);
-        if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
+        if (this.world && !pendingProgramUpdate) await this.settleLocalClock();
+        this.assertSyncActive();
+        if (this.world && !pendingProgramUpdate) await this.retryPendingModelEffects(1);
+        this.assertSyncActive();
+        if (this.world && !pendingProgramUpdate && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
         await this.receiveDirectWakes().catch(() => []);
+        this.assertSyncActive();
         const resets = history.assembled.records
           .filter(item => item.record?.schema === FYOW_SCHEMAS.reset && item.record.seasonId === this.control.seasonId && this.validAuthorSource(item))
           .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
           .sort((left, right) => comparePlatformOrder(right, left));
         if (resets[0]) this.pendingMigration = { workId: resets[0].record.newWorkId, url: resets[0].record.newWorkUrl, issuedAt: resets[0].record.issuedAt };
       }
-      this.status = this.control && this.world ? "ready" : "needs-initialization";
+      this.status = this.control && this.world ? (pendingProgramUpdate ? "needs-program-update" : "ready") : "needs-initialization";
       this.lastSyncAt = this.now();
       this.saveCache();
       if (fullScan || previousControlId !== String(this.control?.id || "")) {
@@ -1918,6 +1985,10 @@ class OnlineWorldService {
       this.notify();
       return this.state();
     } catch (error) {
+      if (this.syncPaused) {
+        this.status = "closed";
+        return this.state();
+      }
       this.error = error?.message || String(error);
       this.status = this.world ? "degraded" : "error";
       this.diagnostic({ event: "sync-failed", fullScan: Boolean(fullScan), status: this.status, error: this.error, history: { ...this.history } });
@@ -2014,8 +2085,8 @@ class OnlineWorldService {
       return { marchQuote: { ...quote, requestKey: intent.requestKey } };
     }
     if (this.syncInFlight) await this.syncInFlight;
-    if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
-    if (this.control?.programHash && this.control.programHash !== this.currentProgramHash()) throw new Error("伴生作品程序版本尚未同步到当前客户端");
+    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏暂时未连接，请稍后再试");
+    if (this.control?.programHash && this.control.programHash !== this.currentProgramHash()) throw new Error("游戏更新尚未发布，请稍后再试");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
     if (this.intentInFlight) {
@@ -2436,7 +2507,8 @@ class OnlineWorldService {
 
   async administer(command = {}) {
     if (this.syncInFlight) await this.syncInFlight;
-    if (["opening", "degraded", "error"].includes(this.status)) throw new Error(`公共地图尚未完成同步${this.error ? `：${this.error}` : ""}`);
+    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
+    if (this.status === "needs-program-update") throw new Error("请先发布游戏更新");
     if (this.intentInFlight) throw new Error("上一项行动仍在处理中，请等待完成");
     const running = this.administerNow(command);
     this.intentInFlight = running;
@@ -2744,6 +2816,7 @@ class OnlineWorldService {
 
   async receiveDirectWakes() {
     if (!this.control || !this.world) return [];
+    this.assertSyncActive();
     const accountId = this.account().accountId;
     const rootId = this.world.players?.[accountId]?.commentRootId;
     if (!rootId) return [];
@@ -2761,12 +2834,15 @@ class OnlineWorldService {
     const received = [];
     const identity = wakes.length ? await this.getIdentity() : null;
     for (const wake of wakes) {
+      this.assertSyncActive();
       if (!this.consumeDirectReceiveBudget(wake.fromAccountId)) {
         continue;
       }
       const chat = await this.findPrivateChat(wake.fromAccountId);
+      this.assertSyncActive();
       if (!chat) continue;
       const messages = await this.requestConsole(`/chats/messages?chat_id=${encodeURIComponent(chat.id)}&page=1&limit=500`, { timeout: 15000 });
+      this.assertSyncActive();
       const directs = assembleCommentRecords(extractContentItems(messages)).records
         .map(item => item.record)
         .filter(record => record?.schema === FYOW_SCHEMAS.direct && record.messageId === wake.messageId && record.fromAccountId === wake.fromAccountId && record.toAccountId === accountId)

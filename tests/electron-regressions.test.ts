@@ -254,7 +254,8 @@ describe("Electron platform API regressions", () => {
     expect(html).toContain('id="online-world-profile"');
     expect(html).toContain('id="online-world-detail-title">猎艳疆土');
     expect(html).toContain('id="online-world-import-card"');
-    expect(html).toContain('id="online-world-export-card"');
+    expect(html).not.toContain('id="online-world-export-card"');
+    expect(renderer).toContain("online-world-author-badge");
     expect(html).toContain("frame-src 'self' blob:");
     expect(renderer).toContain('event.source!==onlineWorldFrame.contentWindow');
     expect(renderer).not.toContain('ONLINE_WORLD_SHOWCASE_TITLES');
@@ -493,7 +494,7 @@ describe("Electron platform API regressions", () => {
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
     expect(renderer).not.toContain("window.confirm(");
     expect(renderer).toContain('confirmAction("刷新会调用房主平台模型并可能消耗积分');
-    expect(renderer).toContain('confirmAction("确定删除最近一条 AI 回复');
+    expect(renderer).toContain('confirmAction("确定删除所有成员的最近一条 AI 回复');
     expect(html).not.toContain('id="confirm-overlay"');
     expect(main).toContain("const findMessageButton = (target, selector)");
     expect(main).toContain("const chooser = [...document.querySelectorAll");
@@ -550,7 +551,7 @@ describe("Electron platform API regressions", () => {
     expect(html).toMatch(/id="round-flow-status"[^>]*role="status"/);
     expect(html).toMatch(/id="submit-round"[^>]*>[^<]*<\/button><small id="round-flow-status"/);
     expect(renderer).toContain("function activeConversationFlow(next)");
-    expect(renderer).toContain('`插件${pluginName}处理输入信息中`');
+    expect(renderer).toContain('"正在准备本轮回复"');
     expect(renderer).toContain('"正在生成对话内容"');
     expect(renderer).toContain('flowStatus.classList.toggle("hidden",!flowCopy)');
     expect(styles).toContain(".round-flow-status{");
@@ -709,8 +710,10 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain('api.sendRoomChat(text)');
     expect(renderer).toContain('card.classList.toggle("pending",Boolean(message.optimistic))');
     expect(renderer).toContain('pendingId!==renderedRoomChatPendingId');
-    expect(renderer).toContain('等待房主确认并回传');
-    expect(renderer).toContain('检测到聊天消息缺口');
+    expect(renderer).toContain('"发送中…"');
+    expect(renderer).not.toContain('等待房主确认并回传');
+    expect(renderer).not.toContain('检测到聊天消息缺口');
+    expect(renderer).toContain('status.classList.toggle("hidden",!status.textContent)');
     expect(html).toContain('id="room-chat-messages"');
     expect(html).toContain('id="room-chat-form"');
   });

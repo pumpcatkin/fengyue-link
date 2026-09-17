@@ -3471,9 +3471,19 @@ class AccountBackend {
     })()`, true);
   }
 
-  listOnlineWorldCards() {
+  async listOnlineWorldCards() {
+    const entries = [...this.onlineWorldCards.values()];
+    const cards = entries.map(card => ({ ...summarizeGameCard(card), isCurrentUserAuthor: false }));
+    let index = 0;
+    await Promise.all(Array.from({ length: Math.min(3, cards.length) }, async () => {
+      for (;;) {
+        const current = index++;
+        if (current >= cards.length) return;
+        cards[current].isCurrentUserAuthor = await this.onlineWorldService.isGameCardAuthor(entries[current]).catch(() => false);
+      }
+    }));
     return {
-      cards: [...this.onlineWorldCards.values()].map(summarizeGameCard),
+      cards,
       activeCardId: this.onlineWorldService?.card?.cardId || null
     };
   }
@@ -3500,18 +3510,19 @@ class AccountBackend {
       properties: ["openFile"],
       filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
     });
-    if (selected.canceled || !selected.filePaths[0]) return { canceled: true, ...this.listOnlineWorldCards() };
+    if (selected.canceled || !selected.filePaths[0]) return { canceled: true, ...await this.listOnlineWorldCards() };
     const file = selected.filePaths[0];
     const size = fs.statSync(file).size;
     if (size > 8 * 1024 * 1024) throw new Error("游戏卡文件超过 8 MiB 上限");
     const card = validateGameCard(JSON.parse(fs.readFileSync(file, "utf8")));
     this.onlineWorldCards.set(card.cardId, card);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
-    return { canceled: false, imported: summarizeGameCard(card), ...this.listOnlineWorldCards() };
+    return { canceled: false, imported: summarizeGameCard(card), ...await this.listOnlineWorldCards() };
   }
 
-  async exportOnlineWorldCard() {
-    const card = await this.onlineWorldService.exportGameCard();
+  async exportOnlineWorldCard(cardId) {
+    if (!cardId) throw new Error("请从作者标识中选择要导出的游戏卡");
+    const card = await this.onlineWorldService.exportGameCard(this.onlineWorldCard(cardId));
     this.onlineWorldCards.set(card.cardId, card);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     const safeName = String(card.title || "online-world").replace(/[<>:\"/\\|?*\x00-\x1f]/g, "-").slice(0, 60) || "online-world";
@@ -9323,10 +9334,10 @@ handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
 handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
-handleLocalIpc("online-world:export-card", () => backend.exportOnlineWorldCard());
+handleLocalIpc("online-world:export-card", (_event, cardId) => backend.exportOnlineWorldCard(cardId));
 handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorldCard(options || {}));
 handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));
-handleLocalIpc("online-world:close", () => { backend.onlineWorldService.close(); return backend.onlineWorldService.state(); });
+handleLocalIpc("online-world:close", () => backend.onlineWorldService.pause());
 handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
 handleLocalIpc("online-world:activate-program", () => backend.onlineWorldService.activateProgramUpdate());
 handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));

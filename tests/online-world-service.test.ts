@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
 const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
@@ -11,7 +11,7 @@ const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto
 const { assembleCommentRecords, encodeCommentRecord, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
-const { createBundledGridCard } = require("../electron/online-world-card.cjs");
+const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
 
 const completePersona = "慧眼之主出身边境商旅之家，熟悉乱世中的人情与资源流向。性格沉稳果断，重视承诺，也愿意倾听不同立场；志在建立能让追随者安身的领地，擅长观察人才、统筹物资与化解内部矛盾。面对强敌时谨慎布局，缺点是对亲近之人过度保护，偶尔会独自承担风险。立场上珍视忠诚与互惠，但不会容忍背叛。";
 const completeAppearance = "一头柔软白发衬着醒目的猫耳，浅色眼眸在思考时显得专注。身形轻盈而挺拔，惯穿便于行动的深色短装与披风，腰间带着记录地图和物资的皮袋，整体气质安静、敏锐又带有亲和力。";
@@ -107,6 +107,87 @@ function coverageHarness() {
 }
 
 describe("online world platform service", () => {
+  it("stops comment reads at the next await boundary when returning to the library", async () => {
+    vi.useFakeTimers();
+    let release!: (value: any) => void;
+    let reads = 0;
+    const instance = service({
+      requestConsole: async () => { reads += 1; return new Promise(resolve => { release = resolve; }); }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    try {
+      instance.startPolling();
+      const syncing = instance.sync(true);
+      await vi.waitFor(() => expect(reads).toBe(1));
+      const paused = instance.pause();
+      release({ data: Array.from({ length: 50 }, (_, index) => ({ id: `comment-${index}`, content: "普通评论" })) });
+      await Promise.all([syncing, paused]);
+      expect(instance.pollTimer).toBeNull();
+      expect(instance.status).toBe("closed");
+      await vi.advanceTimersByTimeAsync(60000);
+      await instance.sync(true);
+      expect(reads).toBe(1);
+      expect(instance.error).toBeNull();
+    } finally {
+      instance.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes current data and resumes polling only on explicitly reentering a game", async () => {
+    const card = createBundledGridCard();
+    let reads = 0;
+    const instance = service({
+      getAccount: () => ({ accountId: card.companion.authorAccountId }),
+      requestConsole: async (endpoint: string) => {
+        reads += 1;
+        return endpoint.startsWith("/installed-apps/")
+          ? { id: card.companion.workId, created_by_account_id: card.companion.authorAccountId }
+          : { data: [] };
+      }
+    });
+    try {
+      await instance.open({ card });
+      expect(instance.pollTimer).not.toBeNull();
+      await instance.pause();
+      const before = reads;
+      await instance.sync(true);
+      expect(reads).toBe(before);
+      await instance.open({ card });
+      expect(reads).toBeGreaterThan(before);
+      expect(instance.syncPaused).toBe(false);
+      expect(instance.pollTimer).not.toBeNull();
+    } finally { instance.close(); }
+  });
+
+  it("verifies the selected card's platform author and exports that card without opening or polling it", async () => {
+    const activeCard = createBundledGridCard();
+    const selectedCard = rebindGameCard(activeCard, "second-work-123");
+    const endpoints: string[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: activeCard.companion.authorAccountId }),
+      requestConsole: async (endpoint: string) => {
+        endpoints.push(endpoint);
+        return endpoint.startsWith("/installed-apps/")
+          ? { id: selectedCard.companion.workId, created_by_account_id: selectedCard.companion.authorAccountId }
+          : selectedCard.companion.configuration;
+      }
+    });
+    instance.card = activeCard;
+    instance.work = { id: activeCard.companion.workId, authorAccountId: activeCard.companion.authorAccountId };
+    await instance.pause();
+    const exported = await instance.exportGameCard(selectedCard);
+    expect(exported.companion.workId).toBe("second-work-123");
+    expect(endpoints).toEqual(["/installed-apps/second-work-123", "/apps/second-work-123/model-config/export"]);
+    expect(instance.work.id).toBe(activeCard.companion.workId);
+    expect(instance.card).toBe(activeCard);
+    expect(instance.pollTimer).toBeNull();
+    expect(instance.status).toBe("closed");
+    instance.requestConsole = async () => ({ id: selectedCard.companion.workId, created_by_account_id: "other" });
+    expect(await instance.isGameCardAuthor(selectedCard)).toBe(false);
+    await expect(instance.exportGameCard(selectedCard)).rejects.toThrow(/只有伴生作品作者/);
+  });
+
   it("repairs legacy snapshots that omitted the season authority binding for guests", () => {
     const legacy = createWorld({ authorityAccountId: "author" });
     delete legacy.authorityAccountId;
@@ -805,15 +886,18 @@ describe("online world platform service", () => {
     const errors: any[] = [];
     const event = { data: { type: "admin", command: { type: "scatter-treasures", count: 12, redAscend: 1, redReroll: 2 } } };
     const api = { administerOnlineWorld: async (command: any) => { calls.push(command); return { state: { revision: 2 } }; } };
-    await handler(event, async () => true, api, { world: { players: {} } }, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
+    await handler(event, async () => true, api, { isServerOwner: true, world: { players: {} } }, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
     expect(errors).toEqual([]);
     expect(calls).toEqual([event.data.command]);
     expect(replies[0]).toMatchObject({ admin: true, state: { revision: 2 } });
-    await handler(event, async () => false, api, null, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
+    await handler(event, async () => false, api, { isServerOwner: true }, (result: any) => replies.push(result), (error: any) => errors.push(error), () => {}, () => {});
     expect(calls).toHaveLength(1);
     expect(replies.at(-1)).toEqual({ cancelled: true });
-    await handler({ data: { type: "admin", command: { ...event.data.command, count: -1 } } }, async () => true, api, null, () => {}, (error: any) => errors.push(error), () => {}, () => {});
+    await handler({ data: { type: "admin", command: { ...event.data.command, count: -1 } } }, async () => true, api, { isServerOwner: true }, () => {}, (error: any) => errors.push(error), () => {}, () => {});
     expect(errors.at(-1).message).toMatch(/数量无效/);
+    await handler(event, async () => true, api, { isServerOwner: false }, () => {}, (error: any) => errors.push(error), () => {}, () => {});
+    expect(errors.at(-1).message).toMatch(/仅本游戏服主/);
+    expect(calls).toHaveLength(1);
   });
 
   it("quotes a march while an action is pending without mutating state or sending a request", async () => {
@@ -1212,6 +1296,95 @@ describe("online world platform service", () => {
     expect(state.program.source).toBe("card-package");
     expect(state.program.title).toBe("猎艳疆土");
     expect(state.work.name).toBe(card.companion.name);
+    expect(state.isServerOwner).toBe(false);
+    await expect(instance.initialize()).rejects.toThrow(/只有作品作者/);
+  });
+
+  it("rejects a changed platform author on refresh and publication before writing any comments", async () => {
+    const fixture = coverageHarness();
+    const instance = fixture.author;
+    instance.card = { companion: { authorAccountId: "author" } };
+    let posts = 0;
+    instance.requestConsole = async (_endpoint: string, options: any = {}) => {
+      if (options.method === "POST") posts += 1;
+      return { id: "work", created_by_account_id: "replacement-author" };
+    };
+    await expect(instance.refreshWorkProgram()).rejects.toThrow(/作品作者已变更/);
+    expect(instance.work.authorAccountId).toBe("author");
+    await expect(instance.activateProgramUpdate()).rejects.toThrow(/仅当前作品作者/);
+    expect(posts).toBe(0);
+  });
+
+  it("lets only the platform author enter an unpublished update and publish it without resetting the world", async () => {
+    const fixture = coverageHarness();
+    const program = packProgram({ gameId: fixture.author.world.gameId, title: "新版", html: "<!doctype html><html><body>updated</body></html>" });
+    const owner = fixture.author;
+    const requestComments = owner.requestConsole;
+    const requestConsole = async (endpoint: string, options: any = {}) => endpoint.startsWith("/installed-apps/")
+      ? { id: "work", created_by_account_id: "author", description: program.envelope }
+      : requestComments(endpoint, options);
+    owner.requestConsole = requestConsole;
+    const guest = fixture.create("player");
+    guest.requestConsole = requestConsole;
+    let modelCalls = 0;
+    owner.requestModel = async () => { modelCalls += 1; throw new Error("unexpected model request"); };
+    // Reflect a newly downloaded description while the comment control still names the previous package.
+    await owner.refreshWorkProgram();
+    await guest.refreshWorkProgram();
+    const state = await owner.sync(true);
+    expect(state.status).toBe("needs-program-update");
+    expect(state.programUpdateAvailable).toBe(true);
+    expect(state.isServerOwner).toBe(true);
+    expect(owner.world).toMatchObject({ seasonId: "season", seed: "coverage", treasureEpoch: 1 });
+    expect(modelCalls).toBe(0);
+    await expect(owner.initialize()).rejects.toThrow(/已经开服/);
+    await expect(guest.sync(true)).rejects.toThrow(/游戏更新尚未发布/);
+    await expect(guest.activateProgramUpdate()).rejects.toThrow(/连接暂时不可用|只有作品作者/);
+    const published = await owner.activateProgramUpdate();
+    expect(published.status).toBe("ready");
+    expect(published.programUpdateAvailable).toBe(false);
+    expect(owner.control.programHash).toBe(program.digest);
+    expect(owner.world).toMatchObject({ seasonId: "season", seed: "coverage", treasureEpoch: 1 });
+    expect(owner.world.treasureSpawns.old).toBeTruthy();
+    const readyGuest = await guest.sync(true);
+    expect(readyGuest.status).toBe("ready");
+    expect(readyGuest.isServerOwner).toBe(false);
+    expect(guest.world.seasonId).toBe("season");
+    await expect(guest.activateProgramUpdate()).rejects.toThrow(/只有作品作者/);
+  });
+
+  it("serializes program publication with polling and other player actions", async () => {
+    const instance = coverageHarness().author;
+    let finish!: (value: any) => void;
+    instance.activateProgramUpdateNow = () => new Promise(resolve => { finish = resolve; });
+    const first = instance.activateProgramUpdate();
+    expect(instance.intentInFlightKey).toBe("admin:publish-program");
+    await expect(instance.activateProgramUpdate()).rejects.toThrow(/仍在处理中/);
+    let scans = 0;
+    instance.syncNow = () => { scans += 1; return instance.state(); };
+    await instance.sync();
+    expect(scans).toBe(0);
+    finish(instance.state());
+    await first;
+    expect(instance.intentInFlight).toBeNull();
+    expect(instance.intentInFlightKey).toBe("");
+  });
+
+  it("keeps author and synchronization controls outside the multi-game library", () => {
+    const renderer = fs.readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    const library = fs.readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
+    const game = fs.readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8");
+    expect(library).not.toMatch(/id="online-world-(?:initialize|activate-program|migrate|status)"/);
+    expect(library).not.toContain('id="online-world-export-card"');
+    expect(game).toContain('id="owner-publish-program"');
+    expect(game).toContain("发布游戏更新");
+    expect(renderer).not.toContain("正在同步评论账本");
+    expect(renderer).not.toContain("wasInitialized");
+    expect(renderer).toContain('command.type==="publish-program"');
+    expect(renderer).toContain("selectedActiveCard");
+    expect(renderer).toContain("card.isCurrentUserAuthor");
+    expect(renderer).toContain("api.exportOnlineWorldCard(card.cardId)");
+    expect(renderer).toContain("onlineWorldClosePromise=api.closeOnlineWorld()");
   });
 
   it("initializes an author season with signed, comment-sized control and snapshot records", async () => {

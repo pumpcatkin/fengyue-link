@@ -123,7 +123,7 @@ describe("online world migration regressions", () => {
     expect(saves).toBe(1);
   });
 
-  it("stays on an intermediate server while its owner cleanup is still pending", async () => {
+  it("stays on an intermediate server while its owner still has to publish the redirect", async () => {
     const main = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const body = methodBody(main, "async followOnlineWorldMigrationChain(", "async migrateOnlineWorldCard(");
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -154,8 +154,7 @@ describe("online world migration regressions", () => {
             sourceWorkId: "B",
             workId: "C",
             targetControlId: "control-C",
-            requiresPublish: true,
-            cleanupPending: true
+            requiresPublish: true
           }
         };
       },
@@ -187,7 +186,7 @@ describe("online world migration regressions", () => {
     expect(result).toMatchObject({
       initialized: false,
       work: { id: "B" },
-      migration: { workId: "C", requiresPublish: true, cleanupPending: true }
+      migration: { workId: "C", requiresPublish: true }
     });
     expect(opened).toEqual(["B"]);
     expect([...backend.onlineWorldCards.keys()]).toEqual(["grid-card::B"]);
@@ -271,7 +270,7 @@ describe("online world migration regressions", () => {
     expect(saves).toBe(1);
   });
 
-  it("finds a signed migration marker when the old ledger has been purged", async () => {
+  it("finds a signed migration marker without deleting the old ledger", async () => {
     const { instance } = migrationFixture();
     try {
       const state = await instance.syncNow(true);
@@ -288,7 +287,7 @@ describe("online world migration regressions", () => {
     }
   });
 
-  it("keeps an owner's cleanup retry state when the reset marker is polled again", async () => {
+  it("discards obsolete cleanup state when the signed redirect is detected", async () => {
     const { instance, reset } = migrationFixture();
     instance.pendingMigration = {
       workId: "new-work",
@@ -302,18 +301,16 @@ describe("online world migration regressions", () => {
       const state = await instance.syncNow(true);
       expect(state.migration).toMatchObject({
         workId: "new-work",
-        resetId: reset.resetId,
-        requiresPublish: true,
-        redirectPublished: true,
-        cleanupPending: true,
-        cleanup: { attempted: 4, deleted: 3 }
+        resetId: reset.resetId
       });
+      expect(state.migration).not.toHaveProperty("requiresPublish");
+      expect(state.migration).not.toHaveProperty("cleanupPending");
     } finally {
       instance.close();
     }
   });
 
-  it("retains the cached source ledger so the owner can resume cleanup after restart", async () => {
+  it("retires the cached source ledger once its signed redirect exists", async () => {
     const { instance, reset, identity } = migrationFixture();
     instance.control = {
       id: "source-control",
@@ -328,10 +325,10 @@ describe("online world migration regressions", () => {
     instance.pendingMigration = { workId: "new-work", resetId: reset.resetId, requiresPublish: true };
     try {
       const state = await instance.syncNow(true);
-      expect(state.migration).toMatchObject({ workId: "new-work", requiresPublish: true, cleanupPending: true });
-      expect(instance.control?.id).toBe("source-control");
-      expect(instance.world?.seasonId).toBe("season-1");
-      expect(instance.isAuthority()).toBe(true);
+      expect(state.migration).toMatchObject({ workId: "new-work", resetId: reset.resetId });
+      expect(state.migration).not.toHaveProperty("requiresPublish");
+      expect(instance.control).toBeNull();
+      expect(instance.world).toBeNull();
     } finally {
       instance.close();
     }
@@ -363,7 +360,7 @@ describe("online world migration regressions", () => {
     }
   });
 
-  it("enumerates every root branch during destructive migration cleanup", async () => {
+  it("enumerates every root branch during target-ledger verification", async () => {
     const instance = new OnlineWorldService({
       getAccount: () => ({ accountId: "author" }),
       requestConsole: async () => ({ data: [] }),
@@ -421,30 +418,20 @@ describe("online world migration regressions", () => {
     }
   });
 
-  it("purges old comments while preserving the signed migration marker", async () => {
-    const deleted: string[] = [];
+  it("never issues comment deletion as part of migration", async () => {
+    const methods: string[] = [];
     const instance = new OnlineWorldService({
       getAccount: () => ({ accountId: "author" }),
-      requestConsole: async (endpoint: string, options: any = {}) => {
-        if (options.method === "DELETE") deleted.push(endpoint);
-        return { ok: true };
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        methods.push(String(options.method || "GET"));
+        return { data: [] };
       },
       onChange: () => {}
     });
     instance.work = { id: "old-work", authorAccountId: "author" };
     try {
-      const result = await instance.purgeWorkComments([
-        { id: "root" },
-        { id: "reply" },
-        { id: "reply" },
-        { id: "marker" }
-      ], new Set(["marker"]));
-      expect(result).toMatchObject({ attempted: 2, deleted: 2, failures: [] });
-      expect(deleted).toEqual([
-        "/comments/old-work/1/reply",
-        "/comments/old-work/1/root"
-      ]);
-      expect(deleted).not.toContain("/comments/old-work/1/marker");
+      await instance.probeMigrationReset();
+      expect(methods).not.toContain("DELETE");
     } finally {
       instance.close();
     }
@@ -594,6 +581,7 @@ describe("online world migration regressions", () => {
         getIdentity: async () => identity,
         getOrigin: () => "https://aigirlfriend.baby",
         requestConsole,
+        requestGo: async () => ({ data: { model: { provider: "fixture", name: "fixture-model", mode: "chat", completion_params: { stop: [] } } } }),
         cacheFile,
         onChange: () => {}
       });
@@ -602,9 +590,6 @@ describe("online world migration regressions", () => {
         return { verified: true };
       });
       instance.syncNow = vi.fn(async () => instance.state());
-      instance.compactMigratedSource = vi.fn(async () => ({
-        attempted: 0, deleted: 0, failures: [], verified: true, remaining: []
-      }));
       return instance;
     };
     const first = makeService();
@@ -709,6 +694,7 @@ describe("online world migration regressions", () => {
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       getOrigin: () => "https://aigirlfriend.baby",
+      requestGo: async () => ({ data: { model: { provider: "fixture", name: "fixture-model", mode: "chat", completion_params: { stop: [] } } } }),
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint === "/apps/old/model-config/export") {
           return { data: oldSavedName ? { ...exportData, name: oldSavedName } : exportData };
@@ -755,9 +741,6 @@ describe("online world migration regressions", () => {
       return { verified: true };
     });
     instance.syncNow = vi.fn(async () => instance.state());
-    instance.compactMigratedSource = vi.fn(async () => ({
-      attempted: 0, deleted: 0, failures: [], verified: true, remaining: []
-    }));
     try {
       const interrupted = await instance.exportMigrationDraft();
       expect(interrupted).toMatchObject({ workId: "new", requiresConfigurationImport: true, redirectPublished: false });

@@ -11,7 +11,7 @@ const { GRID_GAME_ID } = require("./grid-world-game.cjs");
 const GAME_CARD_SCHEMA = "fyow.game-card/1";
 const CARD_LIBRARY_SCHEMA = "fyow.game-card-library/1";
 const GRID_CARD_ID = "cc.aiero.fyow.grid-conquest.official";
-const GRID_COMPANION_WORK_ID = "b27218e6-80f9-4c0d-91c7-4b8f87d47be8";
+const GRID_COMPANION_WORK_ID = "faeaacf3-8c3a-4338-b2a2-8b704633ebf1";
 const GRID_COMPANION_AUTHOR_ACCOUNT_ID = "39404f0e-7678-45a1-86c6-9a21116bacbd";
 const GRID_COMPANION_ORIGIN = "https://staging.aiero.cc";
 const GRID_GAME_TITLE = "猎艳疆土";
@@ -189,7 +189,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 26,
+    version: 27,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null

@@ -538,40 +538,82 @@ function exportedConfig(payload) {
     || payload?.data || payload;
 }
 
-function modelConfigSavePayload(exported, workId, name, description) {
-  const payload = JSON.parse(JSON.stringify(exported || {}));
+function modelConfigSavePayload(exported, workId, name, description, model) {
+  const source = JSON.parse(JSON.stringify(exported || {}));
   const firstString = (...values) => values.find(value => typeof value === "string") || "";
-  const summary = String(payload.summary ?? payload.smry ?? payload.abs_txt ?? payload.sum_info ?? payload.abstract ?? payload.app?.summary ?? "在线游戏世界");
-  const language = [payload.lang, payload.locale, payload.lc, payload.lng, payload.language, payload.app?.language]
+  const firstNumber = (fallback, ...values) => {
+    const value = values.map(Number).find(Number.isFinite);
+    return value == null ? fallback : value;
+  };
+  const summary = String(source.summary ?? source.smry ?? source.abs_txt ?? source.sum_info ?? source.abstract ?? source.app?.summary ?? "在线游戏世界");
+  const language = [source.lang, source.locale, source.lc, source.lng, source.language, source.app?.language]
     .map(value => typeof value === "string" ? value.trim() : "")
     .find(Boolean) || "zh-Hans";
-  payload.app = {
-    ...(payload.app && typeof payload.app === "object" ? payload.app : {}),
-    id: String(workId),
-    name: String(name),
-    description: String(description),
-    summary,
-    language,
-    gender: Number(payload.gender ?? payload.ref_id2 ?? payload.app?.gender ?? 0),
-    cover: firstString(payload.cover, payload.cover_url, payload.cvr_url, payload.app?.cover),
-    cover_tiny: firstString(payload.cover_tiny, payload.cvr_tiny, payload.cover_sm, payload.app?.cover_tiny),
-    is_anonymous: Boolean(payload.is_anonymous ?? payload.is_anon ?? payload.ianon ?? payload.anon ?? payload.app?.is_anonymous ?? false),
-    update_content: "",
-    mod_permission: Number(payload.mod_permission ?? payload.mod_perm ?? payload.mod_pm ?? payload.mperm ?? payload.app?.mod_permission ?? 0),
-    disable_css_mod: Boolean(payload.disable_css_mod ?? payload.disable_cssmod ?? payload.dcm ?? payload.no_css_mod ?? payload.app?.disable_css_mod ?? false),
-    is_available_not_public: Boolean(payload.is_available_not_public ?? payload.avail_not_pub ?? payload.is_avail_np ?? payload.avail_np ?? payload.ianp ?? payload.app?.is_available_not_public ?? false),
-    schedule_publish_or_not: false
+  const prePrompt = String(source.pre_prompt ?? source.prpt ?? source.ppt ?? source.pre_pt ?? source.prompt_pre ?? "");
+  const preText = String(source.pre_text ?? source.pretxt ?? source.ptx ?? source.pre_tx ?? source.prefix_txt ?? "");
+  const postText = String(source.post_text ?? source.posttxt ?? source.potx ?? source.post_tx ?? source.suffix_txt ?? "");
+  const worldBook = cloneJson(source.world_book || source.wbook || source.lore_bk || source.world_bk || source.wb || []);
+  return {
+    pre_prompt: prePrompt,
+    pre_prompt_sort: firstNumber(0, source.pre_prompt_sort),
+    pre_text: preText,
+    pre_text_sort: firstNumber(0, source.pre_text_sort),
+    post_text: postText,
+    post_text_sort: firstNumber(0, source.post_text_sort),
+    bg_image: firstString(source.bg_image, source.bgimg),
+    bg_mobile: firstString(source.bg_mobile, source.bgmob),
+    bg_music: firstString(source.bg_music),
+    bgm: cloneJson(source.bgm || { tracks: [], autoplay: true }),
+    auto_play_bg_music: source.auto_play_bg_music !== false,
+    builtInCss: firstString(source.builtInCss, source.built_in_css, source.bicss),
+    default_sent_message_count: firstNumber(6, source.default_sent_message_count, source.default_msg_count),
+    prompt_type: firstString(source.prompt_type) || "simple",
+    chat_prompt_config: cloneJson(source.chat_prompt_config || {}),
+    completion_prompt_config: cloneJson(source.completion_prompt_config || {}),
+    user_input_form: cloneJson(source.user_input_form || []),
+    dataset_query_variable: firstString(source.dataset_query_variable),
+    opening_statement: firstString(source.opening_statement, source.opening, source.ost) || "选择一段开场白",
+    suggested_questions: cloneJson(source.suggested_questions || source.sq || []),
+    more_like_this: cloneJson(source.more_like_this || { enabled: false }),
+    suggested_questions_after_answer: cloneJson(source.suggested_questions_after_answer || { enabled: true }),
+    speech_to_text: cloneJson(source.speech_to_text || { enabled: false }),
+    text_to_speech: cloneJson(source.text_to_speech || { enabled: false, voice: "", language: "" }),
+    retriever_resource: cloneJson(source.retriever_resource || { enabled: false }),
+    sensitive_word_avoidance: cloneJson(source.sensitive_word_avoidance || { enabled: false, type: "", configs: [] }),
+    agent_mode: cloneJson(source.agent_mode || { enabled: false, max_iteration: 5, strategy: "react", tools: [] }),
+    model: cloneJson(model),
+    dataset_configs: cloneJson(source.dataset_configs || { retrieval_model: "single", datasets: { datasets: [] } }),
+    file_upload: cloneJson(source.file_upload || { image: { enabled: false, number_limits: 3, detail: "high", transfer_methods: ["remote_url", "local_file"] } }),
+    world_book: worldBook,
+    cg_book: cloneJson(source.cg_book || []),
+    regex_replaces: cloneJson(source.regex_replaces || source.rgx_rep || []),
+    ai_variable_json: firstString(source.ai_variable_json, source.ai_v_json),
+    ai_variable_template: firstString(source.ai_variable_template, source.ai_v_template),
+    ai_variable_prompt: firstString(source.ai_variable_prompt, source.ai_v_prompt),
+    banned_words: cloneJson(source.banned_words || source.banned_wd || source.block_wd || []),
+    auto_save: Boolean(source.auto_save),
+    shortcut_commands: cloneJson(source.shortcut_commands || source.sc_cmds || []),
+    preset_type: firstNumber(1, source.preset_type, source.preset_tp),
+    preset_chats: cloneJson(source.preset_chats || source.pst_chats || []),
+    recommended_mod_ids: cloneJson(source.recommended_mod_ids || []),
+    extend: cloneJson(source.extend || { ai_variable_enabled: false }),
+    app: {
+      name: String(name),
+      description: String(description),
+      summary,
+      language,
+      gender: firstNumber(1, source.gender, source.ref_id2, source.app?.gender),
+      cover: firstString(source.cover, source.cover_url, source.cvr_url, source.app?.cover),
+      cover_tiny: firstString(source.cover_tiny, source.cvr_tiny, source.cover_sm, source.app?.cover_tiny),
+      is_anonymous: Boolean(source.is_anonymous ?? source.is_anon ?? source.ianon ?? source.anon ?? source.app?.is_anonymous ?? false),
+      update_content: "",
+      mod_permission: firstNumber(4, source.mod_permission, source.mod_perm, source.mod_pm, source.mperm, source.app?.mod_permission),
+      visible_platform: firstNumber(0, source.visible_platform, source.app?.visible_platform),
+      disable_css_mod: Boolean(source.disable_css_mod ?? source.disable_cssmod ?? source.dcm ?? source.no_css_mod ?? source.app?.disable_css_mod ?? false),
+      is_available_not_public: Boolean(source.is_available_not_public ?? source.avail_not_pub ?? source.is_avail_np ?? source.avail_np ?? source.ianp ?? source.app?.is_available_not_public ?? true),
+      schedule_publish_or_not: false
+    }
   };
-  payload.lang = language;
-  payload.language = language;
-  for (const key of ["locale", "lc", "lng"]) if (Object.hasOwn(payload, key)) payload[key] = language;
-  payload.type = 1;
-  for (const key of ["knd", "kind", "ptype"]) if (Object.hasOwn(payload, key)) payload[key] = 1;
-  payload.pre_prompt = payload.pre_prompt ?? payload.prpt ?? payload.ppt ?? payload.pre_pt ?? payload.prompt_pre ?? "";
-  payload.pre_text = payload.pre_text ?? payload.pretxt ?? payload.ptx ?? payload.pre_tx ?? payload.prefix_txt ?? "";
-  payload.post_text = payload.post_text ?? payload.posttxt ?? payload.potx ?? payload.post_tx ?? payload.suffix_txt ?? "";
-  payload.world_book = payload.world_book || payload.wbook || payload.lore_bk || payload.world_bk || payload.wb || [];
-  return payload;
 }
 
 function coreConfigMatches(exported, expected) {
@@ -1390,6 +1432,12 @@ class OnlineWorldService {
       orientation: this.localPreferences.orientation,
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
+    if (this.pendingMigration && this.migrationDraft) {
+      this.status = "migrating";
+      this.error = null;
+      this.notify();
+      return this.state();
+    }
     let syncError = workDetailError;
     try {
       await this.sync(true);
@@ -1513,29 +1561,6 @@ class OnlineWorldService {
     return this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1`, { method: "POST", body, timeout: 20000 });
   }
 
-  async deleteComment(commentId, workId = this.work?.id) {
-    const id = String(commentId || "");
-    const targetWorkId = String(workId || "");
-    if (!id || !targetWorkId) return false;
-    await this.retryPlatformWrite(() => this.requestConsole(
-      `/comments/${encodeURIComponent(targetWorkId)}/1/${encodeURIComponent(id)}`,
-      { method: "DELETE", timeout: 20000 }
-    ));
-    return true;
-  }
-
-  async purgeWorkComments(comments, preserveIds = new Set(), workId = this.work?.id) {
-    const preserve = new Set([...preserveIds].map(String));
-    const ids = [...new Set((comments || []).map(comment => commentId(comment)).filter(Boolean))]
-      .filter(id => !preserve.has(String(id)));
-    const failures = [];
-    for (const id of ids.reverse()) {
-      try { await this.deleteComment(id, workId); }
-      catch (error) { failures.push({ id, error: String(error?.message || error) }); }
-    }
-    return { attempted: ids.length, deleted: ids.length - failures.length, failures };
-  }
-
   async postRecord(record, options = {}) {
     const responses = [];
     const chunks = encodeCommentRecord(record);
@@ -1595,6 +1620,18 @@ class OnlineWorldService {
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
     if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
     return comments;
+  }
+
+  async probeMigrationReset() {
+    try {
+      const comments = await this.readHistoryPage(1);
+      const hydrated = await this.hydrateCommentReplies(comments, assembleCommentRecords(comments), new Set());
+      return this.verifiedResetsWithoutControl(assembleCommentRecords(hydrated).records)[0] || null;
+    } catch (error) {
+      if (this.syncPaused) throw error;
+      this.diagnostic({ event: "migration-probe-failed", error: error?.message || String(error), workId: this.work?.id || "" });
+      return null;
+    }
   }
 
   async readCommentBranches(rootCommentId, maxPages = REPLY_PAGE_LIMIT, options = {}) {
@@ -1738,9 +1775,8 @@ class OnlineWorldService {
     return lower;
   }
 
-  // Migration cleanup must enumerate every platform page. The normal ledger
-  // reader intentionally stops at a covered snapshot, which is useful during
-  // play but would leave older comments behind after a reset.
+  // Target-ledger verification must enumerate every platform page because a
+  // newly created work has no trusted snapshot coverage until it is verified.
   async readAllCommentSources({ includeAllBranches = false } = {}) {
     const comments = [];
     const seen = new Set();
@@ -1962,24 +1998,7 @@ class OnlineWorldService {
   }
 
   migrationStateFromDetectedReset(item) {
-    const detected = this.migrationStateFromReset(item);
-    const previous = this.pendingMigration;
-    if (!previous?.requiresPublish
-      || (previous.workId && String(previous.workId) !== detected.workId)
-      || (previous.resetId && String(previous.resetId) !== detected.resetId)) return detected;
-    return {
-      ...detected,
-      configurationImported: Boolean(previous.configurationImported),
-      oldWorkRenamed: Boolean(previous.oldWorkRenamed),
-      newLedgerInitialized: Boolean(previous.newLedgerInitialized),
-      targetLedgerVerified: Boolean(previous.targetLedgerVerified),
-      requiresConfigurationImport: Boolean(previous.requiresConfigurationImport),
-      redirectPublished: true,
-      requiresPublish: true,
-      cleanupPending: previous.cleanupPending == null ? true : Boolean(previous.cleanupPending),
-      ...(previous.cleanup && typeof previous.cleanup === "object" ? { cleanup: cloneJson(previous.cleanup) } : {}),
-      ...(previous.importError ? { importError: String(previous.importError) } : {})
-    };
+    return this.migrationStateFromReset(item);
   }
 
   validAuthorSource(item) {
@@ -2564,13 +2583,27 @@ class OnlineWorldService {
     this.notify();
     try {
       if (this.lastClockCalibrationMono == null || this.monotonicNow() - this.lastClockCalibrationMono > 60 * 60 * 1000) await this.calibrateClock().catch(() => null);
+      if (fullScan && !ignoreMigrationReset) {
+        const reset = await this.probeMigrationReset();
+        if (reset) {
+          this.pendingMigration = this.migrationStateFromDetectedReset(reset);
+          this.control = null;
+          this.world = null;
+          this.mapFactsCache = null;
+          this.status = "migrating";
+          this.lastSyncAt = this.now();
+          this.saveCache();
+          this.diagnostic({ event: "migration-detected", status: this.status, targetWorkId: reset.record.newWorkId, controlId: null, fastPath: true });
+          this.notify();
+          return this.state();
+        }
+      }
       const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
       this.assertSyncActive();
       const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) this.control = controls[0].record;
-      // A reset tombstone is deliberately the only record left on an
-      // obsolete work after migration. It therefore has to be verifiable
-      // without first loading the old control record.
+      // The reset is self-verifying so an old game card can follow it without
+      // loading the obsolete work's full ledger first.
       if (!this.control && !ignoreMigrationReset) {
         const reset = this.verifiedResetsWithoutControl(history.assembled.records)[0];
         if (reset) {
@@ -3821,48 +3854,6 @@ class OnlineWorldService {
     }
   }
 
-  async compactMigratedSource(oldWork, oldControl, resetId) {
-    const activeWork = this.work;
-    const activeControl = this.control;
-    const aggregate = { attempted: 0, deleted: 0, failures: [], verified: false, remaining: [] };
-    try {
-      this.work = oldWork;
-      this.control = oldControl;
-      const comments = await this.readAllCommentSources({ includeAllBranches: true });
-      const records = assembleCommentRecords(comments).records;
-      const reset = this.verifiedResets(records, oldControl)
-        .find(item => String(item.record.resetId || "") === String(resetId || ""));
-      const control = this.verifiedControls(records)
-        .find(item => String(item.record.id || "") === String(oldControl.id || ""));
-      if (!reset || !control) {
-        aggregate.failures.push({ id: !reset ? "reset" : "control", error: "搬迁锚点尚未回读" });
-        return aggregate;
-      }
-      const preserveIds = new Set([...reset.sources, ...control.sources].map(source => commentId(source)).filter(Boolean));
-      const cleanup = await this.purgeWorkComments(
-        comments.filter(comment => !preserveIds.has(commentId(comment))),
-        preserveIds,
-        oldWork.id
-      );
-      aggregate.attempted = cleanup.attempted;
-      aggregate.deleted = cleanup.deleted;
-      aggregate.failures.push(...cleanup.failures);
-      const remaining = await this.readAllCommentSources({ includeAllBranches: true });
-      const remainingIds = [...new Set(remaining.map(comment => commentId(comment)).filter(Boolean))];
-      const unexpected = remainingIds.filter(id => !preserveIds.has(id));
-      aggregate.remaining = remainingIds;
-      aggregate.verified = aggregate.failures.length === 0 && unexpected.length === 0
-        && [...preserveIds].every(id => remainingIds.includes(id));
-      return aggregate;
-    } catch (error) {
-      aggregate.failures.push({ id: "history", error: String(error?.message || error) });
-      return aggregate;
-    } finally {
-      this.work = activeWork;
-      this.control = activeControl;
-    }
-  }
-
   async completeMigrationDraft(draft, oldWork, oldControl) {
     const identity = await this.getIdentity();
     if (identity.signingPublicKey !== oldControl.authoritySigningPublicKey) throw new Error("本机作者密钥与当前赛季权威密钥不一致");
@@ -3911,18 +3902,26 @@ class OnlineWorldService {
     }
     if (!draft.configurationImported) {
       try {
+        const targetModelPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(newWork.id)}`, { timeout: 15000 });
+        const targetModel = firstObject(targetModelPayload, item => typeof item.provider === "string"
+          && typeof (item.name || item.model) === "string");
+        if (!targetModel) throw new Error("平台没有返回新作品的模型配置");
         const targetPayload = modelConfigSavePayload(
           draft.configuration,
           newWork.id,
           newWork.name,
-          newWork.description
+          newWork.description,
+          targetModel
         );
-        await this.requestConsole(`/apps/${encodeURIComponent(newWork.id)}/model-config`, {
+        await this.retryPlatformWrite(() => this.requestConsole(`/apps/${encodeURIComponent(newWork.id)}/model-config`, {
           method: "POST",
           body: targetPayload,
           timeout: 30000
-        });
-        const verifiedPayload = await this.requestConsole(`/apps/${encodeURIComponent(newWork.id)}/model-config/export`, { timeout: 30000 });
+        }));
+        const verifiedPayload = await this.retryPlatformWrite(() => this.requestConsole(
+          `/apps/${encodeURIComponent(newWork.id)}/model-config/export`,
+          { timeout: 30000 }
+        ));
         if (!coreConfigMatches(exportedConfig(verifiedPayload), targetPayload)) throw new Error("新作品核心配置回读不一致");
         draft.configurationImported = true;
         this.saveMigrationDraftForSource(oldWork, oldControl);
@@ -4052,23 +4051,6 @@ class OnlineWorldService {
         return { ...this.pendingMigration };
       }
     }
-    const cleanup = await this.compactMigratedSource(oldWork, oldControl, directive.resetId);
-    if (!cleanup.verified) {
-      this.pendingMigration = {
-        ...this.migrationStateFromReset({ record: directive }),
-        configurationImported: Boolean(draft.configurationImported),
-        oldWorkRenamed: Boolean(draft.oldWorkRenamed),
-        newLedgerInitialized: true,
-        targetLedgerVerified: true,
-        redirectPublished: true,
-        requiresPublish: true,
-        cleanupPending: true,
-        cleanup: { attempted: cleanup.attempted, deleted: cleanup.deleted, failures: cleanup.failures.slice(-20) }
-      };
-      this.saveCache();
-      this.notify();
-      return { ...this.pendingMigration };
-    }
     this.migrationDraft = null;
     this.saveCache();
     this.work = newWork;
@@ -4083,9 +4065,7 @@ class OnlineWorldService {
       oldWorkRenamed: Boolean(draft.oldWorkRenamed),
       targetLedgerVerified: true,
       redirectPublished: true,
-      requiresConfigurationImport: false,
-      cleanupPending: false,
-      cleanup: { attempted: cleanup.attempted, deleted: cleanup.deleted, failures: cleanup.failures.slice(0, 20) }
+      requiresConfigurationImport: false
     };
     this.saveCache();
     this.notify();

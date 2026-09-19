@@ -279,8 +279,9 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain('handleLocalIpc("online-world:remove-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');
     expect(renderer).toContain('className="online-world-card-remove"');
-    expect(main).toContain("state?.migration?.requiresPublish && state.isServerOwner && this.onlineWorldService.migrationDraft");
-    expect(main).toContain("this.migrateOnlineWorldCard().catch");
+    expect(main).toContain("scheduleOnlineWorldMigrationResume");
+    expect(main).toContain('event: "migration-resume-complete"');
+    expect(renderer).toContain('badge.textContent="⋯"');
     expect(renderer).not.toContain("fyow:last-work-url");
     expect(main).toContain('handleLocalIpc("online-world:submit-intent"');
     expect(main).not.toContain('handleLocalIpc("online-world:activate-program"');

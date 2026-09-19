@@ -625,6 +625,9 @@ class AccountBackend {
     this.account = { username: null, email: null, points: null, level: null, accountId: null, updatedAt: null };
     this.autoModelJobs = new Map();
     this.autoModelQueues = new Map();
+    this.migrationResumeTimer = null;
+    this.migrationResumeInFlight = null;
+    this.migrationResumeAttempt = 0;
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
     this.onlineWorldService = new OnlineWorldService({
@@ -3506,17 +3509,65 @@ class AccountBackend {
       displayName: options.displayName,
       orientation: options.orientation
     });
-    if (state?.migration?.requiresPublish && state.isServerOwner && this.onlineWorldService.migrationDraft) {
-      setImmediate(() => this.migrateOnlineWorldCard().catch(error => {
+    if (this.onlineWorldService.migrationDraft && this.onlineWorldService.isAuthority()
+      && this.account.accountId === this.onlineWorldService.work?.authorAccountId) {
+      this.scheduleOnlineWorldMigrationResume(card);
+    }
+    return state;
+  }
+
+  scheduleOnlineWorldMigrationResume(sourceCard) {
+    if (this.migrationResumeTimer || this.migrationResumeInFlight || !this.onlineWorldService?.migrationDraft) return;
+    const delay = this.migrationResumeAttempt === 0
+      ? 0
+      : Math.min(60000, 2000 * (2 ** Math.min(5, this.migrationResumeAttempt - 1)));
+    this.migrationResumeTimer = setTimeout(() => {
+      this.migrationResumeTimer = null;
+      if (this.destroying || !this.onlineWorldService?.migrationDraft) return;
+      const sourceWorkId = String(this.onlineWorldService.migrationDraft.sourceWorkId || sourceCard?.companion?.workId || "");
+      this.appendSessionLog("online-world", {
+        event: "migration-resume-started",
+        attempt: this.migrationResumeAttempt + 1,
+        workId: sourceWorkId,
+        targetWorkId: this.onlineWorldService.migrationDraft.newWorkId
+      });
+      const running = this.migrateOnlineWorldCard();
+      this.migrationResumeInFlight = running;
+      running.then(result => {
+        const pending = result?.state?.migration || result;
+        if (pending?.requiresPublish || this.onlineWorldService?.migrationDraft) {
+          this.migrationResumeAttempt += 1;
+          this.appendSessionLog("online-world", {
+            event: "migration-resume-pending",
+            status: "degraded",
+            attempt: this.migrationResumeAttempt,
+            workId: sourceWorkId,
+            targetWorkId: pending?.workId || this.onlineWorldService?.migrationDraft?.newWorkId || "",
+            error: pending?.importError || "平台尚未完成搬迁写入"
+          });
+        } else {
+          this.migrationResumeAttempt = 0;
+          this.appendSessionLog("online-world", {
+            event: "migration-resume-complete",
+            workId: sourceWorkId,
+            targetWorkId: result?.workId || result?.state?.work?.id || ""
+          });
+        }
+      }).catch(error => {
+        this.migrationResumeAttempt += 1;
         this.appendSessionLog("online-world", {
           event: "migration-resume-failed",
           status: "degraded",
+          attempt: this.migrationResumeAttempt,
           error: error?.message || String(error),
-          workId: this.onlineWorldService?.work?.id || card.companion.workId
+          workId: sourceWorkId
         });
-      }));
-    }
-    return state;
+      }).finally(() => {
+        if (this.migrationResumeInFlight === running) this.migrationResumeInFlight = null;
+        if (this.onlineWorldService?.migrationDraft) this.scheduleOnlineWorldMigrationResume(sourceCard);
+      });
+    }, delay);
+    this.migrationResumeTimer.unref?.();
   }
 
   async importOnlineWorldCard() {
@@ -3577,7 +3628,7 @@ class AccountBackend {
   async followOnlineWorldMigration(options = {}) {
     const current = this.onlineWorldService?.card;
     const migration = this.onlineWorldService?.pendingMigration;
-    if (!current || !migration?.workId || migration.requiresPublish || migration.cleanupPending
+    if (!current || !migration?.workId || migration.requiresPublish
       || migration.workId === this.onlineWorldService?.work?.id) return this.onlineWorldService.state();
     return this.followOnlineWorldMigrationChain(current, migration, options);
   }
@@ -3622,7 +3673,7 @@ class AccountBackend {
         });
         const onward = next?.migration;
         if (onward?.workId && String(onward.workId) !== String(next?.work?.id || "")) {
-          if (onward.requiresPublish || onward.cleanupPending) {
+          if (onward.requiresPublish) {
             chainCompleted = true;
             break;
           }
@@ -3654,7 +3705,7 @@ class AccountBackend {
 
   async migrateOnlineWorldCard() {
     const result = await this.onlineWorldService.exportMigrationDraft();
-    if (result?.redirectPublished && !result?.cleanupPending && this.onlineWorldService.card && result.workId) {
+    if (result?.redirectPublished && this.onlineWorldService.card && result.workId) {
       const current = this.onlineWorldService.card;
       const next = await this.followOnlineWorldMigrationChain(current, result, {
         displayName: this.account.username || "服主",

@@ -757,7 +757,7 @@ function renderOnlineWorldCards(library={}){
     button.addEventListener("click",()=>{closeCardAuthorMenus();selectOnlineWorldLibraryCard(card);showOnlineWorldDetails(card)});item.append(button);
     {
       const badge=document.createElement("button");badge.type="button";badge.className="online-world-author-badge";
-      badge.textContent=card.isCurrentUserAuthor?"作者":"⋯";badge.setAttribute("aria-label",`《${card.title}》游戏卡操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
+      badge.textContent="⋯";badge.title="游戏卡操作";badge.setAttribute("aria-label",`《${card.title}》游戏卡操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
       const menu=document.createElement("div");menu.className="online-world-author-menu hidden";menu.setAttribute("role","menu");menu.setAttribute("aria-label",`《${card.title}》游戏卡操作`);
       const heading=document.createElement("strong");heading.textContent=card.title;menu.append(heading);
       let firstAction=null;
@@ -831,7 +831,7 @@ function followOnlineWorldMigration(next){
     if(onlineWorldMigrationRetryTimer){clearTimeout(onlineWorldMigrationRetryTimer);onlineWorldMigrationRetryTimer=null}
     return;
   }
-  if(migration.requiresPublish||migration.cleanupPending){onlineWorldMigrationTarget=null;return}
+  if(migration.requiresPublish){onlineWorldMigrationTarget=null;return}
   if(onlineWorldInLibrary){onlineWorldMigrationTarget=null;return}
   if(onlineWorldMigrationTarget===migration.workId)return;
   const wait=Math.max(0,onlineWorldMigrationRetryAt-Date.now());
@@ -1389,7 +1389,7 @@ window.addEventListener("message",async event=>{
         if(!await confirmAction("将游戏迁移到新的作品地址并重新开服？旧地图与游戏进度会清空，所有玩家将自动转入新服务器。",{title:"搬迁服务器",acceptText:"搬迁并重启"})){replyResult({cancelled:true});return}
         const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
         replyResult({admin:true,migration:result});
-        toast(result.cleanupPending?"新服务器已建立，旧记录仍在清理，请再次执行搬迁完成收尾":result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
+        toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
       }
       if(command.type==="scatter-treasures"){
         const count=Number(command.count??240),redAscend=Number(command.redAscend??0),redReroll=Number(command.redReroll??0);

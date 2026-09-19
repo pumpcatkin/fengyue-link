@@ -25,7 +25,8 @@ function service(options: Record<string, unknown>) {
   let worldBook: any[] = [];
   let modelSequence = 0;
   return new OnlineWorldService({
-    requestGo: async (_endpoint: string, request: any = {}) => {
+    requestGo: async (endpoint: string, request: any = {}) => {
+      if (endpoint.startsWith("/apps/config?")) return { data: { model: { provider: "fixture", name: "fixture-model", mode: "chat", completion_params: { stop: [] } } } };
       if (request.method === "POST" && Array.isArray(request.body?.world_book)) worldBook = request.body.world_book;
       return { data: { world_book: worldBook } };
     },
@@ -2159,13 +2160,14 @@ describe("online world platform service", () => {
     const comments: Array<{ endpoint: string; content: string }> = [];
     let oldSavedName = "";
     let createBody: any = null;
+    let targetConfigBody: any = null;
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint === "/apps/old/model-config/export") return oldSavedName ? { data: { ...exportData, name: oldSavedName } } : { data: exportData };
         if (endpoint === "/apps" && options.method === "POST") { createBody = options.body; return { data: { app: { id: "new" } } }; }
-        if (endpoint === "/apps/new/model-config" && options.method === "POST") return { ok: true };
+        if (endpoint === "/apps/new/model-config" && options.method === "POST") { targetConfigBody = options.body; return { ok: true }; }
         if (endpoint === "/apps/new/model-config/export") return { data: exportData };
         if (endpoint === "/apps/old/model-config" && options.method === "POST") { oldSavedName = options.body.app.name; return { ok: true }; }
         if (endpoint.startsWith("/comments/") && options.method === "POST") { comments.push({ endpoint, content: options.body.content }); return { id: `c${comments.length}` }; }
@@ -2178,11 +2180,18 @@ describe("online world platform service", () => {
     instance.readAllCommentSources = vi.fn(async () => []);
     instance.syncNow = vi.fn(async () => instance.state());
     instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
-    instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
     const result = await instance.exportMigrationDraft();
     expect(result.importError).toBeUndefined();
     expect(result.redirectPublished).toBe(true);
     expect(createBody).toMatchObject({ mode: "chat", type: 1 });
+    expect(targetConfigBody).toMatchObject({
+      pre_prompt: "world",
+      pre_text: "prefix",
+      post_text: "post",
+      world_book: [],
+      app: { gender: 1, mod_permission: 4, is_available_not_public: true }
+    });
+    expect(targetConfigBody).not.toHaveProperty("prpt");
     expect(instance.work.id).toBe("new");
     const assembledNewRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/new/1").map((item, index) => ({ id: `n${index}`, content: item.content }))).records;
     const newRecords = assembledNewRecords.map((item: any) => item.record.schema);
@@ -2219,7 +2228,6 @@ describe("online world platform service", () => {
     instance.readAllCommentSources = vi.fn(async () => []);
     instance.syncNow = vi.fn(async () => instance.state());
     instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
-    instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
 
     const result = await instance.exportMigrationDraft();
     expect(result).toMatchObject({ redirectPublished: true, configurationImported: true, oldWorkRenamed: false });

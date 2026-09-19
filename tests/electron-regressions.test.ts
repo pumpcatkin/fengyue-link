@@ -245,6 +245,7 @@ describe("Electron platform API regressions", () => {
     expect(html.indexOf('id="enter-multiplayer"')).toBeLessThan(html.indexOf('id="enter-online-world"'));
     expect(html.indexOf('id="enter-online-world"')).toBeLessThan(html.indexOf('id="edit-profiles"'));
     expect(html).toContain('sandbox="allow-scripts"');
+    expect(html).toMatch(/id="online-world-frame"[^>]*allow="autoplay"/);
     expect(html).not.toMatch(/id="online-world-frame"[^>]*allow-same-origin/);
     expect(html).not.toContain('id="online-world-url"');
     expect(html).not.toContain('id="online-world-card"');
@@ -258,17 +259,20 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain("online-world-author-badge");
     expect(html).toContain("frame-src 'self' blob:");
     expect(renderer).toContain('event.source!==onlineWorldFrame.contentWindow');
+    expect(renderer).toContain("onlineWorldMigrationRetryAt=Date.now()+delay");
+    expect(renderer).toContain("followOnlineWorldMigration(onlineWorldState)");
+    expect(renderer).toContain("游戏卡迁移地址暂时不可用，将自动重试");
     expect(renderer).not.toContain('ONLINE_WORLD_SHOWCASE_TITLES');
     expect(renderer).toContain('className="online-world-card-tile"');
     expect(renderer).toContain("URL.createObjectURL(new Blob([next.programHtml]");
-    expect(preload).toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
+    expect(preload).not.toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
     expect(preload).toContain('importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card")');
     expect(main).toContain('handleLocalIpc("online-world:list-cards"');
     expect(main).toContain('handleLocalIpc("online-world:import-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');
     expect(renderer).not.toContain("fyow:last-work-url");
     expect(main).toContain('handleLocalIpc("online-world:submit-intent"');
-    expect(main).toContain('handleLocalIpc("online-world:activate-program"');
+    expect(main).not.toContain('handleLocalIpc("online-world:activate-program"');
     expect(preload).toContain('sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message)');
     expect(renderer).toContain('if(event.data.type==="direct")');
     expect(readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8")).toContain('id="direct-inbox"');
@@ -287,7 +291,21 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toContain("joinDraft.preview = event.data.result.joinPreview");
     expect(gridGame).toContain('playSound("victory")');
     expect(gridGame).toContain('playSound("letter")');
-    expect(gridHtml).toContain('id="sound-toggle"');
+    expect(gridHtml).toMatch(/<button id="sound-knob"[^>]*role="slider"/);
+    expect(gridHtml).toContain('id="sound-volume" class="visually-hidden" type="range"');
+    expect(gridHtml).not.toContain('id="sound-toggle"');
+    expect(gridGame).toContain("function ensureAudioReady()");
+    expect(gridGame).toContain("context.resume?.()");
+    expect(gridGame).toContain('document.addEventListener("pointerdown", event => {');
+    expect(gridGame).toContain('button !== soundKnob) playSound("click")');
+    expect(gridGame).toContain('if (!volume || !context || context.state === "closed") return');
+    expect(renderer).toContain('const ONLINE_WORLD_SOUND_VOLUME_KEY = "fyow:grid-sound-volume"');
+    expect(renderer).toContain('const supportedTypes=["ready","sound"');
+    expect(renderer).toContain('uiPreferences:{...(onlineWorldState.uiPreferences||{}),soundVolume:onlineWorldSoundVolume()}');
+    expect(gridGame).toContain("next?.uiPreferences?.soundVolume");
+    expect(gridGame).toContain("revision !== pendingSoundRevision");
+    expect(gridGame).toContain("!pendingSoundRevision && !soundKnobDrag");
+    expect(renderer).toContain('postOnlineWorldFrame("sound",{volume:onlineWorldSoundVolume(),revision:Number(event.data.revision||0)})');
     expect(gridHtml).toContain('id="points-balance-value"');
     expect(gridHtml).toContain('id="model-usage-log"');
     expect(gridGame).toContain("modelUsageEvents");
@@ -303,8 +321,9 @@ describe("Electron platform API regressions", () => {
     expect(gridHtml).toContain('id="general-measurements"');
     expect(gridHtml).toContain('id="join-reroll"');
     expect(gridHtml).toContain('id="join-general-core"');
-    expect(gridGame).toContain('type: "power-train"');
-    expect(gridGame).toContain("TRAINING_COST_GROWTH = 1.15");
+    expect(gridGame).toContain('type: "cultivate-player"');
+    expect(gridGame).toContain('type: "cultivate-general"');
+    expect(gridGame).not.toContain('type: "power-train"');
     expect(gridStyles).toMatch(/aside\s*\{[^}]*overflow:\s*hidden auto/);
     expect(gridStyles).toMatch(/html, body\s*\{[^}]*overflow:\s*hidden/);
     expect(main).toContain("async platformServerTime()");
@@ -814,7 +833,8 @@ describe("Electron platform API regressions", () => {
     const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
     expect(authorInfo).toContain('const AUTHOR_NAME = "八爪毛米"');
-    expect(authorInfo).toContain('github: "https://github.com/pumpcatkin/fengyue-link"');
+    expect(authorInfo).toContain('homepage: "https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd"');
+    expect(authorInfo).toContain('github: "https://github.com/pumpcatkin/fengyue-link/releases/latest"');
     expect(authorInfo).toContain('if (url.protocol !== "https:")');
     expect(main).toContain('handleLocalIpc("app:get-author-info", () => publicAuthorInfo())');
     expect(main).toContain('shell.openExternal(configuredAuthorUrl(key))');
@@ -823,6 +843,10 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain("function renderAuthorInfo(info)");
     expect(renderer).toContain("api.openAuthorLink(button.dataset.authorLink)");
     expect(html).toContain('id="author-name">八爪毛米');
+    expect(html).toContain('<small>关于</small>');
+    expect(html).not.toContain('id="profile-label"');
+    expect(html).toContain('id="online-world-library-list"');
+    expect(html).toContain('id="online-world-featured"');
     for (const key of ["homepage", "releasePost", "feedbackPost", "github"]) {
       expect(html).toContain(`data-author-link="${key}"`);
     }
@@ -914,6 +938,7 @@ describe("Electron platform API regressions", () => {
     expect(preload).toContain('openOfficialReleasePage: () => ipcRenderer.invoke("app:open-official-release-page")');
     expect(preload).toContain('quitApp: () => ipcRenderer.invoke("app:quit")');
     expect(renderer).toContain("showStartupOfficialNotice()");
+    expect(renderer).toContain("if(security.verified)");
     expect(renderer).toContain("showReleaseVerificationFailure(security,next?.appUpdate||{})");
     expect(renderer).not.toContain("verifyOfficialRelease");
     expect(html).not.toContain('id="release-security-card"');

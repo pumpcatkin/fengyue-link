@@ -2,18 +2,26 @@
 
 const crypto = require("node:crypto");
 
-// Deterministic planning simulation for the 64x64 grid economy. This module is
-// intentionally does not mutate world state. Its default mining model mirrors
-// the live engine; the legacy model remains available for regression comparison.
+// Deterministic planning simulation for the 64x64 grid economy. This module
+// does not mutate world state. Its default model mirrors the live engine; the
+// legacy mining model remains available for regression comparison.
 
 const GRID_SIZE = 64;
 const RESOURCE_GRADES = Object.freeze(["D-", "D", "D+", "C-", "C", "C+", "B-", "B", "B+", "A-", "A", "A+", "S-", "S", "S+"]);
+const CENTRAL_LAYER_MULTIPLIERS = Object.freeze([1, 1.2, 1.5, 2]);
+const CENTRAL_LAYER_BOUNDARIES = Object.freeze([0.25, 0.5, 0.75]);
+const MINING_DURATION_MS = 10 * 60 * 1000;
+const MINING_COOLDOWN_MIN_MS = 60 * 60 * 1000;
+const MINING_COOLDOWN_MAX_MS = 4 * 60 * 60 * 1000;
+const MAX_CONCURRENT_MINING_JOBS = 3;
+const GENERAL_POWER_MIN = 250;
+const GENERAL_POWER_MAX = 350;
 const MATERIAL_PROGRESS = Object.freeze({ white: 8, green: 20, blue: 42, purple: 78, gold: 135, "red-ascend": 0, "red-reroll": 0 });
 const MATERIAL_TIERS = Object.freeze(Object.keys(MATERIAL_PROGRESS));
 const PROPOSED_MINING_BALANCE = Object.freeze({ baseHourlyGold: 400, populationHourlyFactor: 0.09, rankMultiplierPerLevel: 0.08 });
 
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 6, goldMin: 5000, goldMax: 8000, powerGainPctMin: 6, powerGainPctMax: 10, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainPctMin: 6, powerGainPctMax: 10, materialCount: 1, materialChoices: MATERIAL_TIERS }),
   Object.freeze({ attempt: 2, gateHours: 48, goldMin: 12000, goldMax: 18000, powerGainPctMin: 9, powerGainPctMax: 14, materialCount: 1, materialChoices: MATERIAL_TIERS }),
   Object.freeze({ attempt: 3, gateHours: 168, goldMin: 30000, goldMax: 45000, powerGainPctMin: 13, powerGainPctMax: 20, materialCount: 1, materialChoices: MATERIAL_TIERS }),
   Object.freeze({ attempt: 4, gateHours: 360, goldMin: 70000, goldMax: 100000, powerGainPctMin: 18, powerGainPctMax: 28, materialCount: 1, materialChoices: MATERIAL_TIERS }),
@@ -26,11 +34,15 @@ const BALANCE_BASELINE = Object.freeze({
   gridSize: GRID_SIZE,
   marchSecondsPerCell: 30,
   startingGold: 500,
-  miningCycleSeconds: Object.freeze({ min: 60, max: 3600 }),
-  miningFormula: "max(1, round(((400 + population * 0.09) * (1 + resourceRank * 0.08)) * cycleSeconds / 3600)) gold per cycle",
+  centralLayerMultipliers: CENTRAL_LAYER_MULTIPLIERS,
+  miningCycleSeconds: Object.freeze({ min: 600, max: 600 }),
+  miningCooldownSeconds: Object.freeze({ min: 3600, max: 14400 }),
+  maxConcurrentMiningJobs: MAX_CONCURRENT_MINING_JOBS,
+  miningFormula: "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08)) * 600 / 3600)) gold per run",
+  generalPower: Object.freeze({ min: GENERAL_POWER_MIN, max: GENERAL_POWER_MAX }),
   training: Object.freeze({ costPerSoldier: 2, durationBaseSeconds: 60, durationPerFiveSoldiersSeconds: 1, maxGarrisonPct: 20 }),
   cultivationAttempts: 5,
-  cultivation: Object.freeze({ firstAttemptGateHours: 6, materialPerAttempt: 1 }),
+  cultivation: Object.freeze({ firstAttemptGateHours: 0, materialPerAttempt: 1 }),
   simulationStepHours: 6,
   treasureScatter: Object.freeze({ count: 240, manual: true, redAscend: 0, redReroll: 0, simulatedClaimChancePerStep: 0.45, simulatedClaimTargetPerPlayer: 5 })
 });
@@ -90,15 +102,63 @@ function entropy(seed, ...parts) {
   return crypto.createHash("sha256").update([seed, ...parts].join("\0")).digest();
 }
 
+function centralLayer(x, y) {
+  const centre = (GRID_SIZE - 1) / 2;
+  const normalizedDistance = Math.max(Math.abs(Number(x) - centre), Math.abs(Number(y) - centre)) / centre;
+  if (normalizedDistance < CENTRAL_LAYER_BOUNDARIES[0]) return 4;
+  if (normalizedDistance < CENTRAL_LAYER_BOUNDARIES[1]) return 3;
+  if (normalizedDistance < CENTRAL_LAYER_BOUNDARIES[2]) return 2;
+  return 1;
+}
+
+function miningCooldownMs(cell) {
+  const resourceRank = Math.max(0, Math.min(RESOURCE_GRADES.length - 1, Math.trunc(Number(cell?.resourceRank) || 0)));
+  const ratio = resourceRank / (RESOURCE_GRADES.length - 1);
+  return Math.round(MINING_COOLDOWN_MIN_MS + ratio * (MINING_COOLDOWN_MAX_MS - MINING_COOLDOWN_MIN_MS));
+}
+
+function marchCost(distanceValue, soldiersValue, generalCountValue = 0) {
+  const distance = Math.max(0, Math.trunc(Number(distanceValue) || 0));
+  const soldiers = Math.max(0, Math.trunc(Number(soldiersValue) || 0));
+  const generalCount = Math.max(0, Math.trunc(Number(generalCountValue) || 0));
+  return distance * (1 + Math.ceil(soldiers / 10) + generalCount * 2);
+}
+
+function generatedGeneralPower(seed, accountId, sourceId = "general") {
+  return GENERAL_POWER_MIN + (entropy(String(seed), "generated-general-power", String(accountId), String(sourceId)).readUInt32BE(0) % (GENERAL_POWER_MAX - GENERAL_POWER_MIN + 1));
+}
+
 function staticCell(seed, x, y) {
   const bytes = entropy(String(seed), "cell", x, y);
-  const population = 100 + (bytes.readUInt32BE(0) % 9901);
+  const populationBase = 100 + (bytes.readUInt32BE(0) % 9901);
+  const layer = centralLayer(x, y);
+  const layerMultiplier = CENTRAL_LAYER_MULTIPLIERS[layer - 1];
+  const population = Math.round(populationBase * layerMultiplier);
   const roll = bytes.readUInt16BE(4) / 0x10000;
   const resourceRank = Math.max(0, Math.min(14, Math.floor(Math.pow(roll, 1.7) * RESOURCE_GRADES.length)));
-  const cycleMs = Math.round(60_000 + (resourceRank / 14) * 3_540_000);
+  const cycleMs = MINING_DURATION_MS;
+  const cooldownMs = miningCooldownMs({ resourceRank });
+  const legacyCycleMs = Math.round(60_000 + (resourceRank / 14) * 3_540_000);
   const cycleSeconds = cycleMs / 1000;
   const legacyYieldPerCycle = Math.max(1, Math.floor(population * (resourceRank + 2) / 180));
-  const cell = { population, resourceRank, resourceGrade: RESOURCE_GRADES[resourceRank], cycleMs, cycleSeconds };
+  const cell = {
+    x,
+    y,
+    population,
+    populationBase,
+    layer,
+    centralLayer: layer,
+    layerMultiplier,
+    populationMultiplier: layerMultiplier,
+    resourceMultiplier: layerMultiplier,
+    resourceRank,
+    resourceGrade: RESOURCE_GRADES[resourceRank],
+    cycleMs,
+    cycleSeconds,
+    cooldownMs,
+    repeatIntervalMs: cycleMs + cooldownMs,
+    legacyCycleMs
+  };
   return { ...cell, yieldPerCycle: actualYieldPerCycle(cell), legacyYieldPerCycle };
 }
 
@@ -127,8 +187,12 @@ function chooseMaterial(materials) {
 }
 
 function actualHourlyRate(cell) {
-  return (PROPOSED_MINING_BALANCE.baseHourlyGold + cell.population * PROPOSED_MINING_BALANCE.populationHourlyFactor)
-    * (1 + PROPOSED_MINING_BALANCE.rankMultiplierPerLevel * cell.resourceRank);
+  const layerMultiplier = Math.max(1, Number(cell.resourceMultiplier || cell.layerMultiplier || 1));
+  const populationBase = Number.isFinite(Number(cell.populationBase))
+    ? Number(cell.populationBase)
+    : Number(cell.population || 100) / layerMultiplier;
+  return (PROPOSED_MINING_BALANCE.baseHourlyGold + populationBase * PROPOSED_MINING_BALANCE.populationHourlyFactor)
+    * layerMultiplier * (1 + PROPOSED_MINING_BALANCE.rankMultiplierPerLevel * cell.resourceRank);
 }
 
 function actualYieldPerCycle(cell) {
@@ -137,19 +201,46 @@ function actualYieldPerCycle(cell) {
 
 function miningValues(cell, miningModel) {
   const yieldPerCycle = miningModel === "legacy" ? cell.legacyYieldPerCycle : cell.yieldPerCycle;
-  return { yieldPerCycle, hourlyRate: yieldPerCycle / (cell.cycleMs / 3_600_000) };
+  const cycleMs = miningModel === "legacy" ? cell.legacyCycleMs : cell.cycleMs;
+  const cooldownMs = miningModel === "legacy" ? 0 : cell.cooldownMs;
+  const repeatIntervalMs = cycleMs + cooldownMs;
+  return {
+    yieldPerCycle,
+    cycleMs,
+    cycleSeconds: cycleMs / 1000,
+    cooldownMs,
+    cooldownSeconds: cooldownMs / 1000,
+    repeatIntervalMs,
+    collectionHourlyRate: yieldPerCycle / (cycleMs / 3_600_000),
+    hourlyRate: yieldPerCycle / (repeatIntervalMs / 3_600_000)
+  };
+}
+
+function completedMiningRuns(elapsedMs, mining) {
+  const elapsed = Math.max(0, Number(elapsedMs) || 0);
+  if (elapsed < mining.cycleMs) return 0;
+  return 1 + Math.floor((elapsed - mining.cycleMs) / mining.repeatIntervalMs);
+}
+
+function miningTimeForRuns(runsValue, mining) {
+  const runs = Math.max(0, Math.trunc(Number(runsValue) || 0));
+  return runs ? mining.cycleMs + (runs - 1) * mining.repeatIntervalMs : 0;
 }
 
 function strictlyIncreasesByRankAtSamePopulation(miningModel) {
   for (let population = 100; population <= 10000; population += 1) {
     let previousHourlyRate = -Infinity;
     for (let resourceRank = 0; resourceRank < RESOURCE_GRADES.length; resourceRank += 1) {
-      const cycleMs = Math.round(60_000 + (resourceRank / 14) * 3_540_000);
+      const cycleMs = MINING_DURATION_MS;
       const cell = {
         population,
+        populationBase: population,
+        resourceMultiplier: 1,
         resourceRank,
         cycleMs,
         cycleSeconds: cycleMs / 1000,
+        cooldownMs: miningCooldownMs({ resourceRank }),
+        legacyCycleMs: Math.round(60_000 + (resourceRank / 14) * 3_540_000),
         legacyYieldPerCycle: Math.max(1, Math.floor(population * (resourceRank + 2) / 180))
       };
       cell.yieldPerCycle = actualYieldPerCycle(cell);
@@ -221,14 +312,16 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
     gold: range.goldMin + Math.floor(random() * (range.goldMax - range.goldMin + 1))
   }));
   let discoveredGenerals = 0;
+  const discoveredGeneralPowers = [];
   let treasures = 0;
   let expectedGenerals = 0;
-  let goldAtFirstGate = null;
+  const initialGeneralPower = generatedGeneralPower(seed, id, "initial");
+  let goldAtFirstGate = BALANCE_BASELINE.cultivation.firstAttemptGateHours === 0 ? gold : null;
 
   const ticks = days * (24 / BALANCE_BASELINE.simulationStepHours);
   for (let tick = 1; tick <= ticks; tick += 1) {
     const elapsedHours = tick * BALANCE_BASELINE.simulationStepHours;
-    const settledMiningCycles = Math.floor(elapsedHours * 3_600_000 * uptime / cell.cycleMs);
+    const settledMiningCycles = completedMiningRuns(elapsedHours * 3_600_000 * uptime, mining);
     const newMiningCycles = settledMiningCycles - miningCycles;
     miningCycles = settledMiningCycles;
     const nextMiningGold = miningGold + newMiningCycles * mining.yieldPerCycle;
@@ -280,7 +373,8 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
     if (random() < 0.65) {
       const distance = 1 + Math.floor(random() * 8);
       const force = Math.max(20, Math.floor(soldiers * (0.18 + random() * 0.15)));
-      const cost = distance * (10 + Math.ceil(force / 100));
+      const generalCount = 1;
+      const cost = marchCost(distance, force, generalCount);
       if (gold < cost) continue;
       marchCells += distance;
       marchGold += cost;
@@ -288,12 +382,16 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
       battles += 1;
       const target = staticCell(seed, Math.floor(random() * GRID_SIZE), Math.floor(random() * GRID_SIZE));
       const enemy = Math.floor(target.population * 0.2);
-      const attackerPower = force + 500 + 300;
+      const attackerPower = force + 500 + initialGeneralPower;
       if (attackerPower > enemy) {
         battleWins += 1;
-        const discoveryChance = 0.02 + ((target.population - 100) / 9900) * 0.23;
+        const discoveryPopulation = Math.max(100, Math.min(10000, target.population));
+        const discoveryChance = 0.02 + ((discoveryPopulation - 100) / 9900) * 0.23;
         expectedGenerals += discoveryChance;
-        if (random() < discoveryChance) discoveredGenerals += 1;
+        if (random() < discoveryChance) {
+          discoveredGenerals += 1;
+          discoveredGeneralPowers.push(generatedGeneralPower(seed, id, `discovery:${tick}:${target.x},${target.y}`));
+        }
       } else {
         soldiers = Math.max(20, soldiers - Math.floor(force * 0.2));
       }
@@ -312,8 +410,11 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
       model: miningModel,
       cycles: miningCycles,
       gold: miningGold,
-      cycleSeconds: cell.cycleSeconds,
+      cycleSeconds: mining.cycleSeconds,
+      cooldownSeconds: mining.cooldownSeconds,
+      repeatIntervalSeconds: mining.repeatIntervalMs / 1000,
       yieldPerCycle: mining.yieldPerCycle,
+      collectionHourlyRate: round2(mining.collectionHourlyRate),
       hourlyRate: round2(mining.hourlyRate)
     },
     training: { sessions: trainingSessions, hours: round2(trainingHours), gold: trainingGold, soldiers },
@@ -323,6 +424,8 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
     cultivationCompleted: cultivation.length,
     discovery: {
       generals: discoveredGenerals,
+      initialGeneralPower,
+      discoveredGeneralPowers,
       treasures,
       generalChancePctPerConquest: battleWins ? round2(expectedGenerals / battleWins * 100) : 0,
       treasureChancePctPerDay: null,
@@ -356,15 +459,21 @@ function runSimulation(options = {}) {
   const playerRecords = fixtures.map((fixture, index) => simulatePlayer(random, seed, fixture.id, fixture.position, fixture.cell, days, treasureScatter.schedules[index], miningModel));
   const mapAffordability = [];
   const miningRateByGrade = Object.fromEntries(RESOURCE_GRADES.map(grade => [grade, []]));
+  const miningYieldByGrade = Object.fromEntries(RESOURCE_GRADES.map(grade => [grade, []]));
+  const miningCooldownByGrade = Object.fromEntries(RESOURCE_GRADES.map(grade => [grade, []]));
   for (let y = 0; y < GRID_SIZE; y += 1) {
     for (let x = 0; x < GRID_SIZE; x += 1) {
       const cell = staticCell(seed, x, y);
-      const { yieldPerCycle, hourlyRate } = miningValues(cell, miningModel);
-      const cycles = Math.floor(BALANCE_BASELINE.cultivation.firstAttemptGateHours * 3_600_000 / cell.cycleMs);
+      const mining = miningValues(cell, miningModel);
+      const { yieldPerCycle, hourlyRate } = mining;
+      const cycles = completedMiningRuns(BALANCE_BASELINE.cultivation.firstAttemptGateHours * 3_600_000, mining);
       const gold = BALANCE_BASELINE.startingGold + cycles * yieldPerCycle;
-      const hoursToAfford = Math.ceil(Math.max(0, CULTIVATION_RANGES[0].goldMin - BALANCE_BASELINE.startingGold) / yieldPerCycle) * cell.cycleMs / 3_600_000;
+      const runsToAfford = Math.ceil(Math.max(0, CULTIVATION_RANGES[0].goldMin - BALANCE_BASELINE.startingGold) / yieldPerCycle);
+      const hoursToAfford = miningTimeForRuns(runsToAfford, mining) / 3_600_000;
       mapAffordability.push({ gold, hoursToAfford });
       miningRateByGrade[cell.resourceGrade].push(hourlyRate);
+      miningYieldByGrade[cell.resourceGrade].push(yieldPerCycle);
+      miningCooldownByGrade[cell.resourceGrade].push(mining.cooldownSeconds);
     }
   }
   mapAffordability.sort((left, right) => left.gold - right.gold);
@@ -431,7 +540,7 @@ function runSimulation(options = {}) {
       unclaimedAfterSimulation: treasureScatter.remaining,
       supplyPerPlayer: round2(BALANCE_BASELINE.treasureScatter.count / players),
       supplyCoveragePct: round2(BALANCE_BASELINE.treasureScatter.count / (players * CULTIVATION_RANGES.length) * 100),
-      simulatedClaimPolicy: `up to ${BALANCE_BASELINE.treasureScatter.simulatedClaimTargetPerPlayer} targeted claims per player; each six-hour travel window succeeds at ${round2(BALANCE_BASELINE.treasureScatter.simulatedClaimChancePerStep * 100)}%`,
+      simulatedClaimPolicy: `up to ${BALANCE_BASELINE.treasureScatter.simulatedClaimTargetPerPlayer} targeted conquests per player; each simulation travel window succeeds at ${round2(BALANCE_BASELINE.treasureScatter.simulatedClaimChancePerStep * 100)}%`,
       requiredPerAttempt: 1,
       maximumRequiredPerPlayer: CULTIVATION_RANGES.length,
       allowedChoices: MATERIAL_TIERS,
@@ -442,8 +551,19 @@ function runSimulation(options = {}) {
     },
     resources: {
       cycleSecondsRange: BALANCE_BASELINE.miningCycleSeconds,
+      cooldownSecondsRange: BALANCE_BASELINE.miningCooldownSeconds,
+      maxConcurrentMiningJobs: BALANCE_BASELINE.maxConcurrentMiningJobs,
       observedCycleSeconds: { min: Math.min(...playerRecords.map(player => player.mining.cycleSeconds)), max: Math.max(...playerRecords.map(player => player.mining.cycleSeconds)) },
+      observedCooldownSeconds: { min: Math.min(...playerRecords.map(player => player.mining.cooldownSeconds)), max: Math.max(...playerRecords.map(player => player.mining.cooldownSeconds)) },
       observedYieldPerCycle: { min: Math.min(...playerRecords.map(player => player.mining.yieldPerCycle)), max: Math.max(...playerRecords.map(player => player.mining.yieldPerCycle)) },
+      yieldPerRunByGrade: Object.fromEntries(RESOURCE_GRADES.map(grade => {
+        const values = miningYieldByGrade[grade].sort((left, right) => left - right);
+        return [grade, { cells: values.length, average: round2(values.reduce((sum, value) => sum + value, 0) / values.length), median: round2(values[Math.floor(values.length / 2)]) }];
+      })),
+      cooldownSecondsByGrade: Object.fromEntries(RESOURCE_GRADES.map(grade => {
+        const values = miningCooldownByGrade[grade].sort((left, right) => left - right);
+        return [grade, { cells: values.length, min: values[0], median: values[Math.floor(values.length / 2)], max: values.at(-1) }];
+      })),
       goldPerHourByGrade: Object.fromEntries(RESOURCE_GRADES.map(grade => {
         const values = miningRateByGrade[grade].sort((left, right) => left - right);
         return [grade, { cells: values.length, average: round2(values.reduce((sum, value) => sum + value, 0) / values.length), median: round2(values[Math.floor(values.length / 2)]) }];
@@ -473,14 +593,15 @@ function runSimulation(options = {}) {
     },
     formulas: {
       marchDuration: "distanceCells * 30 seconds",
-      marchCost: "distanceCells * (10 + ceil(soldiers / 100)) gold",
-      miningCycle: "60 + (resourceRank / 14) * 3540 seconds",
+      marchCost: "distanceCells * (1 + ceil(soldiers / 10) + generals * 2) gold",
+      miningCycle: "600 seconds for every resource grade; then that territory cools down for 3600..14400 seconds by resource rank",
       miningYield: miningModel === "actual"
-        ? "max(1, round(((400 + population * 0.09) * (1 + resourceRank * 0.08)) * cycleSeconds / 3600)) gold per cycle"
+        ? "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08)) * 600 / 3600)) gold per run"
         : "max(1, floor(population * (resourceRank + 2) / 180)) gold per cycle (legacy comparison)",
+      generalPower: "250 + stableHash(seed, accountId, sourceId) % 101",
       training: "cost = soldiers * 2 gold; duration = 60 + ceil(soldiers / 5) seconds, capped at 3600 seconds",
       generalDiscovery: "0.02 + ((population - 100) / 9900) * 0.23 per victorious neutral conquest",
-      treasure: "author manually scatters 240 by default; arrival on the exact cell claims one; re-scatter replaces unclaimed positions",
+      treasure: "author manually scatters 240 by default; conquering the exact cell claims one; re-scatter replaces unclaimed positions",
       cultivationPower: "linear interpolation from powerGainPctMin to powerGainPctMax using the chosen gold within its attempt range",
       cultivationTalent: "one chosen material; talent progress only, no combat-power change"
     },
@@ -495,7 +616,20 @@ function runSimulation(options = {}) {
   };
 }
 
-module.exports = { runSimulation, CULTIVATION_RANGES, BALANCE_BASELINE, PROPOSED_MINING_BALANCE, TALENT_POTENCY, TALENT_CAPS };
+module.exports = {
+  runSimulation,
+  staticCell,
+  centralLayer,
+  miningCooldownMs,
+  marchCost,
+  generatedGeneralPower,
+  CULTIVATION_RANGES,
+  BALANCE_BASELINE,
+  PROPOSED_MINING_BALANCE,
+  TALENT_POTENCY,
+  TALENT_CAPS,
+  CENTRAL_LAYER_MULTIPLIERS
+};
 
 if (require.main === module) {
   const result = runSimulation();

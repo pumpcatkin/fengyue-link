@@ -53,7 +53,7 @@ function renderAuthorInfo(info){
     if(item?.label)label.textContent=item.label;
     button.disabled=!item?.configured;
     button.title=item?.configured?`打开${item.label}`:`${item?.label||"此页面"}链接待作者补充`;
-    status.textContent=item?.configured?(button.dataset.authorLink==="github"?"唯一官方仓库":"打开链接"):"链接待补充";
+    status.textContent=item?.configured?(button.dataset.authorLink==="github"?"固定下载页":"打开链接"):"链接待补充";
   }
 }
 
@@ -101,11 +101,10 @@ function showReleaseVerificationFailure(security,update={}){
 
 function renderReleaseVerificationResult(next){
   const security=next?.releaseSecurity||{};
-  // The startup notice is only a transient status surface. Once the signed
-  // runtime manifest has been checked, close it automatically so the login
-  // controls are immediately usable. Development QA keeps the notice visible
-  // because it intentionally uses a synthetic, already-verified state.
-  if(security.status==="verified"&&security.verified){
+  // Packaged builds only become verified after the signed runtime check;
+  // development launches are already verified by definition. In both cases,
+  // release the login surface as soon as the backend confirms that state.
+  if(security.verified){
     officialNoticeOverlay.classList.add("hidden");
     return;
   }
@@ -138,12 +137,16 @@ let state = null;
 let onlineWorldState = null;
 let onlineWorldCards = [];
 let selectedOnlineWorldCardId = null;
+let onlineWorldSearchQuery = "";
 let onlineWorldEnteredProfileId = null;
 let onlineWorldInLibrary = true;
 let onlineWorldFrameReady = false;
 let onlineWorldProgramHash = "builtin-preview";
 let onlineWorldProgramUrl = null;
 let onlineWorldMigrationTarget = null;
+let onlineWorldMigrationRetryTimer = null;
+let onlineWorldMigrationRetryAt = 0;
+let onlineWorldMigrationAttempts = 0;
 let onlineWorldClosePromise = Promise.resolve();
 let activePage = "home";
 let profileEditorDirty = false;
@@ -166,6 +169,7 @@ let activeModelFamily = "all";
 const ONLINE_WORLD_COVER_MARKS = ["征","舟","田","夜","机","棋","驿","月","岛","云"];
 const ONLINE_WORLD_HOST_PROTOCOL = "fyow-host/1";
 const ONLINE_WORLD_HOST_MESSAGE_LIMIT = 128 * 1024;
+const ONLINE_WORLD_SOUND_VOLUME_KEY = "fyow:grid-sound-volume";
 let pendingModelChangeKey = null;
 let adminLogsLoaded = false;
 let renderedRoomChatRevision = -1;
@@ -634,9 +638,29 @@ function onlineWorldRequestId(data){
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)?value:"";
 }
 
+function onlineWorldSoundVolume(){
+  try{
+    const stored=localStorage.getItem(ONLINE_WORLD_SOUND_VOLUME_KEY);
+    if(stored===null)return .6;
+    const value=Number(stored);
+    if(Number.isFinite(value))return Math.max(0,Math.min(1,value));
+  }catch{}
+  return .6;
+}
+
+function saveOnlineWorldSoundVolume(value){
+  const volume=Math.max(0,Math.min(1,Number(value)));
+  if(!Number.isFinite(volume))return;
+  try{localStorage.setItem(ONLINE_WORLD_SOUND_VOLUME_KEY,String(volume))}catch{}
+}
+
 function postOnlineWorldState(){
   if(!onlineWorldFrameReady||!onlineWorldState)return;
-  const hostedState={...onlineWorldState,characterProfiles:state?.characterProfiles||{items:[],selectedId:null}};
+  const hostedState={
+    ...onlineWorldState,
+    characterProfiles:state?.characterProfiles||{items:[],selectedId:null},
+    uiPreferences:{...(onlineWorldState.uiPreferences||{}),soundVolume:onlineWorldSoundVolume()}
+  };
   postOnlineWorldFrame("state",{state:hostedState});
 }
 
@@ -669,7 +693,7 @@ function renderOnlineWorldProfileChoices(){
 }
 
 function showOnlineWorldDetails(card){
-  selectedOnlineWorldCardId=card.cardId;
+  selectOnlineWorldLibraryCard(card);
   document.querySelector("#online-world-detail-title").textContent=card.title;
   document.querySelector("#online-world-detail").classList.remove("hidden");
   renderOnlineWorldProfileChoices();
@@ -683,22 +707,60 @@ function closeCardAuthorMenus(except = null){
   document.querySelectorAll(".online-world-author-badge").forEach(button=>button.setAttribute("aria-expanded",String(button.nextElementSibling===except)));
 }
 
+function selectOnlineWorldLibraryCard(card){
+  selectedOnlineWorldCardId=card?.cardId||null;
+  const featured=document.querySelector("#online-world-featured");
+  const title=document.querySelector("#online-world-featured-title");
+  const mark=document.querySelector("#online-world-featured-mark");
+  const open=document.querySelector("#online-world-featured-open");
+  featured.dataset.cover=card?String(card.coverIndex):"";
+  featured.classList.toggle("empty",!card);
+  title.textContent=card?.title||"选择一个游戏";
+  mark.textContent=card?(ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游"):"游";
+  open.disabled=!card;
+  document.querySelectorAll("[data-library-card-id]").forEach(element=>{
+    const active=element.dataset.libraryCardId===selectedOnlineWorldCardId;
+    element.classList.toggle("active",active);
+    if(element.getAttribute("role")==="option")element.setAttribute("aria-selected",String(active));
+  });
+  renderOnlineWorldProfileChoices();
+}
+
+function onlineWorldCardMatchesSearch(card){
+  if(!onlineWorldSearchQuery)return true;
+  return String(card?.title||"").toLocaleLowerCase().includes(onlineWorldSearchQuery);
+}
+
 function renderOnlineWorldCards(library={}){
   library=library||{};
   onlineWorldCards=Array.isArray(library.cards)?library.cards:onlineWorldCards;
   if(library.activeCardId&&onlineWorldCards.some(card=>card.cardId===library.activeCardId))selectedOnlineWorldCardId=library.activeCardId;
+  const cards=onlineWorldGalleryCards();
+  if(!cards.some(card=>card.cardId===selectedOnlineWorldCardId))selectedOnlineWorldCardId=cards[0]?.cardId||null;
   const grid=document.querySelector("#online-world-library-grid");
-  grid.replaceChildren();
-  for(const card of onlineWorldGalleryCards()){
+  const list=document.querySelector("#online-world-library-list");
+  grid.replaceChildren();list.replaceChildren();
+  const visibleCards=cards.filter(onlineWorldCardMatchesSearch);
+  for(const card of visibleCards){
+    const listButton=document.createElement("button");
+    listButton.type="button";listButton.className="online-world-library-list-item";listButton.dataset.libraryCardId=card.cardId;listButton.dataset.cover=String(card.coverIndex);
+    listButton.setAttribute("role","option");listButton.setAttribute("aria-selected",String(card.cardId===selectedOnlineWorldCardId));
+    const listMark=document.createElement("i");listMark.textContent=ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游";
+    const listCopy=document.createElement("span");const listTitle=document.createElement("b");listTitle.textContent=card.title;
+    const listState=document.createElement("small");listState.textContent=card.isCurrentUserAuthor?"我的作品":"已添加";
+    listCopy.append(listTitle,listState);listButton.append(listMark,listCopy);
+    listButton.addEventListener("click",()=>{closeCardAuthorMenus();selectOnlineWorldLibraryCard(card)});list.append(listButton);
+
     const item=document.createElement("article");item.className="online-world-card";item.setAttribute("role","listitem");
     const button=document.createElement("button");
-    button.type="button";button.className="online-world-card-tile";button.dataset.cardId=card.cardId;button.dataset.cover=String(card.coverIndex);button.setAttribute("aria-label",`查看《${card.title}》`);
+    button.type="button";button.className="online-world-card-tile";button.dataset.cardId=card.cardId;button.dataset.libraryCardId=card.cardId;button.dataset.cover=String(card.coverIndex);button.setAttribute("aria-label",`查看《${card.title}》`);
     const cover=document.createElement("span");cover.className="online-world-cover";
     const mark=document.createElement("i");mark.className="online-world-cover-mark";mark.textContent=ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游";
     const series=document.createElement("small");series.textContent="ONLINE GAME WORLD";
     const title=document.createElement("strong");title.textContent=card.title;
-    cover.append(mark,series,title);button.append(cover);
-    button.addEventListener("click",()=>{closeCardAuthorMenus();showOnlineWorldDetails(card)});item.append(button);
+    const action=document.createElement("span");action.className="online-world-cover-action";action.textContent="开始游戏";
+    cover.append(mark,series,title,action);button.append(cover);
+    button.addEventListener("click",()=>{closeCardAuthorMenus();selectOnlineWorldLibraryCard(card);showOnlineWorldDetails(card)});item.append(button);
     if(card.isCurrentUserAuthor){
       const badge=document.createElement("button");badge.type="button";badge.className="online-world-author-badge";
       badge.textContent="作者";badge.setAttribute("aria-label",`《${card.title}》作者操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
@@ -720,8 +782,13 @@ function renderOnlineWorldCards(library={}){
     }
     grid.append(item);
   }
+  if(!visibleCards.length){
+    const empty=document.createElement("div");empty.className="online-world-library-empty";empty.textContent=cards.length?"没有匹配的游戏":"还没有游戏，点击右上角添加游戏卡。";grid.append(empty);
+  }
+  document.querySelector("#online-world-count").textContent=String(cards.length);
+  document.querySelector("#online-world-shelf-count").textContent=onlineWorldSearchQuery?`${visibleCards.length} / ${cards.length} 个游戏`:`${cards.length} 个游戏`;
   document.querySelector("#online-world-title").textContent="游戏库";
-  renderOnlineWorldProfileChoices();
+  selectOnlineWorldLibraryCard(cards.find(card=>card.cardId===selectedOnlineWorldCardId)||cards[0]||null);
 }
 
 function unloadOnlineWorldProgram(){
@@ -750,18 +817,37 @@ function loadOnlineWorldProgram(next){
 }
 
 function followOnlineWorldMigration(next){
-  if(onlineWorldInLibrary)return;
   const migration=next?.migration;
-  if(!migration?.url||migration.workId===next?.work?.id||onlineWorldMigrationTarget===migration.workId)return;
+  if(!migration?.url||migration.workId===next?.work?.id){
+    onlineWorldMigrationTarget=null;onlineWorldMigrationAttempts=0;onlineWorldMigrationRetryAt=0;
+    if(onlineWorldMigrationRetryTimer){clearTimeout(onlineWorldMigrationRetryTimer);onlineWorldMigrationRetryTimer=null}
+    return;
+  }
+  if(onlineWorldInLibrary){onlineWorldMigrationTarget=null;return}
+  if(onlineWorldMigrationTarget===migration.workId)return;
+  const wait=Math.max(0,onlineWorldMigrationRetryAt-Date.now());
+  if(wait>0){
+    if(!onlineWorldMigrationRetryTimer)onlineWorldMigrationRetryTimer=setTimeout(()=>{onlineWorldMigrationRetryTimer=null;followOnlineWorldMigration(onlineWorldState)},wait);
+    return;
+  }
   onlineWorldMigrationTarget=migration.workId;
   setTimeout(async()=>{
-    if(onlineWorldInLibrary)return;
+    if(onlineWorldInLibrary){onlineWorldMigrationTarget=null;return}
     try{
       const profile=selectedOnlineWorldProfile();
       const migrated=await api.followOnlineWorldMigration({displayName:profile?.displayName||state?.account?.username||"玩家",orientation:"any"});
       renderOnlineWorldCards(await api.listOnlineWorldCards());
+      onlineWorldMigrationTarget=null;onlineWorldMigrationAttempts=0;onlineWorldMigrationRetryAt=0;
       renderOnlineWorld(migrated);toast("已转入新的游戏服务器");
-    }catch(error){toast(`游戏卡迁移地址暂时不可用：${friendlyError(error)}`)}
+    }catch(error){
+      onlineWorldMigrationTarget=null;
+      onlineWorldMigrationAttempts+=1;
+      const delay=Math.min(30000,1000*(2**Math.min(onlineWorldMigrationAttempts-1,5)));
+      onlineWorldMigrationRetryAt=Date.now()+delay;
+      if(onlineWorldMigrationRetryTimer)clearTimeout(onlineWorldMigrationRetryTimer);
+      onlineWorldMigrationRetryTimer=setTimeout(()=>{onlineWorldMigrationRetryTimer=null;followOnlineWorldMigration(onlineWorldState)},delay);
+      toast(`游戏卡迁移地址暂时不可用，将自动重试：${friendlyError(error)}`);
+    }
   },500);
 }
 
@@ -971,7 +1057,6 @@ function render(next){
   document.querySelector("#enter-multiplayer").disabled=requiresLogin;
   document.querySelector("#enter-online-world").disabled=requiresLogin;
   document.querySelector("#edit-profiles").disabled=requiresLogin;
-  document.querySelector("#profile-label").textContent=`账号实例 · ${next.profileId}`;
   document.querySelector("#account-status").textContent=next.loginInProgress?"正在登录":next.loggedIn?"账号已登录":"账号未登录";
   document.querySelector("#status-dot").className=`status-dot ${next.loggedIn?"online":"offline"}`;
   const username=next.account?.username||"—";
@@ -1220,6 +1305,14 @@ document.querySelector("#online-world-import-card").addEventListener("click",()=
   renderOnlineWorldCards(result);
   if(!result.canceled)toast(`已导入《${result.imported.title}》`);
 }).catch(()=>{}));
+document.querySelector("#online-world-search").addEventListener("input",event=>{
+  onlineWorldSearchQuery=String(event.target.value||"").trim().toLocaleLowerCase();
+  renderOnlineWorldCards();
+});
+document.querySelector("#online-world-featured-open").addEventListener("click",()=>{
+  const card=onlineWorldGalleryCards().find(item=>item.cardId===selectedOnlineWorldCardId);
+  if(card)showOnlineWorldDetails(card);
+});
 document.querySelector("#online-world-detail").addEventListener("click",event=>{if(event.target===event.currentTarget)closeOnlineWorldDetails()});
 document.addEventListener("click",event=>{if(!event.target.closest(".online-world-author-badge,.online-world-author-menu"))closeCardAuthorMenus()});
 document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!document.querySelector("#online-world-detail").classList.contains("hidden"))closeOnlineWorldDetails()});
@@ -1251,17 +1344,27 @@ window.addEventListener("message",async event=>{
   let messageSize=0;
   try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
   const requestId=onlineWorldRequestId(event.data);
-  const supportedTypes=["ready","library","admin","preferences","direct","intent"];
+  const supportedTypes=["ready","sound","library","admin","preferences","direct","confirm","intent"];
   if(!supportedTypes.includes(event.data.type)){if(requestId)postOnlineWorldFrame("error",{message:"未知游戏通讯请求"},requestId);return}
-  const expectsResult=["admin","preferences","direct","intent"].includes(event.data.type);
+  const expectsResult=["admin","preferences","direct","confirm","intent"].includes(event.data.type);
   if(messageSize>ONLINE_WORLD_HOST_MESSAGE_LIMIT){if(requestId)postOnlineWorldFrame("error",{message:"游戏请求内容过长"},requestId);return}
   if(expectsResult&&!requestId)return;
   const replyResult=result=>postOnlineWorldFrame("result",{result},requestId);
-  const replyError=error=>postOnlineWorldFrame("error",{message:friendlyError(error)},requestId);
+  const replyError=(error, extra={})=>postOnlineWorldFrame("error",{
+    message: error?.userMessage || friendlyError(error),
+    errorCode: error?.errorCode || extra.errorCode || "",
+    retryable: Boolean(error?.retryable || extra.retryable),
+    ...extra
+  },requestId);
   if(event.data.type==="ready"){
     onlineWorldFrameReady=true;
     if(!onlineWorldState)try{onlineWorldState=await api.getOnlineWorldState()}catch{}
     postOnlineWorldState();return;
+  }
+  if(event.data.type==="sound"){
+    saveOnlineWorldSoundVolume(event.data.volume);
+    postOnlineWorldFrame("sound",{volume:onlineWorldSoundVolume(),revision:Number(event.data.revision||0)});
+    return;
   }
   if(event.data.type==="library"){
     try{await returnToOnlineWorldLibrary();renderOnlineWorldCards(await api.listOnlineWorldCards())}catch(error){toast(friendlyError(error))}return;
@@ -1271,11 +1374,6 @@ window.addEventListener("message",async event=>{
     const command={...(event.data.command||{})};
     try{
       if(!onlineWorldState?.isServerOwner)throw new Error("仅本游戏服主可使用此操作");
-      if(command.type==="publish-program"){
-        if(!await confirmAction("将作品介绍中的新版游戏发布给本服玩家？现有地图和玩家进度会保留。",{title:"发布游戏更新",acceptText:"发布更新"})){replyResult({cancelled:true});return}
-        const next=await api.activateOnlineWorldProgram();renderOnlineWorld(next);
-        replyResult({admin:true,state:next});toast("游戏更新已发布");return;
-      }
       if(command.type==="open-server"){
         if(!await confirmAction("开启本游戏服务器，让玩家开始加入？",{title:"服主开服",acceptText:"立即开服"})){replyResult({cancelled:true});return}
         const next=await api.initializeOnlineWorld();onlineWorldInLibrary=false;renderOnlineWorld(next);
@@ -1328,6 +1426,17 @@ window.addEventListener("message",async event=>{
     }catch(error){replyError(error)}
     return;
   }
+  if(event.data.type==="confirm"){
+    try{
+      const confirmation=event.data.confirmation||{};
+      const confirmed=await confirmAction(String(confirmation.message||"确认继续？"),{
+        title:String(confirmation.title||"确认操作"),
+        acceptText:String(confirmation.acceptText||"继续")
+      });
+      replyResult({confirmed});
+    }catch(error){replyError(error)}
+    return;
+  }
   if(event.data.type!=="intent")return;
   const intent={...(event.data.intent||{})};
   if(["join","prepare-join"].includes(intent.type)){
@@ -1349,7 +1458,7 @@ window.addEventListener("message",async event=>{
     const result=await api.submitOnlineWorldIntent(intent);
     if(result?.state)renderOnlineWorld(result.state);
     replyResult(result);
-  }catch(error){replyError(error)}
+  }catch(error){replyError(error,{retryIntent:intent})}
 });
 settingsToggle.addEventListener("click",()=>invoke(()=>setSettingsOpen(!settingsOpen)).catch(()=>{}));
 document.querySelector("#settings-close").addEventListener("click",()=>invoke(()=>setSettingsOpen(false)).catch(()=>{}));

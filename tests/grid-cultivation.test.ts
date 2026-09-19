@@ -25,12 +25,13 @@ function adjacent(position: any) {
 }
 
 describe("grid cultivation and integrated talents", () => {
-  it("uses the hourly mining economy without resource-rank inversions", () => {
+  it("uses fixed ten-minute runs for every resource grade without hourly rank inversions", () => {
     const population = 4000;
     let previousHourly = 0;
     for (let resourceRank = 0; resourceRank < game.RESOURCE_GRADES.length; resourceRank += 1) {
       const cell = { population, resourceRank };
       const cycleMs = game.resourceCycleMs(cell);
+      expect(cycleMs).toBe(10 * game.MINUTE);
       const yieldPerCycle = game.resourceYield(cell);
       const expected = Math.max(1, Math.round((400 + population * 0.09) * (1 + resourceRank * 0.08) * cycleMs / game.HOUR));
       const hourly = yieldPerCycle * game.HOUR / cycleMs;
@@ -40,7 +41,7 @@ describe("grid cultivation and integrated talents", () => {
     }
   });
 
-  it("settles elapsed legacy mining cycles at the stored rate before migrating future cycles", () => {
+  it("settles elapsed legacy mining cycles once and then starts the new cooldown", () => {
     const now = 1_000_000;
     let state = joined(now);
     const position = state.players.a.position;
@@ -53,11 +54,8 @@ describe("grid cultivation and integrated talents", () => {
     const before = state.players.a.gold;
     const first = game.settleWorld(state, now + job.cycleMs * 3);
     expect(first.state.players.a.gold).toBe(before + oldYield * 3);
-    const migrated = first.state.jobs[job.id];
-    expect(migrated.yieldFormulaVersion).toBe(game.RESOURCE_YIELD_FORMULA_VERSION);
-    expect(migrated.yieldPerCycle).toBe(game.resourceYield(game.staticCell(state.seed, position.x, position.y)));
-    const second = game.settleWorld(first.state, now + job.cycleMs * 4);
-    expect(second.state.players.a.gold).toBe(before + oldYield * 3 + migrated.yieldPerCycle);
+    expect(first.state.jobs[job.id]).toBeUndefined();
+    expect(first.state.privatePlayers.a.miningCooldowns[`${position.x},${position.y}`]).toBeGreaterThan(now + job.cycleMs * 3);
   });
 
   it("migrates every general to exactly one deterministic talent", () => {
@@ -69,20 +67,16 @@ describe("grid cultivation and integrated talents", () => {
     expect(game.generalTalentState(legacy).description).toMatch(/%/);
   });
 
-  it("uses the six-hour first gate, one material, linear gold power, and an instant result", () => {
+  it("opens the first general cultivation immediately with one material and an instant result", () => {
     const joinedAt = 1_000_000;
     let state = grant(joined(joinedAt), joinedAt, "cultivator");
     state.players.a.gold = 20_000;
     expect(state.privatePlayers.a.materials.white).toBe(0);
     state.privatePlayers.a.materials.white = 1;
-    expect(() => game.applyIntent(state, {
-      type: "cultivate-general", generalId: "cultivator", goldInvestment: 5000, materialId: "white", idempotencyKey: "too-early"
-    }, { actorAccountId: "a", now: joinedAt + 6 * game.HOUR - 1 })).toThrow(/6小时/);
-
     const before = state.generals.cultivator.power;
     const cultivated = game.applyIntent(state, {
       type: "cultivate-general", generalId: "cultivator", goldInvestment: 8000, materialId: "white", idempotencyKey: "cultivate-1"
-    }, { actorAccountId: "a", now: joinedAt + 6 * game.HOUR });
+    }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result.durationMs).toBe(0);
     expect(cultivated.result.basePowerGainPercent).toBe(10);
     expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.9);
@@ -94,6 +88,43 @@ describe("grid cultivation and integrated talents", () => {
     expect(cultivated.state.generals.cultivator.cultivationCount).toBe(1);
     expect(cultivated.state.generals.cultivator.power).toBeGreaterThan(before);
     expect(cultivated.state.generals.cultivator.talent.progress).toBeGreaterThan(state.generals.cultivator.talent.progress);
+  });
+
+  it("uses the same five-attempt gold model for the player without consuming materials", () => {
+    const joinedAt = 1_000_000;
+    const state = joined(joinedAt);
+    state.players.a.gold = 20_000;
+    state.privatePlayers.a.materials.white = 3;
+    const beforePower = state.players.a.power;
+    const cultivated = game.applyIntent(state, {
+      type: "cultivate-player", goldInvestment: 5000, materialId: "white", idempotencyKey: "player-cultivate-1"
+    }, { actorAccountId: "a", now: joinedAt });
+    expect(cultivated.result).toMatchObject({ targetType: "player", materialId: null, materialCount: 0, durationMs: 0, cultivationCount: 1 });
+    expect(cultivated.state.players.a.gold).toBe(15_000);
+    expect(cultivated.state.players.a.power).toBeGreaterThan(beforePower);
+    expect(cultivated.state.privatePlayers.a.materials.white).toBe(3);
+    expect(cultivated.state.jobs).toEqual({});
+  });
+
+  it("does not gate the first player or general cultivation by join duration", () => {
+    const joinedAt = 1_000_000;
+    const state = grant(joined(joinedAt), joinedAt, "instant-gate-check");
+    state.players.a.gold = 20_000;
+    state.privatePlayers.a.materials.white = 1;
+    const playerQuote = game.cultivationQuote(state.players.a, state.players.a, joinedAt, { state, targetType: "player", goldInvestment: 5000 });
+    const generalQuote = game.cultivationQuote(state.generals["instant-gate-check"], state.players.a, joinedAt, { state, goldInvestment: 5000, materialId: "white" });
+    expect(playerQuote).toMatchObject({ attempt: 1, gateHours: 0, unlocked: true });
+    expect(generalQuote).toMatchObject({ attempt: 1, gateHours: 0, unlocked: true });
+  });
+
+  it("keeps later cultivation intervals while allowing the first attempt immediately", () => {
+    expect(game.CULTIVATION_RANGES.map((range: any) => range.gateHours)).toEqual([0, 48, 168, 360, 576]);
+    const now = 1_000_000;
+    const state = grant(joined(now), now, "interval-check");
+    state.generals["interval-check"].cultivationCount = 1;
+    const quote = game.cultivationQuote(state.generals["interval-check"], state.players.a, now, { state, goldInvestment: 12000, materialId: "white" });
+    expect(quote.unlocked).toBe(false);
+    expect(quote.unlockAt).toBe(now + 48 * game.HOUR);
   });
 
   it("keeps cultivation fluctuation stable across repeated previews", () => {
@@ -162,6 +193,7 @@ describe("grid cultivation and integrated talents", () => {
     let state = grant(joined(now), now, "runner");
     const target = adjacent(state.players.a.position);
     state.generals.runner.talent = talentEngine.normalizeTalent({ instanceId: "runner", talentId: "swift-column", progress: 1000 });
+    state.players.a.fieldArmySoldiers = 1;
     const quote = game.marchQuote(state, "a", target, 1, ["runner"], false, now + 1);
     expect(quote.baseDurationMs).toBe(30_000);
     expect(quote.durationMs).toBe(Math.round(30_000 * 0.84));
@@ -170,6 +202,30 @@ describe("grid cultivation and integrated talents", () => {
     }, { actorAccountId: "a", now: now + 1 });
     expect(march.result.durationMs).toBe(quote.durationMs);
     expect(march.state.jobs[march.result.jobId].finishAt).toBe(now + 1 + quote.durationMs);
+  });
+
+  it("carries every general while only the first two ordered slots affect a march", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    state = grant(state, now, "first");
+    state = grant(state, now, "second");
+    state = grant(state, now, "third");
+    expect(state.players.a.carriedGeneralIds).toEqual(expect.arrayContaining(["first", "second", "third"]));
+    expect(state.players.a.carriedGeneralIds).toHaveLength(3);
+
+    const reordered = game.applyIntent(state, {
+      type: "reorder-carried-generals", generalIds: ["third", "first", "second"], idempotencyKey: "reorder-three"
+    }, { actorAccountId: "a", now: now + 1 });
+    expect(reordered.result).toEqual({ generalIds: ["third", "first", "second"], activeGeneralIds: ["third", "first"] });
+
+    const target = adjacent(reordered.state.players.a.position);
+    const march = game.applyIntent(reordered.state, {
+      type: "march", to: target, soldiers: 0, generalIds: ["second"], attack: false, idempotencyKey: "all-generals-march"
+    }, { actorAccountId: "a", now: now + 2 });
+    const job = march.state.jobs[march.result.jobId];
+    expect(job.generalIds).toEqual(["third", "first", "second"]);
+    expect(job.activeGeneralIds).toEqual(["third", "first"]);
+    expect(march.result.activeGeneralIds).toEqual(["third", "first"]);
   });
 
   it("applies talent modifiers to mining, troop training, and combat", () => {
@@ -220,7 +276,7 @@ describe("grid cultivation and integrated talents", () => {
     expect(mining.result.modifiers.applied).toContainEqual(expect.objectContaining({ generalId: "enemy", enemyDebuff: true }));
   });
 
-  it("spawns public treasures and claims one material into only the local inventory", () => {
+  it("claims a public treasure only after occupying its cell", () => {
     const now = 1_000_000;
     let state = joined(now);
     const target = adjacent(state.players.a.position);
@@ -229,10 +285,23 @@ describe("grid cultivation and integrated talents", () => {
     const before = state.privatePlayers.a.materials.blue;
     const march = game.applyIntent(state, { type: "march", to: target, soldiers: 0, generalIds: [], attack: false, idempotencyKey: "treasure-march" }, { actorAccountId: "a", now });
     state = game.settleWorld(march.state, march.result.finishAt).state;
+    expect(state.privatePlayers.a.materials.blue).toBe(before);
+    expect(state.treasureSpawns.cache).toBeTruthy();
+
+    const capital = Object.values(state.cells).find((cell: any) => cell.ownerAccountId === "a") as any;
+    const capitalKey = Object.entries(state.cells).find(([, cell]: any) => cell === capital)?.[0] || "";
+    const [capitalX, capitalY] = capitalKey.split(",").map(Number);
+    const returned = game.applyIntent(state, { type: "march", to: { x: capitalX, y: capitalY }, soldiers: 0, attack: false, idempotencyKey: "treasure-return" }, { actorAccountId: "a", now: march.result.finishAt });
+    state = game.settleWorld(returned.state, returned.result.finishAt).state;
+    const force = game.staticCell(state.seed, target.x, target.y).neutralPower + 10_000;
+    state.players.a.fieldArmySoldiers = force;
+    state.players.a.gold = game.marchCost(1, force, state.players.a.carriedGeneralIds.length) + 100;
+    const conquest = game.applyIntent(state, { type: "march", to: target, soldiers: force, attack: true, idempotencyKey: "treasure-conquest" }, { actorAccountId: "a", now: returned.result.finishAt });
+    state = game.settleWorld(conquest.state, conquest.result.finishAt).state;
     expect(state.privatePlayers.a.materials.blue).toBe(before + 1);
     expect(state.treasureSpawns.cache).toBeUndefined();
     expect(state.claimedTreasures.cache).toMatchObject({ accountId: "a", x: target.x, y: target.y });
-    const projection = game.projectWorldState(state, "a", march.result.finishAt);
+    const projection = game.projectWorldState(state, "a", conquest.result.finishAt);
     expect(projection.players.a.materials.blue).toBe(before + 1);
     expect(projection.claimedTreasures.cache).toBeTruthy();
   });

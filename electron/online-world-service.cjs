@@ -27,14 +27,19 @@ const {
   resetPlayerState,
   settleWorld,
   applyIntent,
+  battleCasualties,
   marchQuote,
   scatterTreasures,
   buildGeneralGenerationRequest,
+  buildGeneralLetterRequest,
+  buildGeneralAppearanceRequest,
   buildPlayerProfileContextRequest,
   buildGeneralMemoryUpdateRequest,
   normalizedCharacterTags,
+  generatedGeneralPower,
   ensurePowerProgress,
   ensureGeneralProfile,
+  publicMarketListingState,
   projectWorldState,
   publicGeneralState
 } = require("./grid-world-game.cjs");
@@ -42,6 +47,7 @@ const {
 const HISTORY_PAGE_SIZE = 50;
 const MAX_HISTORY_PAGES = 10000;
 const POLL_INTERVAL_MS = 5000;
+const POLL_RETRY_MAX_MS = 60 * 1000;
 const DIRECT_RATE_WINDOW_MS = 60 * 1000;
 const DIRECT_SEND_LIMIT = 12;
 const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
@@ -50,12 +56,18 @@ const COMMENT_POST_ATTEMPTS = 3;
 const PENDING_EFFECT_RETRY_BASE_MS = 30 * 1000;
 const PENDING_EFFECT_RETRY_MAX_MS = 15 * 60 * 1000;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
-const INITIAL_GENERAL_BASE_POWER = 300;
+const DEFAULT_GENERATED_GENERAL_POWER = 300;
 const WORLD_CHAT_LIMIT = 50;
 const WORLD_CHAT_TEXT_LIMIT = 500;
 const WORLD_CHAT_SEND_LIMIT = 12;
 const WORLD_CHAT_SCAN_PAGES = MAX_HISTORY_PAGES;
 const REPLY_PAGE_LIMIT = 100;
+// Public battle records carry enough numbers to reproduce the casualty formula,
+// but they must stay within the same finite ranges accepted by local intents.
+// The bounds also keep a signed comment from becoming a numeric amplification
+// vector for a remote reader.
+const MAX_PUBLIC_BATTLE_SOLDIERS = 1_000_000;
+const MAX_PUBLIC_BATTLE_POWER = 1_000_000_000;
 const { MATERIAL_BY_ID } = require("./grid-talents.cjs");
 
 function workReference(value, origin) {
@@ -187,6 +199,18 @@ function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+function actionConnectionError(error) {
+  const message = String(error?.message || error || "");
+  if (!/Failed to fetch|fetch failed|NetworkError|网络连接|平台请求超时|后台账号页面载入超时/i.test(message)) return error;
+  const wrapped = new Error("平台连接暂时中断，本次行动尚未提交；请检查网络或代理后重试", { cause: error });
+  // Keep the structured request metadata when a platform/network error is
+  // wrapped, so the game can offer the same explicit retry flow as model errors.
+  for (const key of ["errorCode", "retryable", "userMessage", "modelUsage"]) {
+    if (error?.[key] !== undefined) wrapped[key] = error[key];
+  }
+  return wrapped;
+}
+
 function normalizeCharacterProfile(value = {}) {
   const source = value && typeof value === "object" ? value : {};
   return {
@@ -199,10 +223,28 @@ function normalizeCharacterProfile(value = {}) {
   };
 }
 
+function playerContextFromProfile(value = {}) {
+  const profile = normalizeCharacterProfile(value);
+  return {
+    displayName: profile.displayName,
+    personaSummary: profile.basicInfo || profile.info,
+    appearanceSummary: profile.appearance,
+    speechStyle: "",
+    relationshipApproach: ""
+  };
+}
+
 function validPosition(value) {
   return value?.x != null && value?.y != null
     && Number.isInteger(Number(value.x)) && Number(value.x) >= 0 && Number(value.x) < GRID_SIZE
     && Number.isInteger(Number(value.y)) && Number(value.y) >= 0 && Number(value.y) < GRID_SIZE;
+}
+
+function validRetreatPath(value, position) {
+  if (!validPosition(position) || !Array.isArray(value) || !value.length || value.length > GRID_SIZE * GRID_SIZE || !value.every(validPosition)) return false;
+  if (Number(value[0].x) !== Number(position.x) || Number(value[0].y) !== Number(position.y)) return false;
+  return value.every((point, index) => !index
+    || Math.abs(Number(point.x) - Number(value[index - 1].x)) + Math.abs(Number(point.y) - Number(value[index - 1].y)) === 1);
 }
 
 function finiteStoredNumber(value) {
@@ -229,10 +271,29 @@ function publicCells(state) {
     }]));
 }
 
+function isPublicCellShape(cell) {
+  if (!cell || typeof cell !== "object" || Array.isArray(cell)) return false;
+  const keys = Object.keys(cell).sort();
+  return keys.length === 3 && keys[0] === "generalIds" && keys[1] === "ownerAccountId" && keys[2] === "soldiers";
+}
+
+function safeBattleInteger(value, maximum = MAX_PUBLIC_BATTLE_SOLDIERS, minimum = 0) {
+  // Reject coercible placeholders from a remote JSON record instead of
+  // silently treating null, booleans, or blank strings as zero.
+  if (value == null || typeof value === "boolean" || (typeof value === "string" && !value.trim())) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= minimum && number <= maximum ? number : null;
+}
+
 function publicGenerals(state) {
   return Object.fromEntries(Object.entries(state?.generals || {})
     .filter(([, general]) => general?.status === "deployed")
     .map(([id, general]) => [id, publicGeneralState(general)]));
+}
+
+function publicMarketListings(state) {
+  return Object.fromEntries(Object.entries(state?.marketListings || {})
+    .map(([id, listing]) => [id, publicMarketListingState(state, listing)]));
 }
 
 function cacheWorldWithoutDeployedArchives(state) {
@@ -253,7 +314,44 @@ function changedEntries(before, after) {
   return changes;
 }
 
-function createPublicMapChanges(beforeWorld, afterWorld) {
+function publicBattleChanges(beforeWorld, afterWorld, effects = [], actorAccountId = "") {
+  const battles = {};
+  for (const effect of effects || []) {
+    if (effect?.type !== "battle-lost" || String(effect.accountId || "") !== String(actorAccountId || "")) continue;
+    const x = Number(effect.at?.x);
+    const y = Number(effect.at?.y);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) continue;
+    const key = `${x},${y}`;
+    const before = beforeWorld?.cells?.[key];
+    const after = afterWorld?.cells?.[key];
+    // Only enemy-held cells whose garrison was reduced need this side-channel.
+    // Conquests already become the actor's own public cell and pass the normal
+    // ownership validation below.
+    if (!before?.ownerAccountId || String(before.ownerAccountId) === String(actorAccountId || "") || !after) continue;
+    if (String(after.ownerAccountId || "") !== String(before.ownerAccountId) || Number(after.soldiers) >= Number(before.soldiers)) continue;
+    const battleId = String(effect.jobId || `${key}:${effect.createdAt || "battle"}`).slice(0, 100);
+    battles[battleId] = {
+      battleId,
+      attackerAccountId: String(actorAccountId),
+      x, y,
+      targetOwnerAccountId: String(before.ownerAccountId),
+      beforeSoldiers: Math.max(0, Math.trunc(Number(before.soldiers || 0))),
+      afterSoldiers: Math.max(0, Math.trunc(Number(after.soldiers || 0))),
+      attackerSoldiers: Math.max(0, Math.trunc(Number(effect.attackerSoldiers || 0))),
+      defenderSoldiers: Math.max(0, Math.trunc(Number(effect.defenderSoldiers || 0))),
+      attackerPower: Math.max(1, Math.trunc(Number(effect.attackerPower || 0))),
+      defenderPower: Math.max(1, Math.trunc(Number(effect.defenderPower || 0))),
+      attackerLosses: Math.max(0, Math.trunc(Number(effect.attackerLosses || 0))),
+      defenderLosses: Math.max(0, Math.trunc(Number(effect.defenderLosses || 0))),
+      attackerSurvivors: Math.max(0, Math.trunc(Number(effect.survivors || 0))),
+      defenderSurvivors: Math.max(0, Math.trunc(Number(effect.defenderSurvivors || 0))),
+      outcome: "attacker-lost"
+    };
+  }
+  return battles;
+}
+
+function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAccountId = "") {
   const claims = changedEntries(beforeWorld?.claimedTreasures || {}, afterWorld?.claimedTreasures || {});
   for (const [id, claim] of Object.entries(claims)) {
     if (claim) claim.materialId = String(beforeWorld?.treasureSpawns?.[id]?.materialId || claim.materialId || "");
@@ -261,12 +359,17 @@ function createPublicMapChanges(beforeWorld, afterWorld) {
   return {
     cells: changedEntries(publicCells(beforeWorld), publicCells(afterWorld)),
     generals: changedEntries(publicGenerals(beforeWorld), publicGenerals(afterWorld)),
-    claimedTreasures: claims
+    marketListings: changedEntries(publicMarketListings(beforeWorld), publicMarketListings(afterWorld)),
+    marketSales: changedEntries(beforeWorld?.marketSales || {}, afterWorld?.marketSales || {}),
+    claimedTreasures: claims,
+    battles: publicBattleChanges(beforeWorld, afterWorld, effects, actorAccountId)
   };
 }
 
 function hasPublicMapChanges(changes) {
-  return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length || Object.keys(changes?.claimedTreasures || {}).length);
+  return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length
+    || Object.keys(changes?.marketListings || {}).length || Object.keys(changes?.marketSales || {}).length
+    || Object.keys(changes?.claimedTreasures || {}).length || Object.keys(changes?.battles || {}).length);
 }
 
 function parseJsonAnswer(value) {
@@ -345,7 +448,9 @@ function normalizeGeneratedGeneral(value, effect = {}, edits = null) {
     },
     appearanceSetting: text("appearanceSetting", gender === "female" ? "她衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。" : "他衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。", 350),
     coreSetting: text("coreSetting", wish || "此人出身乱世，具备成为良将的才能与抱负，愿追随拥有慧眼的主公开疆扩土。", MAX_GENERAL_CORE_SETTING_LENGTH),
-    power: INITIAL_GENERAL_BASE_POWER
+    power: effect.generatedPower ?? (effect.generatedSeed
+      ? generatedGeneralPower(effect.generatedSeed, effect.accountId, effect.sourceId || effect.discoveryId || "general")
+      : DEFAULT_GENERATED_GENERAL_POWER)
   };
 }
 
@@ -358,13 +463,48 @@ function dialogueQualityIssue(value, { captive = false, allowedRecipientKeys = [
   if (typeof value.command !== "object" || Array.isArray(value.command)) return "将领互动指令格式无效";
   const type = String(value.command.type || "");
   if (type === "surrender") return captive ? null : "普通将领不能返回降服指令";
+  if (type === "appearance-change") {
+    const note = String(value.command.note || "").trim();
+    if (!note || note.length > 1000) return "外观变更说明必须为 1～1000 字";
+    return ACCOUNT_IDENTIFIER_PATTERN.test(note) ? "外观变更说明包含内部账号编号" : null;
+  }
   if (type !== "send-letter") return "将领互动返回了未知指令";
   const recipientKey = String(value.command.recipientKey || "");
   if (!recipientKey || !allowedRecipientKeys.includes(recipientKey)) return "将领书信目标不在历任主公名单中";
-  const text = String(value.command.text || "").trim();
-  if (!text || text.length > 500) return "将领书信必须为 1～500 字";
-  if (ACCOUNT_IDENTIFIER_PATTERN.test(text)) return "将领书信包含内部账号编号";
+  const purpose = String(value.command.purpose || "").trim();
+  const guidance = String(value.command.guidance || "").trim();
+  const legacyText = String(value.command.text || "").trim();
+  if (!purpose && !legacyText) return "将领书信必须说明写信目的";
+  if (purpose.length > 300 || guidance.length > 800 || legacyText.length > 500) return "将领书信目标说明过长";
+  if (ACCOUNT_IDENTIFIER_PATTERN.test(`${purpose}\n${guidance}\n${legacyText}`)) return "将领书信说明包含内部账号编号";
   return null;
+}
+
+function combinedDialogueQualityIssue(value, { captive = false, allowedRecipientKeys = [] } = {}) {
+  const dialogueIssue = dialogueQualityIssue(value, { captive, allowedRecipientKeys });
+  if (dialogueIssue) return dialogueIssue;
+  const narration = String(value.narration || "").trim();
+  if (narration.length > 600) return "将领旁白不得超过 600 字";
+  if (narration && ACCOUNT_IDENTIFIER_PATTERN.test(narration)) return "将领旁白包含内部账号编号";
+  return generalMemoryQualityIssue(value.memoryUpdate);
+}
+
+function letterQualityIssue(value, { allowedRecipientKeys = [], requiredRecipientKey = "" } = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "书信结果不是 JSON 对象";
+  const recipientKey = String(value.recipientKey || "").trim();
+  const text = String(value.text || "").trim();
+  if (!recipientKey || !allowedRecipientKeys.includes(recipientKey)) return "书信收件人不在允许名单中";
+  if (requiredRecipientKey && recipientKey !== requiredRecipientKey) return "书信收件人未按确认目标生成";
+  if (!text || text.length > 1000) return "书信正文必须为 1～1000 字";
+  if (ACCOUNT_IDENTIFIER_PATTERN.test(`${recipientKey}\n${text}`)) return "书信包含内部账号编号";
+  return null;
+}
+
+function appearanceQualityIssue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "外观编辑结果不是 JSON 对象";
+  const appearanceSetting = String(value.appearanceSetting || "").trim();
+  if (!appearanceSetting || appearanceSetting.length > 350) return "外观设定必须为 1～350 字";
+  return ACCOUNT_IDENTIFIER_PATTERN.test(appearanceSetting) ? "外观设定包含内部账号编号" : null;
 }
 
 function compactDialogueReply(value) {
@@ -402,13 +542,16 @@ function modelConfigSavePayload(exported, workId, name, description) {
   const payload = JSON.parse(JSON.stringify(exported || {}));
   const firstString = (...values) => values.find(value => typeof value === "string") || "";
   const summary = String(payload.summary ?? payload.smry ?? payload.abs_txt ?? payload.sum_info ?? payload.abstract ?? payload.app?.summary ?? "在线游戏世界");
+  const language = [payload.lang, payload.locale, payload.lc, payload.lng, payload.language, payload.app?.language]
+    .map(value => typeof value === "string" ? value.trim() : "")
+    .find(Boolean) || "zh-Hans";
   payload.app = {
     ...(payload.app && typeof payload.app === "object" ? payload.app : {}),
     id: String(workId),
     name: String(name),
     description: String(description),
     summary,
-    language: String(payload.lang ?? payload.locale ?? payload.lc ?? payload.lng ?? payload.language ?? payload.app?.language ?? "zh-Hans"),
+    language,
     gender: Number(payload.gender ?? payload.ref_id2 ?? payload.app?.gender ?? 0),
     cover: firstString(payload.cover, payload.cover_url, payload.cvr_url, payload.app?.cover),
     cover_tiny: firstString(payload.cover_tiny, payload.cvr_tiny, payload.cover_sm, payload.app?.cover_tiny),
@@ -419,6 +562,11 @@ function modelConfigSavePayload(exported, workId, name, description) {
     is_available_not_public: Boolean(payload.is_available_not_public ?? payload.avail_not_pub ?? payload.is_avail_np ?? payload.avail_np ?? payload.ianp ?? payload.app?.is_available_not_public ?? false),
     schedule_publish_or_not: false
   };
+  payload.lang = language;
+  payload.language = language;
+  for (const key of ["locale", "lc", "lng"]) if (Object.hasOwn(payload, key)) payload[key] = language;
+  payload.type = 1;
+  for (const key of ["knd", "kind", "ptype"]) if (Object.hasOwn(payload, key)) payload[key] = 1;
   payload.pre_prompt = payload.pre_prompt ?? payload.prpt ?? payload.ppt ?? payload.pre_pt ?? payload.prompt_pre ?? "";
   payload.pre_text = payload.pre_text ?? payload.pretxt ?? payload.ptx ?? payload.pre_tx ?? payload.prefix_txt ?? "";
   payload.post_text = payload.post_text ?? payload.posttxt ?? payload.potx ?? payload.post_tx ?? payload.suffix_txt ?? "";
@@ -448,9 +596,14 @@ function normalizeWorldState(value) {
   value.treasureEpoch = Math.max(0, Math.trunc(Number(value.treasureEpoch || 0)));
   value.privatePlayers ||= {};
   value.generals ||= {};
+  value.marketListings ||= {};
+  value.marketSales ||= {};
   value.jobs ||= {};
   value.processedIntents ||= [];
   for (const player of Object.values(value.players)) ensurePowerProgress(player, 300);
+  for (const privatePlayer of Object.values(value.privatePlayers)) {
+    if (!Array.isArray(privatePlayer.pendingGeneralDiscoveries)) privatePlayer.pendingGeneralDiscoveries = [];
+  }
   for (const general of Object.values(value.generals)) ensureGeneralProfile(general);
   return value;
 }
@@ -537,6 +690,7 @@ class OnlineWorldService {
     this.history = { pagesRead: 0, commentsRead: 0, stoppedBy: null, incomplete: 0, invalid: 0, tailPage: 1, pageOrder: "unknown" };
     this.pendingMigration = null;
     this.directInbox = [];
+    this.directHistory = [];
     this.seenDirectMessageIds = new Set();
     this.directSendTimes = [];
     this.directReceiveTimes = new Map();
@@ -553,6 +707,9 @@ class OnlineWorldService {
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
     this.publicGeneralOrders = {};
+    this.publicMarketOrders = {};
+    this.publicMarketSaleOrders = {};
+    this.marketSettledSales = new Set();
     this.publicParticipantOrders = {};
     this.publicAuthorityOrders = {};
     this.publicTreasureSources = {};
@@ -566,6 +723,7 @@ class OnlineWorldService {
     this.intentInFlightKey = "";
     this.pendingModelEffects = [];
     this.pollTimer = null;
+    this.pollFailureCount = 0;
     this.syncPaused = false;
     this.mapFactsCache = null;
   }
@@ -573,7 +731,7 @@ class OnlineWorldService {
   account() {
     const account = this.getAccount?.() || {};
     return {
-      accountId: String(account.accountId || ""),
+      accountId: String(account.accountId || account.id || ""),
       username: String(account.username || ""),
       points: account.points == null ? null : String(account.points)
     };
@@ -591,7 +749,6 @@ class OnlineWorldService {
       card: this.card ? summarizeGameCard(this.card) : null,
       work: this.work ? { ...this.work, description: undefined } : null,
       initialized: Boolean(this.control && this.world),
-      programUpdateAvailable: Boolean(this.control?.programHash && this.control.programHash !== this.currentProgramHash()),
       isAuthor: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
       isServerOwner: Boolean(this.work?.authorAccountId && this.work.authorAccountId === this.account().accountId),
       serverOwnerName: this.work?.authorName || null,
@@ -601,6 +758,7 @@ class OnlineWorldService {
       history: { ...this.history },
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
+      directMessageCount: this.directHistory.length,
       localEventCount: this.localEvents.length,
       pendingModelEffectCount: this.pendingModelEffects.length,
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
@@ -634,6 +792,7 @@ class OnlineWorldService {
       },
       mapFacts: projection ? this.mapFactsCache : [],
       directInbox: this.directInbox.slice(-100),
+      directHistory: this.directHistory.slice(-200),
       worldChat: this.currentWorldChat().map(({ messageId, displayName, text, createdAt, accountId }) => ({ messageId, displayName, text, createdAt, accountId })),
       modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
       programHtml: this.program?.html || null,
@@ -695,6 +854,7 @@ class OnlineWorldService {
         ...(finiteStoredNumber(player.fieldArmySoldiers) ? { fieldArmySoldiers: Number(player.fieldArmySoldiers) } : {}),
         ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {}),
         ...(validPosition(player.position) ? { position: { x: Number(player.position.x), y: Number(player.position.y) } } : {}),
+        ...(validRetreatPath(player.retreatPath, player.position) ? { retreatPath: player.retreatPath.map(point => ({ x: Number(point.x), y: Number(point.y) })) } : {}),
         ...(finiteStoredNumber(player.joinedAt) ? { joinedAt: Number(player.joinedAt) } : {})
       }])),
       generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
@@ -750,6 +910,11 @@ class OnlineWorldService {
     }
     this.recoverOwnLocalPlayerState();
     this.pruneForeignPrivateState();
+    this.reconcileMarketSales();
+  }
+
+  reconcileMarketSales() {
+    for (const sale of Object.values(this.world?.marketSales || {})) this.applyMarketSaleToSeller(sale);
   }
 
   recoverOwnLocalPlayerState() {
@@ -781,7 +946,7 @@ class OnlineWorldService {
       if (!Number.isFinite(gold)) gold = 0;
       const start = joinEvent ? ownEvents.indexOf(joinEvent) + 1 : 0;
       for (const event of ownEvents.slice(start)) {
-        if (["train", "power-train", "march"].includes(event?.type)) gold -= Math.max(0, Number(event?.result?.cost || 0));
+        if (["train", "power-train", "cultivate-player", "cultivate-general", "march"].includes(event?.type)) gold -= Math.max(0, Number(event?.result?.cost || 0));
         if (event?.type === "time-settle") for (const effect of event?.result?.effects || []) {
           if (effect?.type === "mining-complete" && String(effect.accountId || "") === accountId) gold += Math.max(0, Number(effect.gold || 0));
         }
@@ -807,18 +972,58 @@ class OnlineWorldService {
   loadCache(workId) {
     if (!this.cacheFile || !fs.existsSync(this.cacheFile)) return null;
     try {
-      const root = readJsonWithBackupSync(fs, this.cacheFile, value => value?.version === 1 && value?.worlds && typeof value.worlds === "object").value;
-      return root?.worlds?.[workId] || null;
+      const root = readJsonWithBackupSync(fs, this.cacheFile, value => (
+        value?.version === 1 && value?.worlds && typeof value.worlds === "object"
+      ) || (
+        value?.version === 2 && value?.accounts && typeof value.accounts === "object"
+      )).value;
+      const accountId = this.account().accountId;
+      if (!accountId) return null;
+      if (root?.version === 2) {
+        const cached = root.accounts?.[accountId]?.worlds?.[workId];
+        if (cached) return cached;
+        const legacy = root.legacyWorlds?.[workId];
+        return this.cacheOwnerAccountId(legacy) === accountId ? legacy : null;
+      }
+      const legacy = root?.worlds?.[workId];
+      return this.cacheOwnerAccountId(legacy) === accountId ? legacy : null;
     } catch { return null; }
+  }
+
+  cacheOwnerAccountId(cached) {
+    if (!cached || typeof cached !== "object") return "";
+    if (cached.cacheAccountId) return String(cached.cacheAccountId);
+    const candidates = new Set([
+      ...Object.keys(cached.localOverlay?.privatePlayers || {}),
+      ...Object.keys(cached.localOverlay?.players || {})
+    ].map(String).filter(Boolean));
+    return candidates.size === 1 ? [...candidates][0] : "";
   }
 
   saveCache() {
     if (!this.cacheFile || !this.work || !this.world) return;
-    let root = { version: 1, worlds: {} };
+    const accountId = this.account().accountId;
+    if (!accountId) return;
+    let root = { version: 2, accounts: {}, legacyWorlds: {} };
     try {
-      if (fs.existsSync(this.cacheFile)) root = readJsonWithBackupSync(fs, this.cacheFile, value => value?.version === 1 && value?.worlds && typeof value.worlds === "object").value || root;
+      if (fs.existsSync(this.cacheFile)) {
+        const existing = readJsonWithBackupSync(fs, this.cacheFile, value => (
+          value?.version === 1 && value?.worlds && typeof value.worlds === "object"
+        ) || (
+          value?.version === 2 && value?.accounts && typeof value.accounts === "object"
+        )).value;
+        if (existing?.version === 2) root = {
+          version: 2,
+          accounts: existing.accounts || {},
+          legacyWorlds: existing.legacyWorlds || {}
+        };
+        else if (existing?.version === 1) root.legacyWorlds = existing.worlds || {};
+      }
     } catch {}
-    root.worlds[this.work.id] = {
+    root.accounts[accountId] ||= { worlds: {} };
+    root.accounts[accountId].worlds ||= {};
+    root.accounts[accountId].worlds[this.work.id] = {
+      cacheAccountId: accountId,
       control: this.control,
       world: cacheWorldWithoutDeployedArchives(this.world),
       localOverlay: this.captureLocalOverlay(),
@@ -832,10 +1037,14 @@ class OnlineWorldService {
       publicHistoryOrder: { ...this.publicHistoryOrder },
       publicCellOrders: this.publicCellOrders,
       publicGeneralOrders: this.publicGeneralOrders,
+      publicMarketOrders: this.publicMarketOrders,
+      publicMarketSaleOrders: this.publicMarketSaleOrders,
+      marketSettledSales: [...this.marketSettledSales].slice(-1000),
       publicParticipantOrders: this.publicParticipantOrders,
       publicAuthorityOrders: this.publicAuthorityOrders,
       publicTreasureSources: this.publicTreasureSources,
       directInbox: this.directInbox.slice(-100),
+      directHistory: this.directHistory.slice(-200),
       worldChat: this.currentWorldChat(),
       worldChatCursor: cloneJson(this.worldChatCursor),
       localPreferences: cloneJson(this.localPreferences),
@@ -849,20 +1058,37 @@ class OnlineWorldService {
       commentRootPages: [...this.commentRootPages].slice(-2000),
       updatedAt: this.now()
     };
+    if (this.cacheOwnerAccountId(root.legacyWorlds[this.work.id]) === accountId) delete root.legacyWorlds[this.work.id];
     atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
   }
 
   startPolling() {
     this.syncPaused = false;
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = setInterval(() => void this.sync(false).catch(() => {}), POLL_INTERVAL_MS);
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    const schedule = delay => {
+      if (this.syncPaused) return;
+      this.pollTimer = setTimeout(async () => {
+        if (this.syncPaused) return;
+        try {
+          await this.sync(false);
+          this.pollFailureCount = 0;
+        } catch {
+          this.pollFailureCount += 1;
+        } finally {
+          const retryDelay = Math.min(POLL_RETRY_MAX_MS, POLL_INTERVAL_MS * (2 ** Math.min(4, this.pollFailureCount)));
+          schedule(retryDelay);
+        }
+      }, delay);
+    };
+    schedule(POLL_INTERVAL_MS);
   }
 
   close() {
     this.syncPaused = true;
     this.onClose?.();
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
+    this.pollFailureCount = 0;
     this.pendingJoinPreview = null;
     this.saveCache();
     this.status = "closed";
@@ -901,6 +1127,7 @@ class OnlineWorldService {
   async open({ card, workUrl, orientation, displayName } = {}) {
     await this.pause();
     this.syncPaused = false;
+    this.pendingMigration = null;
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
     const origin = String(this.getOrigin?.() || "").replace(/\/$/, "");
@@ -947,6 +1174,9 @@ class OnlineWorldService {
     this.publicHistoryOrder = ledgerOrder(cached?.publicHistoryOrder);
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
+    this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
+    this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
+    this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
     this.publicAuthorityOrders = cached?.publicAuthorityOrders && typeof cached.publicAuthorityOrders === "object" ? cached.publicAuthorityOrders : {};
     this.publicTreasureSources = cached?.publicTreasureSources && typeof cached.publicTreasureSources === "object" ? cached.publicTreasureSources : {};
@@ -975,6 +1205,9 @@ class OnlineWorldService {
       this.publicHistoryOrder = { timestamp: 0, commentId: "" };
       this.publicCellOrders = {};
       this.publicGeneralOrders = {};
+      this.publicMarketOrders = {};
+      this.publicMarketSaleOrders = {};
+      this.marketSettledSales.clear();
       this.publicParticipantOrders = {};
       this.publicAuthorityOrders = {};
       this.publicTreasureSources = {};
@@ -985,6 +1218,7 @@ class OnlineWorldService {
       bindWorldAuthority(this.world, this.control);
       this.restoreLocalOverlay(cached.localOverlay || null);
       this.directInbox = Array.isArray(cached.directInbox) ? cached.directInbox.slice(-100) : [];
+      this.directHistory = Array.isArray(cached.directHistory) ? cached.directHistory.slice(-200) : [...this.directInbox];
       this.seenDirectMessageIds = new Set(Array.isArray(cached.seenDirectMessageIds) ? cached.seenDirectMessageIds : this.directInbox.map(item => item.messageId));
     } else {
       this.control = null;
@@ -996,9 +1230,15 @@ class OnlineWorldService {
     };
     await this.sync(true);
     this.assertSyncActive();
-    if (this.status !== "needs-program-update") await this.ensureLocalPlayerContext();
+    if (this.pendingMigration) {
+      this.status = "migrating";
+      this.startPolling();
+      this.notify();
+      return this.state();
+    }
+    await this.ensureLocalPlayerContext();
     this.assertSyncActive();
-    this.status = this.control && this.world ? (this.control.programHash !== this.currentProgramHash() ? "needs-program-update" : "ready") : "needs-initialization";
+    this.status = this.control && this.world ? "ready" : "needs-initialization";
     this.startPolling();
     this.notify();
     return this.state();
@@ -1061,6 +1301,9 @@ class OnlineWorldService {
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
     this.publicGeneralOrders = {};
+    this.publicMarketOrders = {};
+    this.publicMarketSaleOrders = {};
+    this.marketSettledSales.clear();
     this.publicParticipantOrders = {};
     this.publicAuthorityOrders = {};
     this.publicTreasureSources = {};
@@ -1069,54 +1312,6 @@ class OnlineWorldService {
     const controlSources = await this.postRecord(this.control);
     this.rememberTreasureSources(world.treasureSpawns, recordPlatformOrder({ sources: controlSources }));
     await this.publishSnapshot();
-    this.status = "ready";
-    this.saveCache();
-    this.notify();
-    return this.state();
-  }
-
-  async activateProgramUpdate() {
-    if (this.intentInFlight) throw new Error("上一项操作仍在处理中，请等待完成");
-    if (this.syncInFlight) await this.syncInFlight;
-    if (this.intentInFlight) throw new Error("上一项操作仍在处理中，请等待完成");
-    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
-    const running = this.activateProgramUpdateNow();
-    this.intentInFlight = running;
-    this.intentInFlightKey = "admin:publish-program";
-    try {
-      return await running;
-    } finally {
-      if (this.intentInFlight === running) {
-        this.intentInFlight = null;
-        this.intentInFlightKey = "";
-      }
-    }
-  }
-
-  async activateProgramUpdateNow() {
-    if (!this.work || !this.control || this.account().accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以启用游戏程序更新");
-    if (!this.world) throw new Error("游戏数据尚未就绪，请重新进入后发布更新");
-    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`);
-    const detail = normalizeWorkDetail(payload, this.work.id);
-    if (detail.authorAccountId !== this.account().accountId || (this.card?.companion?.authorAccountId && detail.authorAccountId !== this.card.companion.authorAccountId)) throw new Error("仅当前作品作者可以发布游戏更新");
-    const program = parseProgram(detail.description, GRID_GAME_ID);
-    if (!program) throw new Error("伴生作品详细介绍尚未包含有效游戏程序包");
-    this.work = { ...detail, url: this.work.url };
-    this.program = program;
-    const identity = await this.getIdentity();
-    const unsigned = {
-      ...this.control,
-      id: crypto.randomUUID(),
-      programHash: this.currentProgramHash(),
-      authoritySigningPublicKey: identity.signingPublicKey,
-      authorityEncryptionPublicKey: identity.encryptionPublicKey,
-      updatedAt: this.now()
-    };
-    delete unsigned.signature;
-    this.control = signRecord(unsigned, identity.signingPrivateKey);
-    await this.postRecord(this.control);
-    await this.publishSnapshot();
-    this.error = null;
     this.status = "ready";
     this.saveCache();
     this.notify();
@@ -1145,6 +1340,7 @@ class OnlineWorldService {
       const response = await this.retryPlatformWrite(() => this.postComment(content, writeOptions));
       const source = firstObject(response, item => Boolean(item.id || item.comment_id) && typeof item.content === "string")
         || firstObject(response, item => Boolean(item.id || item.comment_id)) || response || {};
+      const timestampSource = firstObject(response, item => commentTimestamp(item) > 0);
       if (typeof source?.content === "string" && source.content !== content) throw new Error("平台返回的评论正文与提交分片不一致");
       if (commentAccountId(source) && commentAccountId(source) !== this.account().accountId) throw new Error("平台返回的评论作者与当前账号不一致");
       const sourceParentId = String(source?.parent_id || source?.parentId || source?.root_comment_id || source?.rootCommentId || "");
@@ -1153,6 +1349,11 @@ class OnlineWorldService {
         ...(source && typeof source === "object" ? source : {}),
         id: commentId(source) || commentId(response),
         account_id: commentAccountId(source) || commentAccountId(response) || this.account().accountId,
+        created_at: source?.created_at ?? source?.createdAt ?? source?.create_time ?? source?.createTime
+          ?? source?.published_at ?? source?.publishedAt ?? source?.timestamp
+          ?? timestampSource?.created_at ?? timestampSource?.createdAt ?? timestampSource?.create_time ?? timestampSource?.createTime
+          ?? timestampSource?.published_at ?? timestampSource?.publishedAt ?? timestampSource?.timestamp
+          ?? new Date(this.now()).toISOString(),
         ...(writeOptions.parentId ? { parent_id: String(writeOptions.parentId) } : {}),
         content
       };
@@ -1460,6 +1661,19 @@ class OnlineWorldService {
       .sort((left, right) => comparePlatformOrder(right, left));
   }
 
+  verifiedResets(records, control = this.control) {
+    if (!control) return [];
+    return (records || [])
+      .filter(item => item.record?.schema === FYOW_SCHEMAS.reset
+        && item.record.gameId === GRID_GAME_ID
+        && item.record.seasonId === control.seasonId
+        && item.record.oldWorkId === this.work?.id
+        && item.record.newWorkId
+        && item.record.newWorkId !== this.work?.id)
+      .filter(item => this.validAuthorSource(item) && verifySignedRecord(item.record, control.authoritySigningPublicKey))
+      .sort((left, right) => comparePlatformOrder(right, left));
+  }
+
   validAuthorSource(item) {
     const sources = item.sources || [];
     return sources.length > 0 && sources.every(source => {
@@ -1504,11 +1718,57 @@ class OnlineWorldService {
     if (this.world?.bans?.[actorAccountId]?.banned) return false;
     const cells = record.changes?.cells;
     const generals = record.changes?.generals;
+    const marketListings = record.changes?.marketListings || {};
+    const marketSales = record.changes?.marketSales || {};
     const treasureClaims = record.changes?.claimedTreasures || {};
+    const battles = record.changes?.battles || {};
     if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
     if (!treasureClaims || typeof treasureClaims !== "object" || Array.isArray(treasureClaims) || Object.keys(treasureClaims).length > 24) return false;
+    if (!marketListings || typeof marketListings !== "object" || Array.isArray(marketListings) || Object.keys(marketListings).length > 100) return false;
+    if (!marketSales || typeof marketSales !== "object" || Array.isArray(marketSales) || Object.keys(marketSales).length > 100) return false;
+    if (!battles || typeof battles !== "object" || Array.isArray(battles) || Object.keys(battles).length > 24) return false;
     if (Object.hasOwn(record.changes, "treasureSpawns") || Object.hasOwn(record.changes, "treasureEpoch")) return false;
     if (Object.keys(cells).length > GRID_SIZE * GRID_SIZE || Object.keys(generals).length > 100) return false;
+    const battleCellKeys = new Set();
+    for (const [battleId, battle] of Object.entries(battles)) {
+      if (!battle || typeof battle !== "object" || Array.isArray(battle) || String(battle.battleId || "") !== battleId) return false;
+      if (String(battle.attackerAccountId || "") !== actorAccountId || String(battle.outcome || "") !== "attacker-lost") return false;
+      const x = Number(battle.x);
+      const y = Number(battle.y);
+      if (!Number.isInteger(x) || x < 0 || x >= GRID_SIZE || !Number.isInteger(y) || y < 0 || y >= GRID_SIZE) return false;
+      const key = `${x},${y}`;
+      if (battleCellKeys.has(key) || !Object.hasOwn(cells, key) || cells[key] == null) return false;
+      battleCellKeys.add(key);
+      const current = this.world?.cells?.[key];
+      if (!current || String(current.ownerAccountId || "") !== String(battle.targetOwnerAccountId || "") || String(current.ownerAccountId || "") === actorAccountId) return false;
+      const beforeSoldiers = safeBattleInteger(battle.beforeSoldiers);
+      const afterSoldiers = safeBattleInteger(battle.afterSoldiers);
+      const currentSoldiers = safeBattleInteger(current.soldiers);
+      if (beforeSoldiers == null || afterSoldiers == null || currentSoldiers == null
+        || beforeSoldiers !== currentSoldiers || afterSoldiers >= beforeSoldiers) return false;
+      const next = cells[key];
+      if (!isPublicCellShape(next)
+        || String(next.ownerAccountId || "") !== String(current.ownerAccountId || "")
+        || canonicalJson(next.generalIds || []) !== canonicalJson(current.generalIds || [])
+        || safeBattleInteger(next.soldiers) !== afterSoldiers) return false;
+      const attackerSoldiers = safeBattleInteger(battle.attackerSoldiers);
+      const defenderSoldiers = safeBattleInteger(battle.defenderSoldiers);
+      const attackerPower = safeBattleInteger(battle.attackerPower, MAX_PUBLIC_BATTLE_POWER, 1);
+      const defenderPower = safeBattleInteger(battle.defenderPower, MAX_PUBLIC_BATTLE_POWER, 1);
+      const attackerLosses = safeBattleInteger(battle.attackerLosses);
+      const defenderLosses = safeBattleInteger(battle.defenderLosses);
+      const attackerSurvivors = safeBattleInteger(battle.attackerSurvivors);
+      const defenderSurvivors = safeBattleInteger(battle.defenderSurvivors);
+      if ([attackerSoldiers, defenderSoldiers, attackerPower, defenderPower, attackerLosses, defenderLosses, attackerSurvivors, defenderSurvivors].some(value => value == null)) return false;
+      if (defenderSoldiers !== beforeSoldiers || attackerSoldiers < 1) return false;
+      const expected = battleCasualties(attackerPower, defenderPower, attackerSoldiers, defenderSoldiers);
+      if (expected.attackerWon
+        || attackerLosses !== expected.attackerLosses
+        || defenderLosses !== expected.defenderLosses
+        || attackerSurvivors !== expected.attackerSurvivors
+        || defenderSurvivors !== expected.defenderSurvivors
+        || afterSoldiers !== expected.defenderSurvivors) return false;
+    }
     for (const [key, cell] of Object.entries(cells)) {
       const match = key.match(/^(\d+),(\d+)$/);
       if (!match) return false;
@@ -1516,20 +1776,68 @@ class OnlineWorldService {
       const y = Number(match[2]);
       if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
       if (cell == null) continue;
-      if (String(cell.ownerAccountId || "") !== actorAccountId) return false;
-      if (!Number.isSafeInteger(Number(cell.soldiers)) || Number(cell.soldiers) < 0 || Number(cell.soldiers) > staticCell(this.world.seed, x, y).garrisonCap) return false;
+      if (!isPublicCellShape(cell)) return false;
+      if (String(cell.ownerAccountId || "") !== actorAccountId && !battleCellKeys.has(key)) return false;
+      const submittedSoldiers = Number(cell.soldiers);
+      const currentCell = this.world?.cells?.[key];
+      const currentSoldiers = Number(currentCell?.soldiers);
+      const sameOwner = currentCell
+        && String(currentCell.ownerAccountId || "") === String(cell.ownerAccountId || "");
+      const garrisonCeiling = sameOwner && Number.isSafeInteger(currentSoldiers) && currentSoldiers >= 0
+        ? Math.max(staticCell(this.world.seed, x, y).garrisonCap, currentSoldiers)
+        : staticCell(this.world.seed, x, y).garrisonCap;
+      if (!Number.isSafeInteger(submittedSoldiers) || submittedSoldiers < 0 || submittedSoldiers > garrisonCeiling) return false;
       if (!Array.isArray(cell.generalIds) || cell.generalIds.length > 2 || new Set(cell.generalIds.map(String)).size !== cell.generalIds.length) return false;
     }
     for (const general of Object.values(generals)) {
       if (general == null) continue;
       if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
       if (JSON.stringify(general).length > 30000 || String(general.appearanceSetting || "").length > 350 || String(general.coreSetting || general.setting || "").length > MAX_GENERAL_CORE_SETTING_LENGTH || String(general.memoryText || "").length > 1000) return false;
-      if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 40) return false;
+      if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 1000) return false;
       if (Array.isArray(general.masterHistory) && general.masterHistory.length > 20) return false;
       if (Array.isArray(general.captivityHistory) && general.captivityHistory.length > 20) return false;
       const x = Number(general.location.x);
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
+    }
+    for (const [listingId, listing] of Object.entries(marketListings)) {
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(String(listingId))) return false;
+      const previous = this.world?.marketListings?.[listingId];
+      if (listing == null) {
+        const sale = Object.values(marketSales).find(item => item && String(item.listingId) === listingId);
+        if (String(previous?.sellerAccountId || "") !== actorAccountId && String(sale?.buyerAccountId || "") !== actorAccountId) return false;
+        continue;
+      }
+      if (String(listing.listingId || "") !== listingId || String(listing.sellerAccountId || "") !== actorAccountId) return false;
+      const price = Number(listing.price);
+      if (!Number.isSafeInteger(price) || price < 1 || price > 1000000000) return false;
+      if (Object.hasOwn(listing, "sellerIntro") && (typeof listing.sellerIntro !== "string" || listing.sellerIntro.length > 240)) return false;
+      const general = listing.general;
+      if (!general || typeof general !== "object" || Array.isArray(general) || String(general.id || "") !== String(listing.generalId || "")) return false;
+      if (JSON.stringify(listing).length > 80000 || String(general.coreSetting || general.setting || "").length > MAX_GENERAL_CORE_SETTING_LENGTH) return false;
+      if (!["carried", "waiting"].includes(String(listing.sourceStatus || "")) || String(general.status || "") === "captured") return false;
+      // A general can only be represented by one active market listing.
+      if (Object.entries(this.world?.marketListings || {}).some(([id, item]) => String(id) !== listingId && String(item?.generalId || "") === String(listing.generalId || ""))) return false;
+      // Records are published from publicMarketListingState; reject extra or
+      // malformed fields instead of accepting a client-authored projection.
+      if (canonicalJson(publicMarketListingState(this.world, listing)) !== canonicalJson(listing)) return false;
+      if (previous && canonicalJson(publicMarketListingState(this.world, previous)) !== canonicalJson(listing)) return false;
+    }
+    for (const [transactionId, sale] of Object.entries(marketSales)) {
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(String(transactionId)) || !sale || typeof sale !== "object") return false;
+      if (String(sale.transactionId || "") !== transactionId || String(sale.buyerAccountId || "") !== actorAccountId) return false;
+      const listing = this.world?.marketListings?.[String(sale.listingId || "")];
+      const previousSale = this.world?.marketSales?.[transactionId];
+      if (previousSale && canonicalJson(previousSale) === canonicalJson(sale)) continue;
+      if (!listing || String(listing.sellerAccountId || "") === actorAccountId || String(sale.sellerAccountId || "") !== String(listing.sellerAccountId || "")) return false;
+      // A purchase and its public listing removal are one atomic map delta.
+      // Without this check a forged sale could leave the listing available for
+      // a second buyer while still crediting the seller.
+      if (!Object.hasOwn(marketListings, String(sale.listingId || "")) || marketListings[String(sale.listingId || "")] !== null) return false;
+      if (Number(sale.price) !== Number(listing.price) || String(sale.generalId || "") !== String(listing.generalId || "")) return false;
+      if (!sale.general || typeof sale.general !== "object" || String(sale.general.id || "") !== String(listing.generalId || "")) return false;
+      if (canonicalJson(sale.general) !== canonicalJson(listing.general)) return false;
+      if (JSON.stringify(sale).length > 80000) return false;
     }
     for (const [id, claim] of Object.entries(treasureClaims)) {
       const source = this.publicTreasureSources[id];
@@ -1563,6 +1871,7 @@ class OnlineWorldService {
     this.localEvents = [];
     this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.directInbox = [];
+    this.directHistory = [];
     this.seenDirectMessageIds.clear();
     this.modelConversationIds.clear();
     this.pendingJoinPreview = null;
@@ -1644,6 +1953,21 @@ class OnlineWorldService {
       else this.world.generals[id] = publicGeneralState(general);
       this.publicGeneralOrders[id] = order;
     }
+    this.world.marketListings ||= {};
+    this.world.marketSales ||= {};
+    for (const [listingId, listing] of Object.entries(record.changes.marketListings || {})) {
+      if (compareOrderValue(order, this.publicMarketOrders[listingId] || this.publicMapBaselineOrder) <= 0) continue;
+      if (listing == null) delete this.world.marketListings[listingId];
+      else this.world.marketListings[listingId] = cloneJson(listing);
+      this.publicMarketOrders[listingId] = order;
+    }
+    for (const [transactionId, sale] of Object.entries(record.changes.marketSales || {})) {
+      if (compareOrderValue(order, this.publicMarketSaleOrders[transactionId] || this.publicMapBaselineOrder) <= 0) continue;
+      if (sale == null) continue;
+      this.world.marketSales[transactionId] = cloneJson(sale);
+      this.publicMarketSaleOrders[transactionId] = order;
+      if (String(sale.sellerAccountId || "") === this.account().accountId) this.applyMarketSaleToSeller(sale);
+    }
     for (const [id, claim] of Object.entries(record.changes.claimedTreasures || {})) {
       const previous = this.world.claimedTreasures?.[id];
       const previousOrder = previous?.platformOrder;
@@ -1671,6 +1995,25 @@ class OnlineWorldService {
     if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
     if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     this.publicDeltaCountSinceSnapshot += 1;
+    return true;
+  }
+
+  applyMarketSaleToSeller(sale) {
+    const transactionId = String(sale?.transactionId || "");
+    if (!transactionId || this.marketSettledSales.has(transactionId)) return false;
+    const accountId = this.account().accountId;
+    if (String(sale?.sellerAccountId || "") !== accountId) return false;
+    const player = this.world?.players?.[accountId];
+    if (!player) return false;
+    const generalId = String(sale.generalId || "");
+    const general = this.world.generals?.[generalId];
+    if (general && String(general.holderAccountId || "") === accountId && String(general.marketListingId || "") === String(sale.listingId || "")) {
+      delete this.world.generals[generalId];
+      player.carriedGeneralIds = (player.carriedGeneralIds || []).filter(id => String(id) !== generalId);
+    }
+    player.gold = Math.max(0, Math.trunc(Number(player.gold || 0)) + Math.max(0, Math.trunc(Number(sale.price || 0))));
+    this.marketSettledSales.add(transactionId);
+    if (this.marketSettledSales.size > 1000) this.marketSettledSales = new Set([...this.marketSettledSales].slice(-1000));
     return true;
   }
 
@@ -1791,10 +2134,6 @@ class OnlineWorldService {
     }, identity.signingPrivateKey);
     const sources = await this.postRecord(record);
     let item = { record, sources };
-    if (!recordPlatformOrder(item).timestamp) {
-      const history = await this.readWorldChatHistory();
-      item = history.assembled.records.find(candidate => candidate.record.messageId === record.messageId && candidate.record.accountId === account.accountId) || item;
-    }
     if (!this.applyWorldChatRecord(item)) throw new Error("世界聊天发布后未通过来源与签名校验");
     const message = this.currentWorldChat().find(candidate => candidate.messageId === record.messageId && candidate.accountId === account.accountId) || null;
     this.saveCache();
@@ -1915,7 +2254,6 @@ class OnlineWorldService {
     this.syncing = true;
     this.error = null;
     this.notify();
-    let pendingProgramUpdate = false;
     try {
       if (this.lastClockCalibrationMono == null || this.monotonicNow() - this.lastClockCalibrationMono > 60 * 60 * 1000) await this.calibrateClock().catch(() => null);
       const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
@@ -1923,10 +2261,17 @@ class OnlineWorldService {
       const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) this.control = controls[0].record;
       if (this.control) {
-        if (this.control.programHash !== this.currentProgramHash()) await this.refreshWorkProgram();
-        this.assertSyncActive();
-        pendingProgramUpdate = this.control.programHash !== this.currentProgramHash();
-        if (pendingProgramUpdate && this.account().accountId !== this.work.authorAccountId) throw new Error("游戏更新尚未发布，请稍后再试");
+        const reset = this.verifiedResets(history.assembled.records)[0];
+        if (reset) {
+          this.pendingMigration = { workId: reset.record.newWorkId, url: reset.record.newWorkUrl, issuedAt: reset.record.issuedAt };
+          this.status = "migrating";
+          this.lastSyncAt = this.now();
+          this.saveCache();
+          this.diagnostic({ event: "migration-detected", status: this.status, targetWorkId: reset.record.newWorkId, controlId: this.control.id || null });
+          this.notify();
+          return this.state();
+        }
+        if (!this.pendingMigration?.requiresPublish) this.pendingMigration = null;
         const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;
@@ -1945,6 +2290,8 @@ class OnlineWorldService {
           this.publicDeltaCountSinceSnapshot = 0;
           this.publicCellOrders = cloneJson(coverage?.cellOrders || {});
           this.publicGeneralOrders = cloneJson(coverage?.generalOrders || {});
+          this.publicMarketOrders = cloneJson(coverage?.marketOrders || {});
+          this.publicMarketSaleOrders = cloneJson(coverage?.marketSaleOrders || {});
           this.publicParticipantOrders = cloneJson(coverage?.participantOrders || {});
           this.publicAuthorityOrders = cloneJson(coverage?.authorityOrders || {});
           this.publicTreasureSources = cloneJson(coverage?.treasureSources || {});
@@ -1954,6 +2301,7 @@ class OnlineWorldService {
         if (this.world) {
           this.collectTreasureSources(history.assembled.records);
           this.applyPublicLedger(history.assembled.records);
+          this.reconcileMarketSales();
           if (history.completeThrough && compareOrderValue(history.completeThrough, this.publicHistoryOrder) > 0) this.publicHistoryOrder = { ...history.completeThrough };
         }
         if (this.world) this.reconcileTreasureRewards(history);
@@ -1963,20 +2311,17 @@ class OnlineWorldService {
           this.applyWorldChatRecords(chatHistory.assembled.records);
         }
         if (this.world) this.recoverOwnLocalPlayerState();
-        if (this.world && !pendingProgramUpdate) await this.settleLocalClock();
+        if (this.world) await this.settleLocalClock();
         this.assertSyncActive();
-        if (this.world && !pendingProgramUpdate) await this.retryPendingModelEffects(1);
+        // Model-backed effects are retried only after an explicit player
+        // confirmation. Do not spend points or make background model calls
+        // during a passive world sync.
         this.assertSyncActive();
-        if (this.world && !pendingProgramUpdate && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
+        if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
         await this.receiveDirectWakes().catch(() => []);
         this.assertSyncActive();
-        const resets = history.assembled.records
-          .filter(item => item.record?.schema === FYOW_SCHEMAS.reset && item.record.seasonId === this.control.seasonId && this.validAuthorSource(item))
-          .filter(item => verifySignedRecord(item.record, this.control.authoritySigningPublicKey))
-          .sort((left, right) => comparePlatformOrder(right, left));
-        if (resets[0]) this.pendingMigration = { workId: resets[0].record.newWorkId, url: resets[0].record.newWorkUrl, issuedAt: resets[0].record.issuedAt };
       }
-      this.status = this.control && this.world ? (pendingProgramUpdate ? "needs-program-update" : "ready") : "needs-initialization";
+      this.status = this.control && this.world ? "ready" : "needs-initialization";
       this.lastSyncAt = this.now();
       this.saveCache();
       if (fullScan || previousControlId !== String(this.control?.id || "")) {
@@ -2019,22 +2364,7 @@ class OnlineWorldService {
       accountId: account.accountId,
       characterProfile: this.localPreferences.characterProfile
     })));
-    let playerContext = this.pendingJoinPreview?.contextSignature === contextSignature
-      ? cloneJson(this.pendingJoinPreview.playerContext)
-      : null;
-    if (playerContextQualityIssue(playerContext)) {
-      const parsed = await this.requestStructuredModel(
-        buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context:${normalized.idempotencyKey}`),
-        { attempts: 3, label: "玩家角色设定整理", validate: playerContextQualityIssue }
-      );
-      playerContext = {
-        displayName: this.localPreferences.characterProfile.displayName,
-        personaSummary: String(parsed?.personaSummary || "").trim(),
-        appearanceSummary: String(parsed?.appearanceSummary || "").trim(),
-        speechStyle: String(parsed?.speechStyle || "").trim(),
-        relationshipApproach: String(parsed?.relationshipApproach || "").trim()
-      };
-    }
+    const playerContext = playerContextFromProfile(this.localPreferences.characterProfile);
     this.localPreferences.playerContext = cloneJson(playerContext);
     const previewId = crypto.randomUUID();
     const joinIntent = {
@@ -2058,17 +2388,19 @@ class OnlineWorldService {
     const request = buildGeneralGenerationRequest(previewOutcome.state, effect, `preview-general:${previewId}`);
     const parsed = await this.requestStructuredModel(request, {
       attempts: 3,
+      manualRetry: true,
       label: "初始将领生成",
       validate: value => generalGenerationQualityIssue(value, effect)
     });
-    const general = normalizeGeneratedGeneral(parsed, effect);
+    const seededEffect = { ...effect, generatedSeed: this.world.seed };
+    const general = normalizeGeneratedGeneral(parsed, seededEffect);
     this.pendingJoinPreview = {
       previewId,
       accountId: account.accountId,
       contextSignature,
       playerContext: cloneJson(playerContext),
       joinIntent,
-      effect: cloneJson(effect),
+      effect: cloneJson(seededEffect),
       general: cloneJson(general),
       createdAt: this.now()
     };
@@ -2077,6 +2409,7 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
+    if (this.pendingMigration?.workId && this.pendingMigration.workId !== this.work?.id) throw new Error("游戏服务器正在搬迁，请等待自动转入新服务器");
     if (String(intent.type || "") === "quote-march") {
       const accountId = this.account().accountId;
       if (!accountId || !this.world?.players?.[accountId]) throw new Error("请先加入在线游戏世界");
@@ -2084,9 +2417,14 @@ class OnlineWorldService {
       const quote = marchQuote(cloneJson(this.world), accountId, intent.to, intent.soldiers, intent.generalIds, Boolean(intent.attack), this.now());
       return { marchQuote: { ...quote, requestKey: intent.requestKey } };
     }
-    if (this.syncInFlight) await this.syncInFlight;
+    if (this.syncInFlight) {
+      try { await this.syncInFlight; }
+      catch (error) { throw actionConnectionError(error); }
+    } else if (this.status === "degraded") {
+      try { await this.sync(false); }
+      catch (error) { throw actionConnectionError(error); }
+    }
     if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏暂时未连接，请稍后再试");
-    if (this.control?.programHash && this.control.programHash !== this.currentProgramHash()) throw new Error("游戏更新尚未发布，请稍后再试");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
     if (this.intentInFlight) {
@@ -2099,6 +2437,8 @@ class OnlineWorldService {
     if (String(normalized.type || "") === "join") this.joinInFlight = running;
     try {
       return await running;
+    } catch (error) {
+      throw actionConnectionError(error);
     } finally {
       if (this.joinInFlight === running) this.joinInFlight = null;
       if (this.intentInFlight === running) {
@@ -2118,6 +2458,7 @@ class OnlineWorldService {
     }
     const normalized = { ...intent, idempotencyKey: String(intent.idempotencyKey || crypto.randomUUID()) };
     if (normalized.type === "world-chat") return this.submitWorldChat(normalized, account);
+    if (normalized.type === "generate-general-letter") return this.generateGeneralLetter(normalized, account.accountId);
     const previousPreferences = cloneJson(this.localPreferences);
     if (normalized.type === "prepare-join") {
       try {
@@ -2139,7 +2480,11 @@ class OnlineWorldService {
       idempotencyKey: normalized.idempotencyKey
     };
     try {
-      const result = await this.applyLocalIntent(commitIntent, account.accountId, { rollbackPreferences: previousPreferences, preparedGeneral });
+      const result = await this.applyLocalIntent(commitIntent, account.accountId, {
+        rollbackPreferences: previousPreferences,
+        preparedGeneral,
+        generatedGeneralPowerSeed: pending.effect.sourceId || pending.effect.discoveryId || pending.previewId
+      });
       this.pendingJoinPreview = null;
       return result;
     } catch (error) {
@@ -2182,6 +2527,8 @@ class OnlineWorldService {
     if (order.timestamp) {
       for (const key of Object.keys(changes.cells || {})) this.publicCellOrders[key] = order;
       for (const id of Object.keys(changes.generals || {})) this.publicGeneralOrders[id] = order;
+      for (const id of Object.keys(changes.marketListings || {})) this.publicMarketOrders[id] = order;
+      for (const id of Object.keys(changes.marketSales || {})) this.publicMarketSaleOrders[id] = order;
       this.publicParticipantOrders[this.account().accountId] = order;
       if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     }
@@ -2223,7 +2570,14 @@ class OnlineWorldService {
     try {
       let dialogue = null;
       let deferredEffects = [];
-      if (outcome.result?.modelRequest) dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
+      let effectsHandledEarly = false;
+      if (outcome.result?.modelRequest) {
+        if (String(outcome.result.modelRequest.task || "") === "general.appearance-edit") {
+          dialogue = await this.completeAppearanceEdit(outcome.result.modelRequest, actorAccountId, intent);
+        } else {
+          dialogue = await this.completeDialogue(outcome.result.modelRequest, actorAccountId, intent);
+        }
+      }
       // Joining is a two-phase commit: the model result is previewed and may be
       // edited or rerolled before this branch creates the player and general.
       if (intent.type === "join" && options.preparedGeneral) {
@@ -2242,28 +2596,31 @@ class OnlineWorldService {
           appearanceSetting: general.appearanceSetting,
           coreSetting: general.coreSetting,
           location: { x: effect.x, y: effect.y },
-          power: INITIAL_GENERAL_BASE_POWER,
+          power: general.power,
+          powerSeed: options.generatedGeneralPowerSeed || effect.sourceId || effect.discoveryId,
+          generated: true,
           initial: true,
           idempotencyKey: `general:confirmed:${intent.idempotencyKey}`
         }, actorAccountId, { internal: true });
       } else if (intent.type === "join") {
         throw new Error("请先确认初始将领再进入游戏");
       }
-      const changes = createPublicMapChanges(beforeWorld, this.world);
-      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity);
-      if (!options.internal && dialogue?.pendingLetter) {
-        const pendingLetter = dialogue.pendingLetter;
-        delete dialogue.pendingLetter;
-        try {
-          dialogue.commandResult = await this.sendDirect(pendingLetter.toAccountId, "general-letter", {
-            generalId: pendingLetter.generalId,
-            text: pendingLetter.text
-          }, { fromGeneralDialogue: true });
-        } catch (error) {
-          dialogue.commandError = String(error?.message || error || "书信发送失败");
-        }
+      // A confirmed discovery is a point-consuming model operation. Generate
+      // it before publishing the public delta so a failed request rolls back
+      // the removed candidate and the UI can ask before every retry.
+      if (outcome.effects.some(effect => effect.type === "general-generation-request" && effect.confirmed)) {
+        const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: false });
+        deferredEffects = handled.deferred;
+        effectsHandledEarly = true;
       }
-      if (intent.type !== "join") {
+      let farewell = null;
+      if (outcome.result?.farewellRequest && !options.internal) {
+        farewell = await this.completeFarewellLetter(outcome.result.farewellRequest, actorAccountId, intent);
+        await this.applyLocalIntent({ type: "execute-captive", generalId: intent.generalId, allowFarewell: false, idempotencyKey: `execute-after-farewell:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
+      }
+      const changes = createPublicMapChanges(beforeWorld, this.world, outcome.effects, actorAccountId);
+      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity);
+      if (intent.type !== "join" && !effectsHandledEarly) {
         const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: Boolean(mapDelta) });
         deferredEffects = handled.deferred;
       }
@@ -2275,7 +2632,7 @@ class OnlineWorldService {
         this.saveCache();
         this.notify();
       }
-      return { event: localEvent, mapDelta, effects: outcome.effects, deferredEffects, snapshotWarning, dialogue, state: this.state() };
+      return { event: localEvent, mapDelta, effects: outcome.effects, deferredEffects, snapshotWarning, dialogue, farewell, state: this.state() };
     } catch (error) {
       if (!mapDelta) {
         this.world = beforeWorld;
@@ -2315,7 +2672,7 @@ class OnlineWorldService {
     const identity = await this.getIdentity();
     let mapDelta = null;
     try {
-      mapDelta = await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world), identity);
+      mapDelta = await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world, settled.effects, this.account().accountId), identity);
       await this.handleEffects(settled.effects, identity, { deferOnFailure: Boolean(mapDelta) });
       this.saveCache();
       return settled.effects;
@@ -2351,33 +2708,19 @@ class OnlineWorldService {
   async ensureLocalPlayerContext() {
     const accountId = this.account().accountId;
     if (!this.world?.players?.[accountId] || !this.localPreferences.characterProfile) return null;
-    const current = this.localPreferences.playerContext || this.world.privatePlayers?.[accountId]?.playerContext || null;
-    if (!playerContextQualityIssue(current)) {
-      this.localPreferences.playerContext = cloneJson(current);
-      this.world.privatePlayers[accountId] ||= {};
-      this.world.privatePlayers[accountId].playerContext = cloneJson(current);
-      return current;
-    }
-    const parsed = await this.requestStructuredModel(
-      buildPlayerProfileContextRequest(this.localPreferences.characterProfile, `player-context-repair:${crypto.randomUUID()}`),
-      { attempts: 3, label: "玩家角色设定修复", validate: playerContextQualityIssue }
-    );
-    const repaired = {
-      displayName: this.localPreferences.characterProfile.displayName,
-      personaSummary: String(parsed.personaSummary).trim(),
-      appearanceSummary: String(parsed.appearanceSummary).trim(),
-      speechStyle: String(parsed.speechStyle).trim(),
-      relationshipApproach: String(parsed.relationshipApproach).trim()
-    };
-    this.localPreferences.playerContext = repaired;
+    const context = playerContextFromProfile(this.localPreferences.characterProfile);
+    this.localPreferences.playerContext = context;
     this.world.privatePlayers[accountId] ||= {};
-    this.world.privatePlayers[accountId].playerContext = cloneJson(repaired);
+    this.world.privatePlayers[accountId].playerContext = cloneJson(context);
     this.saveCache();
     this.notify();
-    return repaired;
+    return context;
   }
 
-  async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null } = {}) {
+  async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null, manualRetry = false } = {}) {
+    const attemptLimit = manualRetry ? 1 : Math.max(1, Number(attempts) || 1);
+    const taskKey = String(request?.task || "model").replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "").toUpperCase() || "MODEL";
+    const errorCode = `MODEL_${taskKey}_001`;
     const oneAttempt = async ({ attempt = 1, signal } = {}) => {
       let usageRecorded = false;
       try {
@@ -2401,20 +2744,35 @@ class OnlineWorldService {
         throw error;
       }
     };
-    if (this.runModelTask) return this.runModelTask(label, oneAttempt);
-    // Standalone transport fixtures may opt into a bounded retry policy. The
-    // desktop injects the shared, cancellable unlimited model router above.
+    let structuredAttempts = 0;
+    if (this.runModelTask) return this.runModelTask(label, async context => {
+      structuredAttempts += 1;
+      try {
+        return await oneAttempt({ ...context, attempt: structuredAttempts });
+      } catch (error) {
+        if (structuredAttempts < attemptLimit) throw error;
+        const terminal = new Error(`${label}未返回有效结构化结果：${error?.message || String(error)}`, { cause: error });
+        terminal.retryable = Boolean(manualRetry);
+        terminal.errorCode = errorCode;
+        terminal.userMessage = `${label}生成失败`;
+        throw terminal;
+      }
+    }, manualRetry ? { maxAttempts: 1 } : {});
     const run = async () => {
       let lastError = null;
-      for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+      for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
         try {
           return await oneAttempt({ attempt });
         } catch (error) {
           lastError = error;
-          if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350));
+          if (attempt < attemptLimit) await new Promise(resolve => setTimeout(resolve, 350));
         }
       }
-      throw new Error(`${label}未返回有效结构化结果：${lastError?.message || String(lastError || "未知错误")}`);
+      const terminal = new Error(`${label}未返回有效结构化结果：${lastError?.message || String(lastError || "未知错误")}`);
+      terminal.retryable = Boolean(manualRetry);
+      terminal.errorCode = errorCode;
+      terminal.userMessage = `${label}生成失败`;
+      throw terminal;
     };
     const queued = this.modelRequestQueue.then(run, run);
     this.modelRequestQueue = queued.then(() => undefined, () => undefined);
@@ -2506,9 +2864,9 @@ class OnlineWorldService {
   }
 
   async administer(command = {}) {
+    if (this.pendingMigration?.workId && this.pendingMigration.workId !== this.work?.id) throw new Error("游戏服务器正在搬迁，请等待自动转入新服务器");
     if (this.syncInFlight) await this.syncInFlight;
     if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
-    if (this.status === "needs-program-update") throw new Error("请先发布游戏更新");
     if (this.intentInFlight) throw new Error("上一项行动仍在处理中，请等待完成");
     const running = this.administerNow(command);
     this.intentInFlight = running;
@@ -2589,6 +2947,8 @@ class OnlineWorldService {
         through,
         cellOrders: cloneJson(this.publicCellOrders),
         generalOrders: cloneJson(this.publicGeneralOrders),
+        marketOrders: cloneJson(this.publicMarketOrders),
+        marketSaleOrders: cloneJson(this.publicMarketSaleOrders),
         participantOrders: cloneJson(this.publicParticipantOrders),
         authorityOrders: cloneJson(this.publicAuthorityOrders),
         treasureSources: cloneJson(this.publicTreasureSources),
@@ -2663,15 +3023,22 @@ class OnlineWorldService {
     const deferred = [];
     for (const effect of effects || []) {
       if (effect.type !== "general-generation-request") continue;
+      // Battle/training discovery only creates a local candidate. The model
+      // call (and its point charge) starts after the player explicitly
+      // confirms promotion. Initial join generation remains automatic because
+      // it is already handled by the join preview/confirmation flow.
+      if (!effect.initial && !effect.confirmed) continue;
       try {
         const effectKey = this.effectKey(effect);
         const request = buildGeneralGenerationRequest(this.world, effect, effectKey);
         const parsed = await this.requestStructuredModel(request, {
           attempts: 3,
+          manualRetry: true,
           label: effect.initial ? "初始将领生成" : "将领生成",
           validate: value => generalGenerationQualityIssue(value, effect)
         });
-        const general = normalizeGeneratedGeneral(parsed, effect);
+        const seededEffect = { ...effect, generatedSeed: this.world.seed };
+        const general = normalizeGeneratedGeneral(parsed, seededEffect);
         await this.applyLocalIntent({
           type: "grant-general",
           generalId: crypto.randomUUID(),
@@ -2685,6 +3052,8 @@ class OnlineWorldService {
           coreSetting: general.coreSetting,
           location: { x: effect.x, y: effect.y },
           power: general.power,
+          powerSeed: effect.sourceId || effect.discoveryId || request.idempotencyKey,
+          generated: true,
           initial: Boolean(effect.initial),
           idempotencyKey: `general:${request.idempotencyKey}`
         }, effect.accountId, { internal: true });
@@ -2697,6 +3066,121 @@ class OnlineWorldService {
     return { completed, deferred };
   }
 
+ generalLetterRoutes(general, actorAccountId) {
+   const seen = new Set();
+    const ids = (general?.masterHistory || []).map(item => String(item.accountId || ""))
+      .filter(id => id && id !== String(actorAccountId) && !seen.has(id) && seen.add(id));
+    return ids.map((accountId, index) => ({
+      recipientKey: "former-lord-" + (index + 1),
+      accountId,
+      displayName: String(this.world?.players?.[accountId]?.displayName || this.world?.bans?.[accountId]?.displayName || "前任主公")
+    }));
+  }
+
+  async generateGeneralLetter(intent, actorAccountId) {
+    const general = this.world?.generals?.[String(intent.generalId || "")];
+    const player = this.world?.players?.[actorAccountId];
+    if (!general || !player || general.holderAccountId !== actorAccountId) throw new Error("将领当前不归本机玩家保管");
+    if (!["carried", "captured", "deployed"].includes(String(general.status || ""))) throw new Error("将领当前不可写信");
+    const routes = this.generalLetterRoutes(general, actorAccountId);
+    const targetKey = String(intent.recipientKey || "");
+    const target = routes.find(item => item.recipientKey === targetKey || item.accountId === String(intent.recipientAccountId || ""));
+    if (!target) throw new Error("书信目标不在将领经历记录中");
+    const request = buildGeneralLetterRequest(this.world, general, player, {
+      kind: String(intent.kind || "general").slice(0, 40),
+      purpose: String(intent.purpose || "向收信人说明近况").slice(0, 300),
+      guidance: String(intent.guidance || "").slice(0, 800),
+      allowedRecipients: routes.filter(item => String(intent.kind || "general") === "farewell" ? true : item.recipientKey === target.recipientKey),
+      idempotencyKey: `letter:${intent.idempotencyKey || crypto.randomUUID()}`
+    }, this.now());
+    try {
+      const parsed = await this.requestStructuredModel(request, {
+        attempts: 1,
+        manualRetry: true,
+        label: String(intent.kind || "general") === "farewell" ? "诀别信生成" : "将领书信生成",
+        validate: value => letterQualityIssue(value, {
+          allowedRecipientKeys: request.input.allowedRecipients.map(item => item.recipientKey),
+          requiredRecipientKey: String(intent.kind || "general") === "farewell" ? "" : target.recipientKey
+        })
+      });
+      const route = routes.find(item => item.recipientKey === String(parsed.recipientKey || "")) || target;
+      const sent = await this.sendDirect(route.accountId, "general-letter", {
+        generalId: general.id,
+        generalName: general.name,
+        text: String(parsed.text).trim(),
+        purpose: request.input.purpose,
+        kind: request.input.kind
+      }, { fromLetterGeneration: true });
+      this.saveCache();
+      this.notify();
+      return { letter: { recipientName: route.displayName, text: String(parsed.text).trim(), purpose: request.input.purpose, kind: request.input.kind }, direct: sent, state: this.state() };
+    } catch (error) {
+      if (error?.retryable === undefined) {
+        error.retryable = true;
+        error.errorCode ||= "MODEL_GENERAL_LETTER_001";
+        error.userMessage ||= "将领书信生成失败";
+      }
+      throw error;
+    }
+  }
+
+  async completeFarewellLetter(request, actorAccountId, intent) {
+    const general = this.world?.generals?.[String(intent.generalId || "")];
+    const player = this.world?.players?.[actorAccountId];
+    if (!general || !player) throw new Error("诀别信将领不存在");
+    const routes = Array.isArray(request?.routing?.recipients) ? request.routing.recipients : this.generalLetterRoutes(general, actorAccountId);
+    try {
+      const parsed = await this.requestStructuredModel(request, {
+        attempts: 1,
+        manualRetry: true,
+        label: "诀别信生成",
+        validate: value => letterQualityIssue(value, { allowedRecipientKeys: routes.map(item => String(item.recipientKey || "")) })
+      });
+      const route = routes.find(item => String(item.recipientKey || "") === String(parsed.recipientKey || ""));
+      if (!route) throw new Error("诀别信没有选择有效收件人");
+      const sent = await this.sendDirect(route.accountId, "general-letter", {
+        generalId: general.id,
+        generalName: general.name,
+        text: String(parsed.text).trim(),
+        purpose: String(request.input?.purpose || "诀别").slice(0, 300),
+        kind: "farewell"
+      }, { fromLetterGeneration: true });
+      return { recipientName: route.displayName, text: String(parsed.text).trim(), direct: sent };
+    } catch (error) {
+      if (error?.retryable === undefined) {
+        error.retryable = true;
+        error.errorCode ||= "MODEL_FAREWELL_LETTER_001";
+        error.userMessage ||= "诀别信生成失败";
+      }
+      throw error;
+    }
+  }
+
+  async completeAppearanceEdit(request, actorAccountId, intent) {
+    try {
+      const parsed = await this.requestStructuredModel(request, {
+        attempts: 1,
+        manualRetry: true,
+        label: "外观设定编辑",
+        validate: appearanceQualityIssue
+      });
+      const applied = await this.applyLocalIntent({
+        type: "apply-general-appearance",
+        generalId: intent.generalId,
+        appearanceSetting: parsed.appearanceSetting,
+        idempotencyKey: `appearance-applied:${intent.idempotencyKey}`
+      }, actorAccountId, { internal: true });
+      return { appearanceSetting: parsed.appearanceSetting, state: applied.state };
+    } catch (error) {
+      if (error?.retryable === undefined) {
+        error.retryable = true;
+        error.errorCode ||= "MODEL_GENERAL_APPEARANCE_001";
+        error.userMessage ||= "外观设定编辑失败";
+      }
+      throw error;
+    }
+  }
+
   async completeDialogue(request, actorAccountId, intent) {
     const general = this.world.generals?.[intent.generalId];
     const player = this.world.players?.[actorAccountId];
@@ -2704,15 +3188,14 @@ class OnlineWorldService {
     const routes = Array.isArray(request?.routing?.formerLords) ? request.routing.formerLords : [];
     const allowedRecipientKeys = routes.map(item => String(item.recipientKey || "")).filter(Boolean);
     const parsed = await this.requestStructuredModel(request, {
-      attempts: 3,
+      attempts: 2,
+      manualRetry: true,
       label: captive ? "俘虏将领互动" : "普通将领互动",
-      validate: value => dialogueQualityIssue(value, { captive, allowedRecipientKeys })
+      validate: value => combinedDialogueQualityIssue(value, { captive, allowedRecipientKeys })
     });
     const reply = compactDialogueReply(parsed.reply);
-    const memory = await this.requestStructuredModel(
-      buildGeneralMemoryUpdateRequest(this.world, general, player, { userText: intent.topic, reply, idempotencyKey: `memory:${intent.idempotencyKey}` }, this.now()),
-      { attempts: 3, label: "将领记忆整理", validate: generalMemoryQualityIssue }
-    );
+    const narration = String(parsed.narration || "").trim().slice(0, 600);
+    const memory = parsed.memoryUpdate;
     const category = memory.category;
     const summary = String(memory.summary).trim();
     const emotion = String(memory.emotion).trim();
@@ -2724,24 +3207,56 @@ class OnlineWorldService {
       topic: summary,
       userText: intent.topic,
       reply,
+      narration,
       intimacyDelta,
       memoryUpdate: { category, summary, emotion, intimacyDelta, compactMemory },
       idempotencyKey: `dialogue:${intent.idempotencyKey}`
     }, actorAccountId, { internal: true });
     const command = parsed.command && typeof parsed.command === "object" ? parsed.command : null;
     if (command?.type === "surrender" && general?.status === "captured") {
-      await this.applyLocalIntent({ type: "surrender-general", generalId: general.id, idempotencyKey: `surrender:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
+      const surrendered = await this.applyLocalIntent({ type: "surrender-general", generalId: general.id, idempotencyKey: `surrender:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
+      const proposal = surrendered?.event?.result?.letterProposal;
+      return {
+        reply, narration,
+        memory: { category, summary, emotion, intimacyDelta, compactMemory },
+        intimacyDelta,
+        command: { type: "surrender" },
+        pendingAction: proposal ? {
+          type: "letter", kind: "surrender", generalId: general.id,
+          recipientAccountId: proposal.recipientAccountId,
+          recipientName: proposal.recipientName,
+          purpose: proposal.purpose,
+          guidanceRequired: true
+        } : null
+      };
     } else if (command?.type === "send-letter") {
       const route = routes.find(item => String(item.recipientKey || "") === String(command.recipientKey || ""));
+      if (!route) throw new Error("将领书信目标不在历任主公名单中");
+      const routeDisplayName = String(route.displayName || this.world?.players?.[route.accountId]?.displayName || this.world?.bans?.[route.accountId]?.displayName || "前任主公");
       return {
         reply,
+        narration,
         memory: { category, summary, emotion, intimacyDelta, compactMemory },
         intimacyDelta,
         command: { type: "send-letter" },
-        pendingLetter: { toAccountId: String(route.accountId), generalId: general.id, text: String(command.text).trim() }
+        pendingAction: {
+          type: "letter", kind: "general", generalId: general.id,
+          recipientKey: String(route.recipientKey), recipientAccountId: String(route.accountId),
+          recipientName: routeDisplayName,
+          purpose: String(command.purpose || command.text || "向前任主公说明近况").slice(0, 300),
+          guidance: String(command.guidance || "").slice(0, 800), guidanceRequired: false
+        }
+      };
+    } else if (command?.type === "appearance-change") {
+      return {
+        reply, narration,
+        memory: { category, summary, emotion, intimacyDelta, compactMemory },
+        intimacyDelta,
+        command: { type: "appearance-change" },
+        pendingAction: { type: "appearance", generalId: general.id, note: String(command.note || "").slice(0, 1000) }
       };
     }
-    return { reply, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command ? { type: command.type } : null, commandResult: null };
+    return { reply, narration, memory: { category, summary, emotion, intimacyDelta, compactMemory }, intimacyDelta, command: command ? { type: command.type } : null, commandResult: null };
   }
 
   async findPrivateChat(accountId) {
@@ -2786,9 +3301,9 @@ class OnlineWorldService {
     const recipient = String(toAccountId || "");
     if (!recipient || recipient === sender.accountId) throw new Error("请选择另一名在线世界玩家");
     const messageType = String(type || "");
-    if (!options.fromGeneralDialogue) throw new Error("将领书信必须由互动结果触发");
+    if (!options.fromGeneralDialogue && !options.fromLetterGeneration) throw new Error("将领书信必须由互动结果触发");
     if (messageType !== "general-letter") throw new Error("书信只能由将领互动触发");
-    const text = String(payload?.text || "").trim().slice(0, 500);
+    const text = String(payload?.text || "").trim().slice(0, 1000);
     if (!text) throw new Error("消息正文不能为空");
     const general = this.world.generals?.[String(payload?.generalId || "")];
     if (!general || general.holderAccountId !== sender.accountId) throw new Error("将领当前不归本机玩家保管");
@@ -2798,7 +3313,11 @@ class OnlineWorldService {
     if (!interactable) throw new Error("将领当前不在可交互位置");
     const formerLords = new Set((general.masterHistory || []).map(item => String(item.accountId || "")).filter(id => id && id !== sender.accountId));
     if (!formerLords.has(recipient)) throw new Error("将领只能写信给记录中存在过的主公");
-    const normalizedPayload = { generalId: general.id, generalName: general.name, text };
+    const normalizedPayload = {
+      generalId: general.id, generalName: general.name, text,
+      purpose: String(payload?.purpose || "").trim().slice(0, 300),
+      kind: String(payload?.kind || "general").trim().slice(0, 40)
+    };
     const target = this.world.players[String(toAccountId)];
     if (!target?.deviceEncryptionPublicKey || !target?.commentRootId) throw new Error("接收方尚未登记通讯密钥或评论入口");
     this.consumeDirectSendBudget();
@@ -2811,6 +3330,13 @@ class OnlineWorldService {
     const chat = await this.ensurePrivateChat(toAccountId);
     const chunks = encodeCommentRecord(direct);
     for (const content of chunks) await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: chat.id, content }, timeout: 20000 }));
+    const sentItem = {
+      messageId, direction: "out", toAccountId: recipient, type: messageType,
+      payload: cloneJson(normalizedPayload), createdAt: direct.createdAt, sentAt: this.now()
+    };
+    this.directHistory.push(sentItem);
+    if (this.directHistory.length > 200) this.directHistory.splice(0, this.directHistory.length - 200);
+    this.saveCache();
     return { messageId, announced: true, sent: true, chunks: chunks.length };
   }
 
@@ -2852,9 +3378,11 @@ class OnlineWorldService {
       try {
         const context = `${this.work.id}/${this.control.seasonId}/${direct.messageId}`;
         const payload = openSealedJson(direct.box, identity.encryptionPrivateKey, context);
-        const item = { messageId: direct.messageId, fromAccountId: direct.fromAccountId, type: direct.type, payload, createdAt: direct.createdAt, receivedAt: this.now() };
+        const item = { messageId: direct.messageId, direction: "in", fromAccountId: direct.fromAccountId, type: direct.type, payload, createdAt: direct.createdAt, receivedAt: this.now() };
         this.directInbox.push(item);
         if (this.directInbox.length > 100) this.directInbox.splice(0, this.directInbox.length - 100);
+        this.directHistory.push(item);
+        if (this.directHistory.length > 200) this.directHistory.splice(0, this.directHistory.length - 200);
         this.seenDirectMessageIds.add(direct.messageId);
         received.push(item);
       } catch {}
@@ -2869,7 +3397,7 @@ class OnlineWorldService {
     const exportJson = canonicalJson(exported);
     const exportHash = sha256(Buffer.from(exportJson));
     const description = String(exported.desc || exported.descr || exported.dsc || exported.intro || exported.description || this.work.description || "");
-    const created = await this.requestConsole("/apps", { method: "POST", body: { name: this.work.name, description, icon: "", icon_background: "", mode: "chat", type: 2 }, timeout: 30000 });
+    const created = await this.requestConsole("/apps", { method: "POST", body: { name: this.work.name, description, icon: "", icon_background: "", mode: "chat", type: 1 }, timeout: 30000 });
     const newWorkId = String(created?.data?.app?.id || created?.app?.id || created?.data?.id || created?.id || "");
     if (!newWorkId) throw new Error("平台没有返回新作品编号");
     const newWorkUrl = `${this.getOrigin().replace(/\/$/, "")}/zh/explore/installed/${encodeURIComponent(newWorkId)}`;
@@ -2892,7 +3420,7 @@ class OnlineWorldService {
     } catch (error) {
       importError = String(error?.message || error || "配置导入失败");
     }
-    if (!configurationImported || !oldWorkRenamed) {
+    if (!configurationImported) {
       this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configuration: exported, configurationImported, oldWorkRenamed, requiresConfigurationImport: !configurationImported, requiresPublish: true, importError };
       this.notify();
       return { ...this.pendingMigration };
@@ -2913,7 +3441,7 @@ class OnlineWorldService {
     } catch (error) {
       this.work = oldWork;
       this.control = oldControl;
-      this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configurationImported: true, oldWorkRenamed: true, newLedgerInitialized: false, redirectPublished: false, requiresPublish: true, importError: String(error?.message || error) };
+      this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configurationImported: true, oldWorkRenamed, newLedgerInitialized: false, redirectPublished: false, requiresPublish: true, importError: String(error?.message || error) };
       this.notify();
       return { ...this.pendingMigration };
     }
@@ -2924,11 +3452,11 @@ class OnlineWorldService {
     this.work = newWork;
     this.control = newControl;
     this.mapFactsCache = null;
-    this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configurationImported: true, oldWorkRenamed: true, redirectPublished: true, requiresConfigurationImport: false, requiresPublish: true };
+    this.pendingMigration = { workId: newWorkId, url: newWorkUrl, exportSha256: exportHash, configurationImported: true, oldWorkRenamed, redirectPublished: true, requiresConfigurationImport: false, requiresPublish: true, ...(importError ? { importError } : {}) };
     this.saveCache();
     this.notify();
     return { ...this.pendingMigration };
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

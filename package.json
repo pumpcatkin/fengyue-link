@@ -1,6 +1,6 @@
 {
   "name": "fengyue-link",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "风月多人联机桌面工具",
   "author": "八爪毛米",
   "private": true,
@@ -21,6 +21,7 @@
     "verify:electron-fuses": "node scripts/verify-electron-fuses.cjs",
     "verify:release-live": "electron scripts/verify-live-release.cjs",
     "game:bundle": "node scripts/build-grid-conquest-program.cjs",
+    "shortcut:update": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/update-development-shortcuts.ps1",
     "pack:release": "npm run pack:win && npm run release:manifest"
   },
   "dependencies": {

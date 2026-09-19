@@ -45,17 +45,17 @@ if (process.type === "renderer") {
     if (name === "getAuthorInfo") return {
       name: "八爪毛米",
       links: {
-        homepage: { key: "homepage", label: "作者主页", configured: false, url: null },
+        homepage: { key: "homepage", label: "作者主页", configured: true, url: "https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd" },
         releasePost: { key: "releasePost", label: "风月发布帖", configured: false, url: null },
         feedbackPost: { key: "feedbackPost", label: "问题反馈帖", configured: false, url: null },
-        github: { key: "github", label: "GitHub 项目页", configured: true, url: "https://github.com/pumpcatkin/fengyue-link" }
+        github: { key: "github", label: "GitHub 下载页", configured: true, url: "https://github.com/pumpcatkin/fengyue-link/releases/latest" }
       }
     };
     if (name === "listDomains" || name === "listDomainCandidates") return domains;
     if (name === "getLogs") return [];
-    if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 20, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd", isCurrentUserAuthor: true }], activeCardId: null };
+    if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 26, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd", isCurrentUserAuthor: true }], activeCardId: null };
     if (name === "getOnlineWorldState") return onlineWorldFixture || { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
-    if (name === "openOnlineWorld" || name === "activateOnlineWorldProgram") return onlineWorldFixture;
+    if (name === "openOnlineWorld") return onlineWorldFixture;
     if (name === "closeOnlineWorld") return { ...onlineWorldFixture, status: "closed", syncing: false };
     if (name === "exportOnlineWorldCard") return { canceled: true };
     if (name === "setOrigin") return state;
@@ -72,12 +72,11 @@ if (process.type === "renderer") {
     try {
       await window.loadFile(path.join(root, "electron/desktop/index.html"));
       await settle();
-      assert.equal(await evaluate(`!document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
+      assert.equal(await evaluate(`document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
       assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "正在对照版本号");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
-      fs.writeFileSync(path.join(outputDir, "official-notice.png"), (await window.webContents.capturePage()).toPNG());
-      await evaluate(`document.querySelector('#official-notice-action').click()`);
-      assert.equal(await evaluate(`document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
+      assert.equal(await evaluate(`!document.querySelector('#home-page').classList.contains('hidden')`), true);
+      fs.writeFileSync(path.join(outputDir, "startup-login-ready.png"), (await window.webContents.capturePage()).toPNG());
       window.webContents.send("qa:onState", { ...state, modelOperations: [{ id: "model-qa", label: "将领交互", stage: "waiting", model: "deepseek-v4.1-flash", attempt: 8, retryAfterMs: 2000, points: 12 }] });
       await settle();
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('#model-loading')).display`), "flex");
@@ -92,18 +91,21 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('#model-loading')).display`), "none");
       assert.equal(await evaluate(`document.querySelector('#author-name').textContent`), "八爪毛米");
       assert.equal(await evaluate(`document.querySelector('[data-author-link="github"]').disabled`), false);
-      assert.equal(await evaluate(`document.querySelector('[data-author-link="homepage"]').disabled`), true);
+      assert.equal(await evaluate(`document.querySelector('[data-author-link="homepage"]').disabled`), false);
       await evaluate(`document.querySelector('[data-author-link="github"]').click()`);
       assert(calls.some(call => call.name === "openAuthorLink" && call.args[0] === "github"));
       assert.equal(await evaluate(`document.querySelector('#enter-multiplayer').nextElementSibling.id`), "enter-online-world");
       assert.equal(await evaluate(`document.querySelector('#enter-online-world').nextElementSibling.id`), "edit-profiles");
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').getAttribute('sandbox')`), "allow-scripts");
+      assert.equal(await evaluate(`document.querySelector('#online-world-frame').getAttribute('allow')`), "autoplay");
       await evaluate(`document.querySelector('#enter-online-world').click()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-page').classList.contains('hidden')`), true);
       assert.equal(await evaluate(`document.querySelector('.online-world-library-head h1').textContent`), "游戏库");
       assert.equal(await evaluate(`document.querySelectorAll('.online-world-card-tile').length`), 1);
-      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-library-grid')).gridTemplateColumns.split(' ').length`), 5);
+      assert.equal(await evaluate(`document.querySelectorAll('.online-world-library-list-item').length`), 1);
+      assert.equal(await evaluate(`document.querySelector('#online-world-featured-title').textContent`), "猎艳疆土");
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-library-grid')).gridTemplateColumns.split(' ').length >= 4`), true);
       assert.equal(await evaluate(`document.querySelector('#online-world-detail').classList.contains('hidden')`), true);
       assert.equal(await evaluate(`document.querySelector('#online-world-export-card')`), null);
       assert.equal(await evaluate(`document.querySelectorAll('.online-world-author-badge').length`), 1);
@@ -131,7 +133,7 @@ if (process.type === "renderer") {
       const gameDirectory = path.join(root, "electron/desktop/online-world/grid-conquest");
       const javascript = `${fs.readFileSync(path.join(gameDirectory, "acg-tags.js"), "utf8")}\n${fs.readFileSync(path.join(gameDirectory, "game.js"), "utf8")}`;
       const programHtml = runtime.injectSandboxCsp(runtime.composeSingleFileProgram(fs.readFileSync(path.join(gameDirectory, "index.html"), "utf8"), fs.readFileSync(path.join(gameDirectory, "styles.css"), "utf8"), javascript));
-      window.webContents.send("qa:onOnlineWorldState", { status: "ready", initialized: true, isAuthor: true, isServerOwner: true, revision: 1, card: { cardId: "cc.aiero.fyow.grid-conquest.official", title: "猎艳疆土" }, work: { id: "fixture", name: "猎艳疆土[b27218e680f94c0d]" }, control: { seasonId: "fixture-season" }, account: { accountId: "a", username: "本地测试", points: "1876" }, world: { seed: "fixture", startedAt: Date.now(), revision: 1, bans: {}, playerEpochs: {}, cells: { "4,7": { ownerAccountId: "a", soldiers: 80, generalIds: [] }, "5,7": { ownerAccountId: "b", soldiers: 60, generalIds: [] } }, players: { a: { accountId: "a", displayName: "本地测试", accountName: "本地测试", position: { x: 4, y: 7 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1"] }, b: { accountId: "b", displayName: "北境玩家", accountName: "north@example" } }, generals: { g1: { id: "g1", name: "青禾", power: 500, holderAccountId: "a", loyalToAccountId: "b", capturedFromAccountId: "b", status: "carried", setting: "善守城，重信义。", masterHistory: [{ accountId: "b", fromYear: 1, toYear: 2 }], captivityHistory: [], interactionHistory: [], memoryText: "言谈：暂无\n经历：[1年]战败被俘" } }, jobs: {} }, directInbox: [{ messageId: "dm1", fromAccountId: "b", type: "general-letter", payload: { generalName: "青禾", text: "愿暂息兵戈，共商边界。" }, createdAt: Date.now() }], modelUsageEvents: [{ id: 1, task: "general.generate", label: "初始将领生成", attempt: 1, status: "completed", points: { input: 5, output: 19, total: 24, source: "model-response" }, remainingPoints: "1876", completedAt: Date.now() }], mapFacts, serverNow: Date.now(), program: { source: "card-package", digest: "fixture-card-loaded" }, programHtml });
+      window.webContents.send("qa:onOnlineWorldState", { status: "ready", initialized: true, isAuthor: true, isServerOwner: true, revision: 1, card: { cardId: "cc.aiero.fyow.grid-conquest.official", title: "猎艳疆土" }, work: { id: "fixture", name: "猎艳疆土[b27218e680f94c0d]" }, control: { seasonId: "fixture-season" }, account: { accountId: "a", username: "本地测试", points: "1876" }, world: { seed: "fixture", startedAt: Date.now(), revision: 1, bans: {}, playerEpochs: {}, cells: { "4,7": { ownerAccountId: "a", soldiers: 80, generalIds: [] }, "5,7": { ownerAccountId: "b", soldiers: 60, generalIds: [] } }, players: { a: { accountId: "a", displayName: "本地测试", accountName: "本地测试", position: { x: 4, y: 7 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1", "g2", "g3"] }, b: { accountId: "b", displayName: "北境玩家", accountName: "north@example" } }, generals: { g1: { id: "g1", name: "青禾", power: 500, holderAccountId: "a", loyalToAccountId: "b", capturedFromAccountId: "b", status: "carried", setting: "善守城，重信义。", masterHistory: [{ accountId: "b", fromYear: 1, toYear: 2 }], captivityHistory: [], interactionHistory: [], memoryText: "言谈：暂无\n经历：[1年]战败被俘" }, g2: { id: "g2", name: "长风", power: 470, holderAccountId: "a", loyalToAccountId: "a", status: "carried", setting: "乐观果断，精于奔袭。", masterHistory: [], captivityHistory: [], interactionHistory: [], memoryText: "" }, g3: { id: "g3", name: "照雪", power: 460, holderAccountId: "a", loyalToAccountId: "a", status: "carried", setting: "沉静敏锐，善察地势。", masterHistory: [], captivityHistory: [], interactionHistory: [], memoryText: "" } }, jobs: {} }, directInbox: [{ messageId: "dm1", fromAccountId: "b", type: "general-letter", payload: { generalName: "青禾", text: "愿暂息兵戈，共商边界。" }, createdAt: Date.now() }], modelUsageEvents: [{ id: 1, task: "general.generate", label: "初始将领生成", attempt: 1, status: "completed", points: { input: 5, output: 19, total: 24, source: "model-response" }, remainingPoints: "1876", completedAt: Date.now() }], mapFacts, serverNow: Date.now(), program: { source: "card-package", digest: "fixture-card-loaded" }, programHtml });
       await settle();
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true, "background updates unexpectedly navigated away from the library");
       onlineWorldFixture = await evaluate(`onlineWorldState`);
@@ -146,17 +148,13 @@ if (process.type === "renderer") {
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').classList.contains('hidden')`), false);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-social').getAttribute('aria-expanded')`), "false");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#social-sidebar').inert`), true);
-      window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, status: "needs-program-update", programUpdateAvailable: true });
+      window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, status: "ready", program: { source: "work-description", digest: "fixture-description" } });
       await settle();
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-open-server').disabled`), true);
-      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), false);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), true);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').click()`);
       await settle();
-      fs.writeFileSync(path.join(outputDir, "owner-publish-program.png"), (await window.webContents.capturePage()).toPNG());
-      await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-publish-program').click()`);
-      await settle();
-      assert(calls.some(call => call.name === "activateOnlineWorldProgram"));
-      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), true);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-publish-program')`), null);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#close-owner-command').click()`);
       window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, syncing: true, revision: 99, isAuthor: false, isServerOwner: false });
       await settle();
@@ -165,10 +163,61 @@ if (process.type === "renderer") {
       window.webContents.send("qa:onOnlineWorldState", onlineWorldFixture);
       await settle();
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#points-balance-value').textContent`), "1,876");
+      const soundControlQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const knob=document.querySelector('#sound-knob'); const inner=knob.querySelector('i');
+        const outerRect=knob.getBoundingClientRect(); const innerRect=inner.getBoundingClientRect();
+        setSoundVolume(60,{persist:false});
+        knob.dispatchEvent(new PointerEvent('pointerdown',{pointerId:31,clientX:outerRect.left+12,clientY:outerRect.top+12,bubbles:true}));
+        knob.dispatchEvent(new PointerEvent('pointermove',{pointerId:31,clientX:outerRect.right-1,clientY:outerRect.bottom-1,bubbles:true}));
+        knob.dispatchEvent(new PointerEvent('pointerup',{pointerId:31,clientX:outerRect.right-1,clientY:outerRect.bottom-1,bubbles:true}));
+        return {outer:[outerRect.width,outerRect.height],inner:[innerRect.width,innerRect.height],percent:document.querySelector('#sound-volume-label').textContent,value:knob.getAttribute('aria-valuenow')};
+      })()`);
+      assert.deepEqual(soundControlQa.outer, [24, 24]);
+      assert(soundControlQa.inner[0] >= 14 && soundControlQa.inner[1] >= 14, `sound knob inner disc collapsed: ${JSON.stringify(soundControlQa)}`);
+      assert.equal(soundControlQa.percent, '音效 100%', 'dragging the sound knob did not reach full volume');
+      assert.equal(soundControlQa.value, '100');
+      await settle();
+      assert.equal(await embeddedGameFrame.executeJavaScript(`audioContext?.state`), "running", "game audio context did not unlock after a pointer gesture");
+      const soundClickQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const knob=document.querySelector('#sound-knob'); suppressSoundKnobClick=false;
+        setSoundVolume(90,{persist:false}); knob.click(); const first=knob.getAttribute('aria-valuenow');
+        knob.click(); const second=knob.getAttribute('aria-valuenow');
+        knob.click(); const third=knob.getAttribute('aria-valuenow');
+        return [first,second,third];
+      })()`);
+      assert.deepEqual(soundClickQa, ['100','0','10'], 'sound knob click should add ten percent and wrap after 100');
+      const ordinaryButtonSoundQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        setSoundVolume(60,{persist:false});
+        const original=audioTone; const tones=[];
+        audioTone=(context,frequency,...rest)=>{tones.push(frequency);};
+        document.querySelector('#center-player').dispatchEvent(new PointerEvent('pointerdown',{pointerId:44,bubbles:true}));
+        audioTone=original;
+        return tones;
+      })()`);
+      assert.deepEqual(ordinaryButtonSoundQa, [430], 'ordinary button pointerdown did not schedule its click sound');
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('−24 积分')`), true);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#model-usage-log').textContent.includes('剩余 1,876')`), true);
       assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#general-profile-name')).fontSize`), '15px');
       assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#general-core-setting')).fontSize`), '13px');
+      const marketUi = await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#market-open').click();
+        const entry = document.querySelector('#market-open').textContent;
+        const countLabel = document.querySelector('#market-total-label').textContent;
+        document.querySelector('#market-sell-open').click();
+        const select = document.querySelector('#market-sell-general');
+        const options = [...select.options].map(option => ({ value: option.value, disabled: option.disabled }));
+        document.querySelector('#market-sell-price').value = '1234';
+        document.querySelector('#market-sell-note').value = '善守城，愿寻识才之主。';
+        document.querySelector('#market-sell-submit').click();
+        return { entry, countLabel, options, sheetClosed: document.querySelector('#market-sell-sheet').classList.contains('hidden') };
+      })()`);
+      assert(marketUi.entry.includes('在售数量'), 'market entry is missing the listing count label');
+      assert.equal(marketUi.countLabel, '当前在售 0 名');
+      assert(marketUi.options.some(option => option.value === 'g1' && !option.disabled), 'market sell dialog did not offer a carried general');
+      assert.equal(marketUi.sheetClosed, true, `market sell dialog did not close after dispatch: ${JSON.stringify(marketUi)}`);
+      await settle();
+      assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'list-general' && call.args[0]?.sellerIntro === '善守城，愿寻识才之主。'), `market listing did not carry seller introduction: ${JSON.stringify(calls.filter(call => call.name === 'submitOnlineWorldIntent').slice(-3))}`);
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#market-close').click()`);
       const dialogueClick = await embeddedGameFrame.executeJavaScript(`(() => {
         window.__dialogueClickErrors = [];
         window.addEventListener('error', event => window.__dialogueClickErrors.push(event.message));
@@ -180,7 +229,8 @@ if (process.type === "renderer") {
       })()`);
       assert.deepEqual(dialogueClick.errors, []);
       assert.equal(dialogueClick.input, '', 'general dialogue send button did not clear the draft');
-      assert(dialogueClick.history.includes('本地测试：你好'), 'general dialogue send button did not show the outgoing message');
+      assert(dialogueClick.history.includes('你好'), 'general dialogue send button did not show the outgoing message');
+      assert(!dialogueClick.history.includes('本地测试：你好'), 'general dialogue still prefixes the outgoing user name');
       assert.equal(dialogueClick.dialogueRequests, 1, 'general dialogue send button did not dispatch a request');
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-social').getAttribute('aria-expanded')`), "true");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#social-sidebar').inert`), false);
@@ -221,7 +271,7 @@ if (process.type === "renderer") {
         document.querySelector('#general-modal').classList.add('hidden');
         const now = hostTime();
         payload.world.jobs = {
-          mining: { id:'mining', type:'mining', accountId:'a', x:4, y:7, auto:true, lastSettledAt:now, cycleMs:60000, yieldPerCycle:125 },
+          mining: { id:'mining', type:'mining', accountId:'a', x:4, y:7, auto:false, startedAt:now, lastSettledAt:now, finishAt:now+600000, cycleMs:600000, yieldPerCycle:125 },
           training: { id:'training', type:'training', accountId:'a', x:4, y:7, amount:40, finishAt:now+120000 },
           marching: { id:'marching', type:'march', accountId:'a', from:{x:4,y:7}, to:{x:10,y:10}, finishAt:now+540000, soldiers:30, generalIds:['g1'] }
         };
@@ -243,7 +293,7 @@ if (process.type === "renderer") {
       })()`);
       const mineTip = await hoverTask(4.2, 7.2);
       assert.equal(mineTip.hidden, false);
-      assert(mineTip.text.includes("采矿") && mineTip.text.includes("125 金币") && mineTip.text.includes("本轮剩余"));
+      assert(mineTip.text.includes("开采资源") && mineTip.text.includes("125 金币") && mineTip.text.includes("本轮剩余"));
       assert(mineTip.left >= 0 && mineTip.right <= mineTip.width);
       await settle();
       fs.writeFileSync(path.join(outputDir, "map-task-mining.png"), (await window.webContents.capturePage()).toPNG());
@@ -252,29 +302,189 @@ if (process.type === "renderer") {
       assert(trainingTip.text.includes("练兵") && trainingTip.text.includes("40 士兵") && trainingTip.text.includes("剩余"));
       await settle();
       fs.writeFileSync(path.join(outputDir, "map-task-training.png"), (await window.webContents.capturePage()).toPNG());
-      const marchTip = await hoverTask(8, 7.5);
+      const marchTip = await hoverTask(8, 8.5);
       assert.equal(marchTip.hidden, false);
       assert(marchTip.text.includes("起点 (4, 7) → 目标 (10, 10)") && marchTip.text.includes("剩余"));
+      const activeMarchUiQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        renderCell();
+        return {
+          count:document.querySelector('#current-march-army').textContent,
+          transferHidden:document.querySelector('#map-army-transfer').classList.contains('hidden')
+        };
+      })()`);
+      assert.deepEqual(activeMarchUiQa, { count:'行军队伍 30 人', transferHidden:true }, '在途兵力或行军期间的调兵面板状态错误');
       await settle();
       fs.writeFileSync(path.join(outputDir, "map-task-march.png"), (await window.webContents.capturePage()).toPNG());
-      await embeddedGameFrame.executeJavaScript(`delete payload.world.jobs.marching; draw()`);
-      const previewTip = await hoverTask(8, 7.5);
+      await embeddedGameFrame.executeJavaScript(`delete payload.world.jobs.marching; payload.world.players.a.fieldArmySoldiers=30; payload.world.players.a.gold=1000; marchQuoteCache=null; draw()`);
+      const previewTip = await hoverTask(8, 8.5);
       assert(previewTip.text.includes("行军路线预览") && previewTip.text.includes("预计耗时：4分30秒"));
-      assert(previewTip.text.includes("预计消耗：90 金币") && !previewTip.text.includes("金币不足"));
+      assert(!previewTip.text.includes("预计消耗") && !previewTip.text.includes("金币不足"));
       const layoutQa = await embeddedGameFrame.executeJavaScript(`(() => {
         renderCell(); switchSocialTab('world');
         const area = document.querySelector('#selected-area').getBoundingClientRect();
         const map = document.querySelector('.map-card').getBoundingClientRect();
+        const actions = document.querySelector('#map-region-actions').getBoundingClientRect();
+        const transfer = document.querySelector('#map-army-transfer').getBoundingClientRect();
         const sidebar = document.querySelector('aside').getBoundingClientRect();
-        return { width:area.width, mapWidth:map.width, top:area.top, mapBottom:map.bottom, right:area.right, sidebarLeft:sidebar.left, title:document.querySelector('#selected-area').textContent, returnTop:document.querySelector('#return-library').getBoundingClientRect().top };
+        return {
+          width:area.width,
+          mapWidth:map.width,
+          top:area.top,
+          mapBottom:map.bottom,
+          right:area.right,
+          sidebarLeft:sidebar.left,
+          title:document.querySelector('#selected-area').textContent,
+          returnTop:document.querySelector('#return-library').getBoundingClientRect().top,
+          actionsHidden:document.querySelector('#map-region-actions').classList.contains('hidden'),
+          territoryHidden:document.querySelector('#territory-actions').classList.contains('hidden'),
+          actionsLeft:actions.left,
+          actionsTop:actions.top,
+          mapLeft:map.left,
+          mapTop:map.top,
+          mapRight:map.right,
+          transferHidden:document.querySelector('#map-army-transfer').classList.contains('hidden'),
+          transferTop:transfer.top,
+          transferRight:transfer.right,
+          transferParent:document.querySelector('#map-army-transfer').parentElement.className,
+          currentMarchArmy:document.querySelector('#current-march-army').textContent,
+          floatingParty:document.querySelector('#march-party-panel')
+        };
       })()`);
       assert(Math.abs(layoutQa.width - layoutQa.mapWidth) < 2 && layoutQa.top > layoutQa.mapBottom && layoutQa.right < layoutQa.sidebarLeft);
       assert(layoutQa.title.includes("选中的区域") && layoutQa.returnTop < 50);
+      assert.equal(layoutQa.actionsHidden, false);
+      assert.equal(layoutQa.territoryHidden, true);
+      assert.equal(layoutQa.floatingParty, null, '地图右上角仍存在行军队伍面板');
+      assert(Math.abs(layoutQa.actionsLeft - layoutQa.mapLeft) < 6 && Math.abs(layoutQa.actionsTop - layoutQa.mapTop) < 6);
+      assert.equal(layoutQa.transferHidden, false, '玩家位于自己的领地时没有显示驻军调度面板');
+      assert.equal(layoutQa.transferParent, 'map-card', '驻军调度面板不在地图容器内');
+      assert(Math.abs(layoutQa.transferRight - layoutQa.mapRight) < 6 && Math.abs(layoutQa.transferTop - layoutQa.mapTop) < 6, `驻军调度面板没有固定在地图右上角：${JSON.stringify(layoutQa)}`);
+      assert.equal(layoutQa.currentMarchArmy, '行军队伍 30 人');
+      const foreignPositionTransferQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        payload.world.players.a.position={x:5,y:7}; renderCell();
+        const hidden=document.querySelector('#map-army-transfer').classList.contains('hidden');
+        payload.world.players.a.position={x:4,y:7}; renderCell();
+        return hidden;
+      })()`);
+      assert.equal(foreignPositionTransferQa, true, '玩家位于他人领地时仍显示驻军调度面板');
+      const marchDialogQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#march').click();
+        marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation();
+        const slot=document.querySelector('#march-army-transfer-slot');
+        const transfer=document.querySelector('#map-army-transfer');
+        return {
+          visible:!document.querySelector('#march-confirmation').classList.contains('hidden'),
+          route:document.querySelector('#march-confirmation-route').textContent,
+          count:document.querySelector('#march-party-count').textContent,
+          cost:document.querySelector('#march-party-cost').textContent,
+          transferInDialog:document.querySelector('#march-confirmation #army-transfer-amount') !== null,
+          transferHidden:transfer.classList.contains('hidden'),
+          transferParent:transfer.parentElement.id,
+          slotHidden:slot.classList.contains('hidden'),
+          slotAriaHidden:slot.getAttribute('aria-hidden'),
+          submitDisabled:document.querySelector('#march-confirmation-submit').disabled
+        };
+      })()`);
+      assert.deepEqual(marchDialogQa, { visible:true, route:'(4, 7) → (10, 10) · 9 格', count:'30 人', cost:'90 金币', transferInDialog:true, transferHidden:false, transferParent:'march-army-transfer-slot', slotHidden:false, slotAriaHidden:'false', submitDisabled:false });
+      fs.writeFileSync(path.join(outputDir, "march-confirmation.png"), (await window.webContents.capturePage()).toPNG());
+      const foreignMarchDialogQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        payload.world.players.a.position={x:5,y:7}; renderCell(); renderMarchConfirmation();
+        const slot=document.querySelector('#march-army-transfer-slot');
+        const transfer=document.querySelector('#map-army-transfer');
+        const foreign={
+          transferHidden:transfer.classList.contains('hidden'),
+          transferInDialog:document.querySelector('#march-confirmation #army-transfer-amount') !== null,
+          slotHidden:slot.classList.contains('hidden'),
+          slotAriaHidden:slot.getAttribute('aria-hidden')
+        };
+        payload.world.players.a.position={x:4,y:7};
+        marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000};
+        renderCell(); renderMarchConfirmation();
+        return foreign;
+      })()`);
+      assert.deepEqual(foreignMarchDialogQa, { transferHidden:true, transferInDialog:false, slotHidden:true, slotAriaHidden:'true' }, '玩家脚下不是自有领地时，行军弹窗仍显示驻军调度');
+      const restoredMapTransferQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        closeMarchConfirmation();
+        const slot=document.querySelector('#march-army-transfer-slot');
+        const transfer=document.querySelector('#map-army-transfer');
+        const restored={
+          dialogHidden:document.querySelector('#march-confirmation').classList.contains('hidden'),
+          transferHidden:transfer.classList.contains('hidden'),
+          transferParent:transfer.parentElement.className,
+          slotHidden:slot.classList.contains('hidden')
+        };
+        document.querySelector('#march').click();
+        marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation();
+        return restored;
+      })()`);
+      assert.deepEqual(restoredMapTransferQa, { dialogHidden:true, transferHidden:false, transferParent:'map-card', slotHidden:true }, '关闭行军弹窗后驻军调度没有回到地图右上角');
+      const quoteFailureQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        marchQuoteFailureKey=marchQuoteKey(); marchQuoteCache=null; renderMarchConfirmation();
+        const failed={retryVisible:!document.querySelector('#march-quote-retry').classList.contains('hidden'),submitDisabled:document.querySelector('#march-confirmation-submit').disabled,note:document.querySelector('#march-confirmation-note').textContent};
+        document.querySelector('#march-quote-retry').click(); clearTimeout(marchQuoteTimer);
+        return {...failed,retryCleared:marchQuoteFailureKey==='' };
+      })()`);
+      assert.equal(quoteFailureQa.retryVisible, true);
+      assert.equal(quoteFailureQa.submitDisabled, true);
+      assert(quoteFailureQa.note.includes('重新核算'));
+      assert.equal(quoteFailureQa.retryCleared, true);
+      const transferPendingQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000};
+        pendingHostKeys.set('intent:gather-march','qa-transfer'); renderCell(); renderMarchConfirmation();
+        const value={submitDisabled:document.querySelector('#march-confirmation-submit').disabled,inputDisabled:document.querySelector('#army-transfer-amount').disabled,panelHidden:document.querySelector('#map-army-transfer').classList.contains('hidden'),note:document.querySelector('#march-confirmation-note').textContent};
+        pendingHostKeys.delete('intent:gather-march'); renderCell(); renderMarchConfirmation(); return value;
+      })()`);
+      assert.deepEqual(transferPendingQa, { submitDisabled:true, inputDisabled:true, panelHidden:false, note:'正在同步调兵结果，请稍候。' });
+      const transferCallsBefore = calls.filter(call => call.name === 'submitOnlineWorldIntent' && ['gather-march','deploy-soldiers'].includes(call.args[0]?.type)).length;
+      const negativeTransferQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const input=document.querySelector('#army-transfer-amount');
+        input.value=''; input.dispatchEvent(new Event('input',{bubbles:true}));
+        const emptyValue=input.value;
+        input.value='-17'; input.dispatchEvent(new Event('input',{bubbles:true}));
+        const confirm=document.querySelector('#army-transfer-confirm');
+        return {emptyValue,value:input.value,draft:armyTransferDraft,confirmDisabled:confirm.disabled,awaiting:confirm.classList.contains('awaiting-confirmation'),hintHidden:document.querySelector('#army-transfer-confirm-hint').classList.contains('hidden')};
+      })()`);
+      assert.deepEqual(negativeTransferQa, { emptyValue:'', value:'-17', draft:-17, confirmDisabled:false, awaiting:true, hintHidden:false });
+      assert.equal(calls.filter(call => call.name === 'submitOnlineWorldIntent' && ['gather-march','deploy-soldiers'].includes(call.args[0]?.type)).length, transferCallsBefore, '输入调兵数字时不应立即生效');
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#army-transfer-confirm').click()`);
+      await settle();
+      assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'deploy-soldiers' && call.args[0]?.amount === 17), '确认负数调兵后未提交部署行动');
       const marchCallsBefore = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').length;
-      await embeddedGameFrame.executeJavaScript(`payload.world.players.a.gold = 0; document.querySelector('#march').click()`);
+      await embeddedGameFrame.executeJavaScript(`payload.world.players.a.gold = 0; payload.world.players.a.fieldArmySoldiers = 30; marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation()`);
       await settle();
       assert.equal(calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').length, marchCallsBefore);
-      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#map-floating-feedback').textContent`), "金币不足");
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#march-confirmation-note').textContent.includes('金币不足')`), true);
+      await embeddedGameFrame.executeJavaScript(`payload.world.players.a.gold = 1000; marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation(); document.querySelector('#march-confirmation-submit').click()`);
+      await settle();
+      assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march' && call.args[0]?.soldiers === 30 && call.args[0]?.to?.x === 10 && call.args[0]?.to?.y === 10), '确认弹窗未提交行军行动');
+      await embeddedGameFrame.executeJavaScript(`closeMarchConfirmation()`);
+      const zeroArmyCallsBefore = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').length;
+      const zeroArmyConfirmQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId);
+        marchSubmitting=false; payload.world.players.a.fieldArmySoldiers=0; selected={x:10,y:10}; openMarchConfirmation();
+        marchQuoteCache={requestKey:marchQuoteKey(),cost:63,durationMs:270000}; renderMarchConfirmation();
+        document.querySelector('#march-confirmation-submit').click();
+        return {
+          visible:!document.querySelector('#zero-army-march-confirmation').classList.contains('hidden'),
+          text:document.querySelector('#zero-army-march-confirmation').textContent,
+          mainVisible:!document.querySelector('#march-confirmation').classList.contains('hidden')
+        };
+      })()`);
+      assert.equal(zeroArmyConfirmQa.visible, true, '零兵行军没有出现二次确认');
+      assert.equal(zeroArmyConfirmQa.mainVisible, true);
+      assert(zeroArmyConfirmQa.text.includes('您目前行军队伍中没有士兵，是否开始行军？'));
+      assert.equal(calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').length, zeroArmyCallsBefore, '零兵二次确认前已经提交行军');
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#zero-army-march-confirm').click()`);
+      await settle();
+      const zeroArmyMarchCalls = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').slice(zeroArmyCallsBefore);
+      assert(zeroArmyMarchCalls.some(call => call.args[0]?.soldiers === 0 && call.args[0]?.to?.x === 10 && call.args[0]?.to?.y === 10), '确认后没有提交零兵行军');
+      await embeddedGameFrame.executeJavaScript(`for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId); closeMarchConfirmation(); payload.world.players.a.fieldArmySoldiers=30; selected={x:10,y:10}; renderCell()`);
+      const neutralUnderfootQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const owned=payload.world.cells['4,7']; delete payload.world.cells['4,7']; selected={x:4,y:7}; openMarchConfirmation();
+        const value={attackHidden:document.querySelector('#march-attack-field').classList.contains('hidden'),cost:document.querySelector('#march-party-cost').textContent,duration:document.querySelector('#march-party-duration').textContent,submitText:document.querySelector('#march-confirmation-submit').textContent,submitDisabled:document.querySelector('#march-confirmation-submit').disabled};
+        closeMarchConfirmation(); payload.world.cells['4,7']=owned; selected={x:10,y:10}; renderCell(); return value;
+      })()`);
+      assert.deepEqual(neutralUnderfootQa, { attackHidden:true, cost:'0 金币', duration:'立即结算', submitText:'确认攻打', submitDisabled:false });
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-selected-area').click()`);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-selected-area').getAttribute('aria-expanded')`), "false");
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-selected-area').click(); confirmDeploy('g1')`);
@@ -283,7 +493,140 @@ if (process.type === "renderer") {
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#deploy-confirmation-text').textContent`), "是否将青禾部署到此处？");
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#deploy-cancel').click(); payload.worldChat=[{messageId:'qa-chat',accountId:'b',displayName:'北境玩家',text:'共守边疆',createdAt:Date.now()}];renderWorldChat()`);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#world-chat-messages').textContent.includes('共守边疆')`), true);
+      const worldChatClick = await embeddedGameFrame.executeJavaScript(`(() => {
+        const input = document.querySelector('#world-chat-input');
+        input.value = '世界测试';
+        document.querySelector('#world-chat-send').click();
+        return { value: input.value, pending: document.querySelector('#world-chat-send').disabled };
+      })()`);
+      assert.equal(worldChatClick.value, '', `world chat send button did not clear the draft: ${JSON.stringify(worldChatClick)}`);
+      assert.equal(worldChatClick.pending, true, 'world chat send button did not enter pending state');
+      await settle();
+      assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'world-chat' && call.args[0]?.text === '世界测试'), 'world chat send button did not reach the host');
+      assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#map-viewport')).scrollbarWidth`), 'none', 'map scrollbar rail is still visible');
+      const lettersQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        payload.directInbox = [];
+        payload.directHistory = [
+          { messageId:'qa-in-letter', fromAccountId:'b', createdAt:Date.now(), payload:{ generalName:'青禾', purpose:'报平安', text:'边境已经安稳。' } },
+          { messageId:'qa-out-letter', direction:'out', toAccountId:'b', createdAt:Date.now(), payload:{ generalName:'青禾', text:'请继续留意北境。' } }
+        ];
+        renderInbox();
+        const received = document.querySelector('#direct-inbox');
+        const sent = document.querySelector('#direct-outbox');
+        const before = document.querySelector('#letter-detail-modal').classList.contains('hidden');
+        received.firstElementChild.click();
+        updateCommunicationNotifications(payload, false);
+        for (const category of Object.keys(communicationSeen)) communicationSeen[category] = new Set(communicationSnapshot(payload)[category]);
+        communicationUnread.world = 0; communicationUnread.generals = 0; communicationUnread.letters = 0; renderCommunicationBadges();
+        return { total:document.querySelector('#direct-count').textContent, received:received.children.length, sent:sent.children.length, before, title:document.querySelector('#letter-detail-title').textContent, text:document.querySelector('#letter-detail-text').textContent };
+      })()`);
+      assert.deepEqual(lettersQa, { total:'2', received:1, sent:1, before:true, title:'报平安', text:'边境已经安稳。' });
+      fs.writeFileSync(path.join(outputDir, "letters-detail.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#letter-detail-close').click(); setSocialOpen(false); applyHostedState({...payload, worldChat:[...payload.worldChat,{messageId:'qa-chat-new',accountId:'b',displayName:'北境玩家',text:'新的边境消息',createdAt:Date.now()}], directInbox:[...payload.directInbox,{messageId:'qa-inbox-new',fromAccountId:'b',payload:{generalName:'青禾',text:'又有一封信。'},createdAt:Date.now()}], serverNow:Date.now()}, true); renderCommunicationBadges()`);
+      const unreadQa = await embeddedGameFrame.executeJavaScript(`({ dock:document.querySelector('#social-unread-badge').textContent, world:document.querySelector('[data-social-badge="world"]').textContent, letters:document.querySelector('[data-social-badge="letters"]').textContent })`);
+      assert.deepEqual(unreadQa, { dock:'2', world:'1', letters:'1' });
+      await embeddedGameFrame.executeJavaScript(`setSocialOpen(true); switchSocialTab('letters')`);
+      await settle();
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('[data-social-badge="letters"]').classList.contains('hidden')`), true);
+      fs.writeFileSync(path.join(outputDir, "letters-pane.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`switchSocialTab('world')`);
       fs.writeFileSync(path.join(outputDir, "world-chat-selected-area.png"), (await window.webContents.capturePage()).toPNG());
+      const ownTerritoryActions = await embeddedGameFrame.executeJavaScript(`(() => {
+        selected={x:4,y:7};
+        delete payload.world.jobs.training; delete payload.world.jobs.mining;
+        renderCell();
+        return {
+          actionsHidden:document.querySelector('#map-region-actions').classList.contains('hidden'),
+          territoryHidden:document.querySelector('#territory-actions').classList.contains('hidden'),
+          text:document.querySelector('#map-region-actions').textContent
+        };
+      })()`);
+      assert.equal(ownTerritoryActions.actionsHidden, false);
+      assert.equal(ownTerritoryActions.territoryHidden, false);
+      assert(ownTerritoryActions.text.includes("开采资源") && ownTerritoryActions.text.includes("开始练兵"));
+      const miningCooldownQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        payload.world.privatePlayers ||= {};
+        payload.world.privatePlayers.a ||= {};
+        payload.world.privatePlayers.a.miningCooldowns ||= {};
+        delete payload.world.privatePlayers.a.miningCooldowns['4,7'];
+        renderCell();
+        const before={actionsHeight:document.querySelector('#territory-actions').getBoundingClientRect().height,buttonHeight:document.querySelector('#start-mining').getBoundingClientRect().height,text:document.querySelector('#start-mining').textContent,hintHeight:document.querySelector('#mining-cooldown').getBoundingClientRect().height};
+        payload.world.privatePlayers.a.miningCooldowns['4,7']=hostTime()+65000;
+        renderCell();
+        const after={actionsHeight:document.querySelector('#territory-actions').getBoundingClientRect().height,buttonHeight:document.querySelector('#start-mining').getBoundingClientRect().height,text:document.querySelector('#start-mining').textContent,hint:document.querySelector('#mining-cooldown').textContent,hintHeight:document.querySelector('#mining-cooldown').getBoundingClientRect().height,disabled:document.querySelector('#start-mining').disabled};
+        delete payload.world.privatePlayers.a.miningCooldowns['4,7']; renderCell();
+        return {before,after};
+      })()`);
+      assert.equal(miningCooldownQa.before.text, '开采资源');
+      assert.equal(miningCooldownQa.after.text, '开采资源');
+      assert.equal(miningCooldownQa.after.disabled, true);
+      assert(miningCooldownQa.after.hint.startsWith('冷却 '), `采集冷却没有显示在独立提示行：${JSON.stringify(miningCooldownQa)}`);
+      assert(Math.abs(miningCooldownQa.before.actionsHeight - miningCooldownQa.after.actionsHeight) < 1, `冷却提示改变了行动区高度：${JSON.stringify(miningCooldownQa)}`);
+      assert(Math.abs(miningCooldownQa.before.buttonHeight - miningCooldownQa.after.buttonHeight) < 1 && Math.abs(miningCooldownQa.before.hintHeight - miningCooldownQa.after.hintHeight) < 1, `采集按钮或冷却提示行尺寸不稳定：${JSON.stringify(miningCooldownQa)}`);
+      const trainSliderQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const input = document.querySelector('#train-amount');
+        payload.world.players.a.gold=1000;
+        input.value = '10';
+        input.dispatchEvent(new Event('input', { bubbles:true }));
+        const live={value:input.value,output:document.querySelector('#train-amount-value').value,cost:document.querySelector('#train-cost').textContent,buttonDisabled:document.querySelector('#train').disabled};
+        payload.world.players.a.gold=0;
+        input.dispatchEvent(new Event('input', { bubbles:true }));
+        const unaffordableDisabled=document.querySelector('#train').disabled;
+        payload.world.players.a.gold=1000;
+        input.value = input.max;
+        input.dispatchEvent(new Event('input', { bubbles:true }));
+        return { live, unaffordableDisabled, value:input.value, max:input.max, output:document.querySelector('#train-amount-value').value, cost:document.querySelector('#train-cost').textContent, buttonDisabled:document.querySelector('#train').disabled };
+      })()`);
+      assert.deepEqual(trainSliderQa.live, { value:'10', output:'10', cost:'20', buttonDisabled:false }, `练兵滑块没有实时刷新金币：${JSON.stringify(trainSliderQa)}`);
+      assert.equal(trainSliderQa.unaffordableDisabled, true, `练兵金币不足时按钮仍可提交：${JSON.stringify(trainSliderQa)}`);
+      assert.equal(trainSliderQa.value, trainSliderQa.max, `练兵滑块未到达上限：${JSON.stringify(trainSliderQa)}`);
+      assert.equal(trainSliderQa.output, trainSliderQa.max, `练兵滑块显示值未同步：${JSON.stringify(trainSliderQa)}`);
+      assert.equal(trainSliderQa.cost, String(Number(trainSliderQa.max) * 2), `练兵上限费用显示错误：${JSON.stringify(trainSliderQa)}`);
+      assert.equal(trainSliderQa.buttonDisabled, false, `练兵滑块上限不可提交：${JSON.stringify(trainSliderQa)}`);
+      const companionExpansion = await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('.area-companions').click();
+        const section = document.querySelector('.area-companions');
+        const list = document.querySelector('#carried-generals');
+        const rect = list.getBoundingClientRect();
+        return {
+          expanded: section.classList.contains('companions-expanded'),
+          cards: list.querySelectorAll('.general-card').length,
+          active: list.querySelectorAll('.general-card.march-active').length,
+          overflowY: getComputedStyle(list).overflowY,
+          top: rect.top,
+          bottom: rect.bottom,
+          viewportHeight: innerHeight
+        };
+      })()`);
+      assert.deepEqual({ expanded: companionExpansion.expanded, cards: companionExpansion.cards, active: companionExpansion.active, overflowY: companionExpansion.overflowY }, { expanded: true, cards: 3, active: 2, overflowY: "auto" });
+      assert(companionExpansion.top >= 0 && companionExpansion.bottom <= companionExpansion.viewportHeight);
+      const companionDrag = await embeddedGameFrame.executeJavaScript(`(() => {
+        const list = document.querySelector('#carried-generals');
+        const cards = [...list.querySelectorAll('.general-card')];
+        const transfer = new DataTransfer();
+        cards[2].dispatchEvent(new DragEvent('dragstart', {bubbles:true, dataTransfer:transfer}));
+        const firstRect = cards[0].getBoundingClientRect();
+        cards[0].dispatchEvent(new DragEvent('dragover', {bubbles:true, cancelable:true, clientY:firstRect.top, dataTransfer:transfer}));
+        const reordered = [...list.querySelectorAll('.general-card')];
+        return {
+          order: reordered.map(card => card.dataset.generalId),
+          firstActive: reordered[0].classList.contains('march-active'),
+          firstBorderStyle: getComputedStyle(reordered[0]).borderStyle,
+          firstBackground: getComputedStyle(reordered[0]).backgroundColor
+        };
+      })()`);
+      assert.deepEqual(companionDrag.order, ["g3", "g1", "g2"]);
+      assert.equal(companionDrag.firstActive, true);
+      assert.equal(companionDrag.firstBorderStyle, "dashed");
+      assert.notEqual(companionDrag.firstBackground, "rgba(0, 0, 0, 0)");
+      await settle();
+      fs.writeFileSync(path.join(outputDir, "map-companion-drag.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#carried-generals').dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:new DataTransfer()}))`);
+      await settle();
+      const reorderCall = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'reorder-carried-generals').at(-1);
+      assert.deepEqual(reorderCall?.args[0]?.generalIds, ["g3", "g1", "g2"]);
+      await embeddedGameFrame.executeJavaScript(`document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}))`);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('.area-companions').classList.contains('companions-expanded')`), false);
       await embeddedGameFrame.executeJavaScript(`setZoom(1.5)`);
       await settle();
       await embeddedGameFrame.executeJavaScript(`centerMap({x:5,y:7}, 'instant')`);

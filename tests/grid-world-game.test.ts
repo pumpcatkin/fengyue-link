@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const game = require("../electron/grid-world-game.cjs");
+const talentEngine = require("../electron/grid-talents.cjs");
 
 function joined(now = 1_000_000) {
   const base = game.createWorld({ seed: "test-seed", seasonId: "season", startedAt: now, authorityAccountId: "a" });
@@ -14,6 +15,11 @@ function joined(now = 1_000_000) {
 }
 
 describe("grid conquest rules", () => {
+  it("uses unified pill names for every treasure material color", () => {
+    expect(talentEngine.MATERIALS.map((item: any) => item.label)).toEqual([
+      "养气丹", "聚灵丹", "凝元丹", "紫府丹", "金髓丹", "赤曜丹", "赤曜丹"
+    ]);
+  });
   it("grants new players 500 starting gold and 500 base power without changing older progress", () => {
     const now = 1_000_000;
     const state = joined(now);
@@ -58,7 +64,7 @@ describe("grid conquest rules", () => {
     expect(game.RESOURCE_GRADES).toContain(first.resourceGrade);
   });
 
-  it("settles automatic mining from host time", () => {
+  it("settles one fixed ten-minute mining run and starts its resource-rank cooldown", () => {
     const now = 1_000_000;
     let state = joined(now);
     const player = state.players.a;
@@ -66,9 +72,48 @@ describe("grid conquest rules", () => {
     state = started.state;
     const job = state.jobs[started.result.jobId];
     const before = state.players.a.gold;
-    const settled = game.settleWorld(state, now + job.cycleMs * 3 + 1);
-    expect(settled.state.players.a.gold).toBe(before + job.yieldPerCycle * 3);
-    expect(settled.state.jobs[job.id]).toBeTruthy();
+    expect(job.cycleMs).toBe(10 * game.MINUTE);
+    const settled = game.settleWorld(state, job.finishAt);
+    expect(settled.state.players.a.gold).toBe(before + job.yieldPerCycle);
+    expect(settled.state.jobs[job.id]).toBeUndefined();
+    const effect = settled.effects.find((item: any) => item.type === "mining-complete");
+    expect(effect.cooldownMs).toBe(game.miningCooldownMs(game.staticCell(state.seed, player.position.x, player.position.y)));
+    expect(() => game.applyIntent(settled.state, {
+      type: "start-mining", x: player.position.x, y: player.position.y, idempotencyKey: "mine-during-cooldown"
+    }, { actorAccountId: "a", now: job.finishAt })).toThrow(/冷却/);
+  });
+
+  it("scales completed mining cooldowns from one to four hours by resource rank", () => {
+    expect(game.miningCooldownMs({ resourceRank: 0 })).toBe(game.HOUR);
+    expect(game.miningCooldownMs({ resourceRank: game.RESOURCE_GRADES.length - 1 })).toBe(4 * game.HOUR);
+    const values = game.RESOURCE_GRADES.map((_: string, resourceRank: number) => game.miningCooldownMs({ resourceRank }));
+    expect(values).toEqual([...values].sort((left, right) => left - right));
+  });
+
+  it("limits a player to three concurrent mining territories", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    const origin = state.players.a.position;
+    const positions = [origin, { x: origin.x + 1, y: origin.y }, { x: origin.x, y: origin.y + 1 }, { x: origin.x + 1, y: origin.y + 1 }];
+    for (const point of positions) state.cells[`${point.x},${point.y}`] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    for (let index = 0; index < 3; index += 1) {
+      state = game.applyIntent(state, { type: "start-mining", ...positions[index], idempotencyKey: `mine-${index}` }, { actorAccountId: "a", now }).state;
+    }
+    expect(() => game.applyIntent(state, { type: "start-mining", ...positions[3], idempotencyKey: "mine-fourth" }, { actorAccountId: "a", now })).toThrow(/最多同时开采 3 块/);
+  });
+
+  it("assigns model-generated generals a stable authoritative power from 250 to 350", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const intent = {
+      type: "grant-general", generalId: "generated", name: "新将", gender: "female", setting: "善战。",
+      power: 99999, generated: true, powerSeed: "discovery-1", discoveryId: "discovery-1", idempotencyKey: "grant-generated"
+    };
+    const granted = game.applyIntent(state, intent, { actorAccountId: "a", authorityAccountId: "a", now });
+    const expected = game.generatedGeneralPower(state.seed, "a", "discovery-1");
+    expect(granted.state.generals.generated.power).toBe(expected);
+    expect(expected).toBeGreaterThanOrEqual(250);
+    expect(expected).toBeLessThanOrEqual(350);
   });
 
   it("stops mining and cancels unfinished training when the territory is lost", () => {
@@ -104,12 +149,52 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: info.garrisonCap - cell.soldiers + 1, idempotencyKey: "too-many" }, { actorAccountId: "a", now })).toThrow(/驻军上限/);
   });
 
+  it("keeps the training max action inside the garrison cap after yield talents", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const player = state.players.a;
+    const key = `${player.position.x},${player.position.y}`;
+    const info = game.staticCell(state.seed, player.position.x, player.position.y);
+    state.cells[key].soldiers = info.garrisonCap - 100;
+    state.generals.office = {
+      id: "office", holderAccountId: "a", status: "carried", name: "军务官", power: 500,
+      basePower: 500, trainingLevel: 0,
+      talent: talentEngine.normalizeTalent({ instanceId: "office", talentId: "recruiting-office", progress: 99 })
+    };
+    player.carriedGeneralIds = ["office"];
+    const result = game.applyIntent(state, {
+      type: "train", mode: "max", amount: 100, x: player.position.x, y: player.position.y, idempotencyKey: "training-max-talent"
+    }, { actorAccountId: "a", now });
+    expect(result.result.amount).toBeLessThanOrEqual(100);
+    expect(result.result.outputAmount).toBeLessThanOrEqual(100);
+  });
+
   it("allows only one concurrent training job in the same cell", () => {
     const now = 1_000_000;
     const state = joined(now);
     const player = state.players.a;
     const first = game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-one" }, { actorAccountId: "a", now });
     expect(() => game.applyIntent(first.state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/只能同时进行一项练兵/);
+  });
+
+  it("caps training discovery rolls at the first 1,000 soldiers and waits for promotion", () => {
+    expect(game.trainingGeneralDiscoveryChance(0)).toBe(0);
+    expect(game.trainingGeneralDiscoveryChance(10_000)).toBe(game.trainingGeneralDiscoveryChance(1_000));
+    const now = 1_000_000;
+    const state = joined(now);
+    state.privatePlayers.a.pendingGeneralDiscoveries = [{
+      id: "training:test-job", sourceKind: "training", sourceId: "test-job", accountId: "a", x: 1, y: 1,
+      gender: "female", directionTags: [], initial: false, population: 1000, resourceGrade: "B", trainedSoldiers: 1000, createdAt: now
+    }];
+    const confirmed = game.applyIntent(state, { type: "confirm-general-discovery", discoveryId: "training:test-job", idempotencyKey: "confirm-discovery" }, { actorAccountId: "a", now });
+    expect(confirmed.state.privatePlayers.a.pendingGeneralDiscoveries).toHaveLength(0);
+    expect(confirmed.effects).toContainEqual(expect.objectContaining({ type: "general-generation-request", confirmed: true, sourceKind: "training" }));
+
+    const declinedState = joined(now);
+    declinedState.privatePlayers.a.pendingGeneralDiscoveries = [{ id: "neutral-battle:test", sourceKind: "neutral-battle", sourceId: "test", accountId: "a", x: 2, y: 2, gender: "female", directionTags: [], initial: false, population: 1000, resourceGrade: "B", createdAt: now }];
+    const declined = game.applyIntent(declinedState, { type: "decline-general-discovery", discoveryId: "neutral-battle:test", idempotencyKey: "decline-discovery" }, { actorAccountId: "a", now });
+    expect(declined.state.privatePlayers.a.pendingGeneralDiscoveries).toHaveLength(0);
+    expect(declined.effects).not.toContainEqual(expect.objectContaining({ type: "general-generation-request" }));
   });
 
   it("uses Cookie-style exponential player costs and closes the legacy unlimited-general training entry", () => {
@@ -151,16 +236,43 @@ describe("grid conquest rules", () => {
     expect(general.trainingLevel).toBe(0);
   });
 
-  it("charges and times a march while ignoring caller-provided timestamps", () => {
+  it("rejects garrison-only marches until soldiers are confirmed into the field army", () => {
     const now = 1_000_000;
     const state = joined(now);
     const player = state.players.a;
     const target = { x: (player.position.x + 2) % 64, y: player.position.y };
-    const before = player.gold;
-    const march = game.applyIntent(state, { type: "march", to: target, soldiers: 1, attack: false, finishAt: 0, idempotencyKey: "march" }, { actorAccountId: "a", now });
+    const cellKey = `${player.position.x},${player.position.y}`;
+    const garrisonBefore = state.cells[cellKey].soldiers;
+    expect(garrisonBefore).toBeGreaterThan(0);
+    expect(player.fieldArmySoldiers).toBe(0);
+    expect(() => game.applyIntent(state, {
+      type: "march", to: target, soldiers: 1, attack: false, idempotencyKey: "march-before-gather"
+    }, { actorAccountId: "a", now })).toThrow(/请先确认征集/);
+    expect(state.cells[cellKey].soldiers).toBe(garrisonBefore);
+    expect(state.players.a.fieldArmySoldiers).toBe(0);
+  });
+
+  it("marches after gather confirmation and deducts soldiers only from the field army", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const player = state.players.a;
+    const target = { x: (player.position.x + 2) % 64, y: player.position.y };
+    const cellKey = `${player.position.x},${player.position.y}`;
+    const garrisonBefore = state.cells[cellKey].soldiers;
+    const gathered = game.applyIntent(state, {
+      type: "gather-march", amount: 2, idempotencyKey: "gather-before-march"
+    }, { actorAccountId: "a", now });
+    expect(gathered.state.players.a.fieldArmySoldiers).toBe(2);
+    expect(gathered.state.cells[cellKey].soldiers).toBe(garrisonBefore - 2);
+    const beforeGold = gathered.state.players.a.gold;
+    const march = game.applyIntent(gathered.state, {
+      type: "march", to: target, soldiers: 1, attack: false, finishAt: 0, idempotencyKey: "march-after-gather"
+    }, { actorAccountId: "a", now: now + 1 });
     const job = march.state.jobs[march.result.jobId];
-    expect(job.finishAt).toBe(now + game.marchDurationMs(2));
-    expect(march.state.players.a.gold).toBe(before - game.marchCost(2, 1));
+    expect(job.finishAt).toBe(now + 1 + game.marchDurationMs(2));
+    expect(march.state.players.a.gold).toBe(beforeGold - game.marchCost(2, 1));
+    expect(march.state.players.a.fieldArmySoldiers).toBe(1);
+    expect(march.state.cells[cellKey].soldiers).toBe(garrisonBefore - 2);
   });
 
   it("rejects a march immediately when a damaged local save has lost the player position", () => {
@@ -203,7 +315,7 @@ describe("grid conquest rules", () => {
     expect(JSON.stringify(memory.input)).not.toContain(formerId);
     expect(dialogue.input.allowedFormerLords).toEqual([{ recipientKey: "former-lord-1", displayName: "旧主乙" }]);
     expect(dialogue.input.replyStyle).toContain("最多 180 个汉字");
-    expect(dialogue.routing.formerLords).toEqual([{ recipientKey: "former-lord-1", accountId: formerId }]);
+    expect(dialogue.routing.formerLords).toEqual([{ recipientKey: "former-lord-1", accountId: formerId, displayName: "旧主乙" }]);
   });
 
   it("stores the player's display name in general memories and accepts annotated custom tags", () => {
@@ -261,6 +373,84 @@ describe("grid conquest rules", () => {
     expect(settled.effects).toContainEqual(expect.objectContaining({ type: "battle-won", capturedGeneralIds: ["defender"] }));
   });
 
+  it("allows an attacking march to end on enemy territory", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const attacker = state.players.a;
+    const from = { x: 10, y: 10 };
+    const target = { x: 12, y: 10 };
+    attacker.position = from;
+    attacker.fieldArmySoldiers = 1_000;
+    attacker.gold = 1_000_000;
+    state.cells[`${from.x},${from.y}`] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    state.cells["11,10"] = { ownerAccountId: null, soldiers: 0, generalIds: [] };
+    state.cells[`${target.x},${target.y}`] = { ownerAccountId: "b", soldiers: 1, generalIds: [] };
+    state.players.b = { accountId: "b", displayName: "乙", position: target, carriedGeneralIds: [], fieldArmySoldiers: 0 };
+
+    const quote = game.marchQuote(state, "a", target, 1_000, [], true, now);
+    expect(quote).toMatchObject({
+      from, to: target, distance: 2,
+      path: [{ x: 11, y: 10 }, target]
+    });
+    const march = game.applyIntent(state, {
+      type: "march", to: target, soldiers: 1_000, attack: true, idempotencyKey: "enemy-endpoint"
+    }, { actorAccountId: "a", now });
+    expect(march.state.jobs[march.result.jobId].path).toEqual(quote.path);
+    const settled = game.settleWorld(march.state, march.result.finishAt);
+    expect(settled.state.players.a.position).toEqual(target);
+    expect(settled.state.cells[`${target.x},${target.y}`].ownerAccountId).toBe("a");
+    expect(settled.effects).toContainEqual(expect.objectContaining({ type: "battle-won", at: target, previousOwner: "b" }));
+    expect(settled.effects).not.toContainEqual(expect.objectContaining({ type: "march-blocked" }));
+  });
+
+  it("only lets an army standing on newly hostile territory retrace its previous march", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    const origin = { x: 10, y: 10 };
+    const exposed = { x: 12, y: 10 };
+    const diversion = { x: 12, y: 12 };
+    state.players.a.position = origin;
+    state.players.a.gold = 1_000_000;
+    state.players.a.fieldArmySoldiers = 0;
+    state.cells[`${origin.x},${origin.y}`] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    state.cells["11,10"] = { ownerAccountId: null, soldiers: 0, generalIds: [] };
+    state.cells[`${exposed.x},${exposed.y}`] = { ownerAccountId: null, soldiers: 0, generalIds: [] };
+
+    const outward = game.applyIntent(state, {
+      type: "march", to: exposed, soldiers: 0, attack: false, idempotencyKey: "enter-exposed-cell"
+    }, { actorAccountId: "a", now });
+    expect(outward.state.jobs[outward.result.jobId].path).toEqual([
+      { x: 11, y: 10 }, exposed
+    ]);
+    state = game.settleWorld(outward.state, outward.result.finishAt).state;
+    expect(state.players.a.position).toEqual(exposed);
+    expect(state.players.a.retreatPath).toEqual([
+      exposed, { x: 11, y: 10 }, origin
+    ]);
+
+    state.cells[`${exposed.x},${exposed.y}`] = { ownerAccountId: "b", soldiers: 1, generalIds: [] };
+    state.cells[`${diversion.x},${diversion.y}`] = { ownerAccountId: null, soldiers: 0, generalIds: [] };
+    for (const attack of [false, true]) {
+      expect(() => game.marchQuote(state, "a", diversion, 0, [], attack, outward.result.finishAt + 1)).toThrow(/没有可通行的行军路径/);
+      expect(() => game.applyIntent(state, {
+        type: "march", to: diversion, soldiers: 0, attack, idempotencyKey: `hostile-diversion-${attack}`
+      }, { actorAccountId: "a", now: outward.result.finishAt + 1 })).toThrow(/没有可通行的行军路径/);
+    }
+
+    const returnQuote = game.marchQuote(state, "a", origin, 0, [], false, outward.result.finishAt + 1);
+    expect(returnQuote).toMatchObject({
+      from: exposed, to: origin, distance: 2,
+      path: [{ x: 11, y: 10 }, origin]
+    });
+    const returning = game.applyIntent(state, {
+      type: "march", to: origin, soldiers: 0, attack: false, idempotencyKey: "retrace-to-origin"
+    }, { actorAccountId: "a", now: outward.result.finishAt + 1 });
+    expect(returning.state.jobs[returning.result.jobId].path).toEqual(returnQuote.path);
+    const returned = game.settleWorld(returning.state, returning.result.finishAt);
+    expect(returned.state.players.a.position).toEqual(origin);
+    expect(returned.effects).toContainEqual(expect.objectContaining({ type: "march-arrived", at: origin }));
+  });
+
   it("keeps gold, queued work and carried generals out of another player's projection", () => {
     const now = 1_000_000;
     let state = joined(now);
@@ -280,6 +470,33 @@ describe("grid conquest rules", () => {
     expect(ownState.players.a.gold).toBeTypeOf("number");
     expect(ownState.generals["private-general"].name).toBe("青禾");
     expect(Object.keys(ownState.jobs)).toHaveLength(1);
+  });
+
+  it("supports public general market listings and prevents captive sales", () => {
+    const now = 1_000_000;
+    let state = game.createWorld({ seed: "market-seed", seasonId: "season", startedAt: now, authorityAccountId: "a" });
+    for (const [accountId, displayName] of [["a", "甲"], ["b", "乙"]]) {
+      state = game.applyIntent(state, {
+        type: "join", orientation: "any", displayName, characterProfileId: `profile-${accountId}`,
+        characterTags: ["勇敢"], initialGeneralWish: "一名可靠的良将", idempotencyKey: `join-${accountId}`
+      }, { actorAccountId: accountId, actorAccountName: displayName, now }).state;
+    }
+    state = game.applyIntent(state, { type: "grant-general", generalId: "market-general", name: "青禾", gender: "female", setting: "善守城。", power: 700, discoveryId: "market", idempotencyKey: "grant-market" }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
+    const listed = game.applyIntent(state, { type: "list-general", generalId: "market-general", price: 123, sellerIntro: "善守城，愿寻识才之主。", idempotencyKey: "list-market" }, { actorAccountId: "a", now: now + 1 });
+    state = listed.state;
+    const listingId = Object.keys(state.marketListings)[0]!;
+    expect(game.projectWorldState(state, "b").marketListings[listingId]).toMatchObject({ price: 123, sellerIntro: "善守城，愿寻识才之主。", general: { name: "青禾", power: 700, coreSetting: "善守城。" } });
+    const cancelled = game.applyIntent(state, { type: "cancel-market-listing", listingId, idempotencyKey: "cancel-market" }, { actorAccountId: "a", now: now + 2 });
+    expect(cancelled.result.relistAvailableAt).toBe(now + 2 + game.MARKET_RELIST_COOLDOWN_MS);
+    expect(() => game.applyIntent(cancelled.state, { type: "list-general", generalId: "market-general", price: 456, idempotencyKey: "list-too-soon" }, { actorAccountId: "a", now: now + 3 })).toThrow(/等待/);
+    const relisted = game.applyIntent(cancelled.state, { type: "list-general", generalId: "market-general", price: 123, sellerIntro: "善守城，愿寻识才之主。", idempotencyKey: "relist-market" }, { actorAccountId: "a", now: now + 2 + game.MARKET_RELIST_COOLDOWN_MS });
+    const relistedId = Object.keys(relisted.state.marketListings)[0]!;
+    const bought = game.applyIntent(relisted.state, { type: "buy-market-general", listingId: relistedId, idempotencyKey: "buy-market" }, { actorAccountId: "b", now: now + 2 + game.MARKET_RELIST_COOLDOWN_MS + 1 });
+    expect(bought.state.marketListings).toEqual({});
+    expect(bought.state.generals["market-general"]).toMatchObject({ holderAccountId: "b", status: "carried" });
+    expect(bought.state.marketSales[bought.result.transactionId]).toMatchObject({ sellerAccountId: "a", buyerAccountId: "b", price: 123 });
+    bought.state.generals["market-general"].status = "captured";
+    expect(() => game.applyIntent(bought.state, { type: "list-general", generalId: "market-general", price: 456, idempotencyKey: "list-captive" }, { actorAccountId: "b", now: now + 3 })).toThrow(/不能上架/);
   });
 
   it("blocks banned accounts and removes reset players into a new epoch", () => {

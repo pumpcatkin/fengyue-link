@@ -35,10 +35,10 @@ const handlers = new Map([
   ["app:get-author-info", () => ({
     name: "八爪毛米",
     links: {
-      homepage: { key: "homepage", label: "作者主页", configured: false, url: null },
+      homepage: { key: "homepage", label: "作者主页", configured: true, url: "https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd" },
       releasePost: { key: "releasePost", label: "风月发布帖", configured: false, url: null },
       feedbackPost: { key: "feedbackPost", label: "问题反馈帖", configured: false, url: null },
-      github: { key: "github", label: "GitHub 项目页", configured: true, url: "https://github.com/pumpcatkin/fengyue-link" }
+      github: { key: "github", label: "GitHub 下载页", configured: true, url: "https://github.com/pumpcatkin/fengyue-link/releases/latest" }
     }
   })],
   ["app:open-author-link", () => true],
@@ -91,12 +91,12 @@ app.whenReady().then(async () => {
       hasBackend: true,
       loginVisible: true,
       securityCardAbsent: true,
-      officialNoticeVisible: true,
+      officialNoticeVisible: false,
       officialNoticeTitle: "正在对照版本号",
       publicKeyHidden: true,
       authorName: "八爪毛米",
       githubEnabled: true,
-      missingHomepageDisabled: true
+      missingHomepageDisabled: false
     });
     fs.writeFileSync(path.join(output, "official-notice.png"), (await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript("document.querySelector('#official-notice-action').click()", true);

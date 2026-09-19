@@ -6,10 +6,10 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
-const { createWorld, createFallbackGeneral } = require("../electron/grid-world-game.cjs");
+const { createWorld, createFallbackGeneral, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
 
@@ -36,7 +36,7 @@ function service(options: Record<string, unknown>) {
         : request?.task === "general.memory.update"
           ? "{\"category\":\"speech\",\"summary\":\"与玩家谈论戏剧\",\"emotion\":\"愉快\",\"intimacyDelta\":1,\"compactMemory\":\"言谈：[1年]与玩家谈论戏剧\\n经历：暂无\"}"
           : request?.task === "general.dialogue" || request?.task === "general.captive-dialogue"
-            ? "{\"reply\":\"愿与主公详谈。\",\"command\":null}"
+            ? "{\"reply\":\"愿与主公详谈。\",\"narration\":\"她抬手整理袖口，微微颔首。\",\"command\":null,\"memoryUpdate\":{\"category\":\"speech\",\"summary\":\"与主公详谈\",\"emotion\":\"平静\",\"intimacyDelta\":1,\"compactMemory\":\"言谈：与主公详谈。\\n经历：暂无新的经历。\"}}"
             : JSON.stringify(completeGeneral)
     }),
     getOrigin: () => "https://aigirlfriend.baby",
@@ -107,6 +107,25 @@ function coverageHarness() {
 }
 
 describe("online world platform service", () => {
+  it("backs off polling after transport failures instead of retrying every five seconds", async () => {
+    vi.useFakeTimers();
+    const instance = service({});
+    instance.sync = vi.fn(async () => { throw new Error("Failed to fetch"); });
+    try {
+      instance.startPolling();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(instance.sync).toHaveBeenCalledTimes(1);
+      expect(instance.pollFailureCount).toBe(1);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(instance.sync).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(instance.sync).toHaveBeenCalledTimes(2);
+    } finally {
+      instance.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("stops comment reads at the next await boundary when returning to the library", async () => {
     vi.useFakeTimers();
     let release!: (value: any) => void;
@@ -206,6 +225,20 @@ describe("online world platform service", () => {
     expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。", power: "任意" }, { gender: "female" })).toBeNull();
     expect(generalGenerationQualityIssue(completeGeneral, { gender: "female" })).toBeNull();
     expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "善战。", power: 999999 }, { gender: "female" })).toMatchObject({ coreSetting: "善战。", power: 300 });
+    const seededPower = normalizeGeneratedGeneral(completeGeneral, {
+      gender: "female", generatedSeed: "season-seed", accountId: "player", sourceId: "discovery"
+    }).power;
+    expect(seededPower).toBe(generatedGeneralPower("season-seed", "player", "discovery"));
+    expect(seededPower).toBeGreaterThanOrEqual(250);
+    expect(seededPower).toBeLessThanOrEqual(350);
+    const generatedWorld = createWorld({ seed: "season-seed", seasonId: "season", startedAt: 1, authorityAccountId: "player" });
+    generatedWorld.players.player = { accountId: "player", displayName: "玩家", gold: 500, position: { x: 2, y: 2 }, carriedGeneralIds: [] };
+    generatedWorld.privatePlayers.player = { orientation: "any", materials: {} };
+    const committed = require("../electron/grid-world-game.cjs").applyIntent(generatedWorld, {
+      type: "grant-general", generalId: "generated", name: "初将", gender: "female", coreSetting: "善战。",
+      power: 999999, generated: true, powerSeed: "discovery", discoveryId: "discovery", idempotencyKey: "grant-generated"
+    }, { actorAccountId: "player", authorityAccountId: "player", now: 2 });
+    expect(committed.state.generals.generated.power).toBe(seededPower);
     expect(normalizeGeneratedGeneral({ personaSummary: "名为“茂密”的猫亚人，善于领兵。", appearanceSummary: "白发猫耳。" }, { gender: "female" })).toMatchObject({ name: "茂密", appearanceSetting: "白发猫耳。", coreSetting: expect.stringContaining("善于领兵"), power: 300 });
     expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "长设定".repeat(1200) }, { gender: "female" }).coreSetting.length).toBeGreaterThan(800);
   });
@@ -315,7 +348,7 @@ describe("online world platform service", () => {
     expect([...new Set(requested)].sort()).toEqual([1, 2, 3]);
   });
 
-  it("repairs a legacy player's placeholder context without resetting their game", async () => {
+  it("replaces a legacy player's generated context with the bound profile facts", async () => {
     const instance = service({ getAccount: () => ({ accountId: "author", username: "服主" }) });
     instance.world = createWorld({ seed: "legacy", seasonId: "season", startedAt: 1_000_000, authorityAccountId: "author" });
     instance.world.players.author = { accountId: "author", displayName: "茂密", gold: 1000, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [], joinedAt: 1_000_000 };
@@ -323,8 +356,8 @@ describe("online world platform service", () => {
     instance.localPreferences.characterProfile = { id: "profile", displayName: "茂密", basicInfo: "猫亚人", appearance: "白色头发", info: "猫亚人，白色头发" };
     instance.localPreferences.playerContext = null;
     const repaired = await instance.ensureLocalPlayerContext();
-    expect(repaired.personaSummary).toContain("慧眼之主");
-    expect(playerContextQualityIssue(instance.localPreferences.playerContext)).toBeNull();
+    expect(repaired).toEqual(playerContextFromProfile(instance.localPreferences.characterProfile));
+    expect(repaired).toMatchObject({ displayName: "茂密", personaSummary: "猫亚人", appearanceSummary: "白色头发" });
     expect(instance.world.privatePlayers.author.playerContext).toEqual(instance.localPreferences.playerContext);
     expect(instance.world.players.author.position).toEqual({ x: 1, y: 1 });
   });
@@ -924,6 +957,35 @@ describe("online world platform service", () => {
     await expect(instance.submitIntent({ type: "quote-march", to: { x: 3, y: 1 }, soldiers: 0 })).rejects.toThrow(/封禁/);
   });
 
+  it("reports a failed in-flight sync as an unsubmitted action instead of exposing fetch internals", async () => {
+    const instance = service({ getAccount: () => ({ accountId: "player" }) });
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚", position: { x: 1, y: 1 }, carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = { orientation: "any" };
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    instance.status = "degraded";
+    instance.syncInFlight = Promise.reject(new Error("Failed to fetch"));
+    await expect(instance.submitIntent({ type: "start-mining", x: 1, y: 1, auto: true, idempotencyKey: "offline-mine" }))
+      .rejects.toThrow(/平台连接暂时中断.*行动尚未提交/);
+    expect(instance.world.jobs).toEqual({});
+  });
+
+  it("reconnects a degraded cached world before accepting an action", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }), getIdentity: async () => identity });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", gold: 500, position: { x: 1, y: 1 }, carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = { orientation: "any" };
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    instance.status = "degraded";
+    instance.sync = vi.fn(async () => { instance.status = "ready"; return instance.state(); });
+    const result = await instance.submitIntent({ type: "start-mining", x: 1, y: 1, auto: true, idempotencyKey: "reconnected-mine" });
+    expect(instance.sync).toHaveBeenCalledWith(false);
+    expect(result.event.type).toBe("start-mining");
+  });
+
   it("lets only the author scatter configured treasure batches and excludes materials from public snapshots", async () => {
     const identity = generateOnlineWorldIdentity();
     const start = Date.parse("2026-09-17T00:00:00.000Z");
@@ -1024,7 +1086,7 @@ describe("online world platform service", () => {
     expect(instance.applyMapDelta(forged)).toBe(false);
   });
 
-  it("withholds a newly arrived treasure from cultivation until its public claim survives a complete sync", async () => {
+  it("withholds a newly conquered treasure from cultivation until its public claim survives a complete sync", async () => {
     const identity = generateOnlineWorldIdentity();
     const rivalIdentity = generateOnlineWorldIdentity();
     const now = 1_000_000 + 6 * 60 * 60 * 1000;
@@ -1052,9 +1114,9 @@ describe("online world platform service", () => {
       instance.world.generals.general.status = "carried";
       instance.world.treasureSpawns["treasure-1"] = { id: "treasure-1", epoch: 1, x: 2, y: 1, materialId: "white", spawnedAt: 1_000_000 };
       instance.world.treasureEpoch = 1;
-      instance.world.jobs.arrival = {
-        id: "arrival", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
-        generalIds: [], soldiers: 0, attack: false, startedAt: now - 1000, finishAt: now
+      instance.world.jobs.conquest = {
+        id: "conquest", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
+        generalIds: ["general"], activeGeneralIds: ["general"], soldiers: 20_000, attack: true, startedAt: now - 1000, finishAt: now
       };
       return instance;
     };
@@ -1159,6 +1221,86 @@ describe("online world platform service", () => {
     expect(reader.world.treasureSpawns.old).toBeUndefined();
     const tooLate = map("player", 500, { claimedTreasures: missed.record.changes.claimedTreasures });
     expect(reader.validMapDelta(tooLate)).toBe(false);
+  });
+
+  it("syncs verifiable defender casualties from a lost player attack", () => {
+    const fixture = coverageHarness();
+    const target = { ownerAccountId: "author", soldiers: 30, generalIds: [] };
+    fixture.author.world.cells["4,4"] = target;
+    const losses = battleCasualties(20, 50, 10, target.soldiers);
+    const battle = {
+      battleId: "lost-attack-1",
+      attackerAccountId: "player",
+      targetOwnerAccountId: "author",
+      outcome: "attacker-lost",
+      x: 4,
+      y: 4,
+      beforeSoldiers: target.soldiers,
+      afterSoldiers: losses.defenderSurvivors,
+      attackerSoldiers: 10,
+      defenderSoldiers: target.soldiers,
+      attackerPower: 20,
+      defenderPower: 50,
+      attackerLosses: losses.attackerLosses,
+      defenderLosses: losses.defenderLosses,
+      attackerSurvivors: losses.attackerSurvivors,
+      defenderSurvivors: losses.defenderSurvivors
+    };
+    const delta = fixture.map("player", 40, {
+      cells: { "4,4": { ...target, soldiers: losses.defenderSurvivors } },
+      battles: { [battle.battleId]: battle }
+    });
+    expect(fixture.author.validMapDelta(delta)).toBe(true);
+    expect(fixture.author.applyMapDelta(delta)).toBe(true);
+    expect(fixture.author.world.cells["4,4"].soldiers).toBe(losses.defenderSurvivors);
+
+    fixture.author.world.cells["7,7"] = { ...target };
+    const malformedBattle = { ...battle, battleId: "lost-attack-malformed", x: 7, y: 7, attackerSoldiers: "foo" };
+    const malformed = fixture.map("player", 44, {
+      cells: { "7,7": { ...target, soldiers: losses.defenderSurvivors } },
+      battles: { [malformedBattle.battleId]: malformedBattle }
+    });
+    expect(fixture.author.validMapDelta(malformed)).toBe(false);
+
+    const forgedBattle = fixture.map("player", 45, {
+      cells: { "6,6": { ownerAccountId: "author", soldiers: 1, generalIds: [], defensivePower: 999999 } },
+      battles: { [battle.battleId]: { ...battle, battleId: battle.battleId, x: 6, y: 6, beforeSoldiers: 30, afterSoldiers: 1, defenderSoldiers: 30 } }
+    });
+    fixture.author.world.cells["6,6"] = { ownerAccountId: "author", soldiers: 30, generalIds: [] };
+    expect(fixture.author.validMapDelta(forgedBattle)).toBe(false);
+
+    const forged = fixture.map("player", 50, {
+      cells: { "5,5": { ownerAccountId: "author", soldiers: 1, generalIds: [] } }
+    });
+    fixture.author.world.cells["5,5"] = { ownerAccountId: "author", soldiers: 30, generalIds: [] };
+    expect(fixture.author.validMapDelta(forged)).toBe(false);
+  });
+
+  it("grandfathers an existing over-cap garrison without allowing it to grow", () => {
+    const fixture = coverageHarness();
+    const x = 8;
+    const y = 8;
+    const cap = staticCell(fixture.author.world.seed, x, y).garrisonCap;
+    const legacySoldiers = cap + 50;
+    fixture.author.world.cells[`${x},${y}`] = { ownerAccountId: "player", soldiers: legacySoldiers, generalIds: [] };
+
+    const unchanged = fixture.map("player", 60, {
+      cells: { [`${x},${y}`]: { ownerAccountId: "player", soldiers: legacySoldiers, generalIds: [] } }
+    });
+    const reduced = fixture.map("player", 61, {
+      cells: { [`${x},${y}`]: { ownerAccountId: "player", soldiers: legacySoldiers - 25, generalIds: [] } }
+    });
+    const increased = fixture.map("player", 62, {
+      cells: { [`${x},${y}`]: { ownerAccountId: "player", soldiers: legacySoldiers + 1, generalIds: [] } }
+    });
+    const newOverCap = fixture.map("player", 63, {
+      cells: { "9,8": { ownerAccountId: "player", soldiers: staticCell(fixture.author.world.seed, 9, 8).garrisonCap + 1, generalIds: [] } }
+    });
+
+    expect(fixture.author.validMapDelta(unchanged)).toBe(true);
+    expect(fixture.author.validMapDelta(reduced)).toBe(true);
+    expect(fixture.author.validMapDelta(increased)).toBe(false);
+    expect(fixture.author.validMapDelta(newOverCap)).toBe(false);
   });
 
   it("holds snapshot coverage before an incomplete root and replays it after late replies arrive", async () => {
@@ -1300,7 +1442,7 @@ describe("online world platform service", () => {
     await expect(instance.initialize()).rejects.toThrow(/只有作品作者/);
   });
 
-  it("rejects a changed platform author on refresh and publication before writing any comments", async () => {
+  it("rejects a changed platform author on refresh before writing any comments", async () => {
     const fixture = coverageHarness();
     const instance = fixture.author;
     instance.card = { companion: { authorAccountId: "author" } };
@@ -1311,11 +1453,10 @@ describe("online world platform service", () => {
     };
     await expect(instance.refreshWorkProgram()).rejects.toThrow(/作品作者已变更/);
     expect(instance.work.authorAccountId).toBe("author");
-    await expect(instance.activateProgramUpdate()).rejects.toThrow(/仅当前作品作者/);
     expect(posts).toBe(0);
   });
 
-  it("lets only the platform author enter an unpublished update and publish it without resetting the world", async () => {
+  it("loads the current work-description program for every player without a publication gate", async () => {
     const fixture = coverageHarness();
     const program = packProgram({ gameId: fixture.author.world.gameId, title: "新版", html: "<!doctype html><html><body>updated</body></html>" });
     const owner = fixture.author;
@@ -1332,42 +1473,22 @@ describe("online world platform service", () => {
     await owner.refreshWorkProgram();
     await guest.refreshWorkProgram();
     const state = await owner.sync(true);
-    expect(state.status).toBe("needs-program-update");
-    expect(state.programUpdateAvailable).toBe(true);
+    expect(state.status).toBe("ready");
     expect(state.isServerOwner).toBe(true);
+    expect(state.program.source).toBe("work-description");
+    expect(state.program.digest).toBe(program.digest);
     expect(owner.world).toMatchObject({ seasonId: "season", seed: "coverage", treasureEpoch: 1 });
     expect(modelCalls).toBe(0);
     await expect(owner.initialize()).rejects.toThrow(/已经开服/);
-    await expect(guest.sync(true)).rejects.toThrow(/游戏更新尚未发布/);
-    await expect(guest.activateProgramUpdate()).rejects.toThrow(/连接暂时不可用|只有作品作者/);
-    const published = await owner.activateProgramUpdate();
-    expect(published.status).toBe("ready");
-    expect(published.programUpdateAvailable).toBe(false);
-    expect(owner.control.programHash).toBe(program.digest);
-    expect(owner.world).toMatchObject({ seasonId: "season", seed: "coverage", treasureEpoch: 1 });
-    expect(owner.world.treasureSpawns.old).toBeTruthy();
     const readyGuest = await guest.sync(true);
     expect(readyGuest.status).toBe("ready");
+    expect(readyGuest.program.source).toBe("work-description");
+    expect(readyGuest.program.digest).toBe(program.digest);
     expect(readyGuest.isServerOwner).toBe(false);
+    expect(owner.world).toMatchObject({ seasonId: "season", seed: "coverage", treasureEpoch: 1 });
+    expect(owner.world.treasureSpawns.old).toBeTruthy();
     expect(guest.world.seasonId).toBe("season");
-    await expect(guest.activateProgramUpdate()).rejects.toThrow(/只有作品作者/);
-  });
-
-  it("serializes program publication with polling and other player actions", async () => {
-    const instance = coverageHarness().author;
-    let finish!: (value: any) => void;
-    instance.activateProgramUpdateNow = () => new Promise(resolve => { finish = resolve; });
-    const first = instance.activateProgramUpdate();
-    expect(instance.intentInFlightKey).toBe("admin:publish-program");
-    await expect(instance.activateProgramUpdate()).rejects.toThrow(/仍在处理中/);
-    let scans = 0;
-    instance.syncNow = () => { scans += 1; return instance.state(); };
-    await instance.sync();
-    expect(scans).toBe(0);
-    finish(instance.state());
-    await first;
-    expect(instance.intentInFlight).toBeNull();
-    expect(instance.intentInFlightKey).toBe("");
+    expect(guest.control.programHash).not.toBe(program.digest);
   });
 
   it("keeps author and synchronization controls outside the multi-game library", () => {
@@ -1376,11 +1497,11 @@ describe("online world platform service", () => {
     const game = fs.readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8");
     expect(library).not.toMatch(/id="online-world-(?:initialize|activate-program|migrate|status)"/);
     expect(library).not.toContain('id="online-world-export-card"');
-    expect(game).toContain('id="owner-publish-program"');
-    expect(game).toContain("发布游戏更新");
+    expect(game).not.toContain('id="owner-publish-program"');
+    expect(game).not.toContain("发布游戏更新");
     expect(renderer).not.toContain("正在同步评论账本");
     expect(renderer).not.toContain("wasInitialized");
-    expect(renderer).toContain('command.type==="publish-program"');
+    expect(renderer).not.toContain('command.type==="publish-program"');
     expect(renderer).toContain("selectedActiveCard");
     expect(renderer).toContain("card.isCurrentUserAuthor");
     expect(renderer).toContain("api.exportOnlineWorldCard(card.cardId)");
@@ -1423,10 +1544,15 @@ describe("online world platform service", () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000 });
     const comments: any[] = [];
+    const modelRequests: any[] = [];
     const platformTime = Date.parse("2026-09-13T05:10:20.000Z");
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
+      requestModel: async (request: any) => {
+        modelRequests.push(request);
+        return { conversationId: `join-preview-${modelRequests.length}`, answer: JSON.stringify(completeGeneral) };
+      },
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint.startsWith("/comments/") && options.method === "POST") {
           const item = { id: `c${String(comments.length + 1).padStart(3, "0")}`, account_id: "author", is_author: true, created_at: new Date(platformTime).toISOString(), content: options.body.content };
@@ -1442,8 +1568,9 @@ describe("online world platform service", () => {
 
     const previewIntent = {
       type: "prepare-join", displayName: "服主", orientation: "women", characterProfileId: "profile-author",
+      characterProfile: { id: "profile-author", displayName: "服主", basicInfo: "猫亚人", appearance: "白色头发" },
       characterTags: ["傲娇", "勇敢", "冷静", "长发", "黑发", "红瞳", "高挑", "军装"],
-      initialGeneralWish: "一名可靠的初始良将", idempotencyKey: "preview-author"
+      initialGeneralWish: "furry", idempotencyKey: "preview-author"
     };
     const firstPreview = await instance.submitIntent(previewIntent);
     expect(instance.world.players.author).toBeUndefined();
@@ -1469,14 +1596,17 @@ describe("online world platform service", () => {
     expect(instance.localEvents).toHaveLength(2);
     expect(instance.localEvents[0].type).toBe("join");
     expect(instance.localEvents[1].type).toBe("grant-general");
+    expect((Object.values(instance.world.generals)[0] as any).power).toBe(preview.joinPreview.general.power);
     expect((Object.values(instance.world.generals)[0] as any).coreSetting).toBe("由玩家在确认前自由改写的初始设定。");
     expect(instance.localPreferences.playerContext).toMatchObject({
-      personaSummary: expect.stringContaining("慧眼之主"),
-      appearanceSummary: expect.stringContaining("猫耳"),
-      speechStyle: expect.stringContaining("语速平稳"),
-      relationshipApproach: expect.stringContaining("长期陪伴")
+      personaSummary: "猫亚人",
+      appearanceSummary: "白色头发",
+      speechStyle: "",
+      relationshipApproach: ""
     });
-    expect(instance.modelConversationIds.size).toBe(3);
+    expect(modelRequests.map(request => request.task)).toEqual(["general.generate", "general.generate"]);
+    expect(modelRequests.every(request => request.input.initialWish === "furry")).toBe(true);
+    expect(instance.modelConversationIds.size).toBe(2);
   });
 
   it("restores a player position and private resources from a pre-overlay local save", () => {
@@ -1503,6 +1633,35 @@ describe("online world platform service", () => {
     });
   });
 
+  it("preserves a valid local retreat path when a public snapshot replaces the world", () => {
+    const now = 1_000_000;
+    const instance = service({ getAccount: () => ({ accountId: "author", username: "服主" }) });
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
+    instance.world.players.author = {
+      accountId: "author", displayName: "服主", gold: 500, fieldArmySoldiers: 0,
+      carriedGeneralIds: [], position: { x: 9, y: 9 },
+      retreatPath: [{ x: 9, y: 9 }, { x: 8, y: 9 }, { x: 7, y: 9 }]
+    };
+
+    const overlay = instance.captureLocalOverlay();
+    expect(overlay.players.author.retreatPath).toEqual([
+      { x: 9, y: 9 }, { x: 8, y: 9 }, { x: 7, y: 9 }
+    ]);
+
+    const replacement = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: now });
+    replacement.players.author = {
+      accountId: "author", displayName: "服主", position: { x: 9, y: 9 }, carriedGeneralIds: []
+    };
+    instance.world = replacement;
+    instance.restoreLocalOverlay(overlay);
+    expect(instance.world.players.author.retreatPath).toEqual([
+      { x: 9, y: 9 }, { x: 8, y: 9 }, { x: 7, y: 9 }
+    ]);
+
+    instance.world.players.author.retreatPath = [{ x: 9, y: 9 }, { x: 7, y: 9 }];
+    expect(instance.captureLocalOverlay().players.author).not.toHaveProperty("retreatPath");
+  });
+
   it("runs dialogue and memory world books in sequence and binds the compact memory to the general", async () => {
     const now = 1_000_000;
     const identity = generateOnlineWorldIdentity();
@@ -1522,8 +1681,7 @@ describe("online world platform service", () => {
       getIdentity: async () => identity,
       requestModel: async (request: any) => {
         requestedTasks.push(request.task);
-        if (request.task === "general.dialogue") return { conversationId: "conversation-dialogue", answer: '{"reply":"愿与主公谈谈北境。","command":null}' };
-        if (request.task === "general.memory.update") return { conversationId: "conversation-memory", answer: '{"category":"speech","summary":"与主公甲谈论北境","emotion":"振奋","intimacyDelta":2,"compactMemory":"言谈：[1年]与主公甲谈论北境，感到振奋。\\n经历：[1年]被主公甲发掘并提拔为将领"}' };
+        if (request.task === "general.dialogue") return { conversationId: "conversation-dialogue", answer: '```json\n{"reply":"愿与主公谈谈北境。","narration":"她抬手按住地图边角，目光落向北方。","command":null,"memoryUpdate":{"category":"speech","summary":"与主公甲谈论北境","emotion":"振奋","intimacyDelta":2,"compactMemory":"言谈：[1年]与主公甲谈论北境，感到振奋。\\n经历：[1年]被主公甲发掘并提拔为将领"}}\n```' };
         throw new Error(`unexpected task ${request.task}`);
       }
     });
@@ -1533,8 +1691,9 @@ describe("online world platform service", () => {
     instance.localPreferences.characterProfileId = "profile-a";
     instance.localPreferences.playerContext = { displayName: "主公甲", personaSummary: "慧眼之主", appearanceSummary: "", speechStyle: "沉稳", relationshipApproach: "重视忠诚" };
     const result = await instance.submitIntent({ type: "talk-general", generalId: "g1", topic: "北境局势", idempotencyKey: "talk" });
-    expect(requestedTasks).toEqual(["general.dialogue", "general.memory.update"]);
+    expect(requestedTasks).toEqual(["general.dialogue"]);
     expect(result.dialogue.memory).toMatchObject({ category: "speech", intimacyDelta: 2 });
+    expect(result.dialogue.narration).toContain("地图");
     expect(instance.world.generals.g1.memoryText).toContain("与主公甲谈论北境");
     expect(instance.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ category: "speech", emotion: "振奋" });
     expect(result.state.world.generals.g1.interactionHistory.at(-1)).toMatchObject({ userText: "北境局势", reply: "愿与主公谈谈北境。" });
@@ -1763,7 +1922,7 @@ describe("online world platform service", () => {
     expect(instance.localEvents).toHaveLength(0);
   });
 
-  it("defers a failed post-commit general generation and retries it with the same discovery identity", async () => {
+  it("defers a failed confirmed general generation and retries it with the same discovery identity", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
     world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: [], position: { x: 1, y: 1 } };
@@ -1776,7 +1935,7 @@ describe("online world platform service", () => {
     instance.work = { id: "work", authorAccountId: "authority" };
     instance.control = { seasonId: "season", authorityAccountId: "authority" };
     instance.world = world;
-    const effect = { type: "general-generation-request", sourceId: "march-job", accountId: "player", x: 2, y: 2, gender: "female", directionTags: ["冷静"], initial: false, population: 5000, resourceGrade: "A" };
+    const effect = { type: "general-generation-request", sourceId: "march-job", accountId: "player", x: 2, y: 2, gender: "female", directionTags: ["冷静"], initial: false, confirmed: true, population: 5000, resourceGrade: "A" };
     const deferred = await instance.handleEffects([effect], identity, { deferOnFailure: true });
     expect(deferred.deferred).toHaveLength(1);
     expect(instance.pendingModelEffects).toHaveLength(1);
@@ -1896,12 +2055,13 @@ describe("online world platform service", () => {
     const exportData = { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
     const comments: Array<{ endpoint: string; content: string }> = [];
     let oldSavedName = "";
+    let createBody: any = null;
     const instance = service({
       getAccount: () => ({ accountId: "author", username: "服主" }),
       getIdentity: async () => identity,
       requestConsole: async (endpoint: string, options: any = {}) => {
         if (endpoint === "/apps/old/model-config/export") return oldSavedName ? { data: { ...exportData, name: oldSavedName } } : { data: exportData };
-        if (endpoint === "/apps" && options.method === "POST") return { data: { app: { id: "new" } } };
+        if (endpoint === "/apps" && options.method === "POST") { createBody = options.body; return { data: { app: { id: "new" } } }; }
         if (endpoint === "/apps/new/model-config" && options.method === "POST") return { ok: true };
         if (endpoint === "/apps/new/model-config/export") return { data: exportData };
         if (endpoint === "/apps/old/model-config" && options.method === "POST") { oldSavedName = options.body.app.name; return { ok: true }; }
@@ -1914,11 +2074,93 @@ describe("online world platform service", () => {
     instance.world = world;
     const result = await instance.exportMigrationDraft();
     expect(result.redirectPublished).toBe(true);
+    expect(createBody).toMatchObject({ mode: "chat", type: 1 });
     expect(instance.work.id).toBe("new");
     const newRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/new/1").map((item, index) => ({ id: `n${index}`, content: item.content }))).records.map((item: any) => item.record.schema);
     const oldRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/old/1").map((item, index) => ({ id: `o${index}`, content: item.content }))).records.map((item: any) => item.record.schema);
     expect(newRecords).toContain("fyow.control/3");
     expect(newRecords).toContain("fyow.snapshot/3");
     expect(oldRecords).toContain("fyow.reset/3");
+  });
+
+  it("publishes the redirect even when the obsolete work cannot be renamed", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    const exportData = { name: "只读旧服", desc: "program", type: 2, prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
+    const comments: Array<{ endpoint: string; content: string }> = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => identity,
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        if (endpoint === "/apps/old/model-config/export") return { data: exportData };
+        if (endpoint === "/apps" && options.method === "POST") return { data: { app: { id: "editable-new" } } };
+        if (endpoint === "/apps/editable-new/model-config" && options.method === "POST") return { ok: true };
+        if (endpoint === "/apps/editable-new/model-config/export") return { data: exportData };
+        if (endpoint === "/apps/old/model-config" && options.method === "POST") throw new Error("当前作品类型不允许操作");
+        if (endpoint.startsWith("/comments/") && options.method === "POST") { comments.push({ endpoint, content: options.body.content }); return { id: `c${comments.length}` }; }
+        throw new Error(`unexpected migration endpoint ${endpoint}`);
+      }
+    });
+    instance.work = { id: "old", name: "只读旧服", description: "program", authorAccountId: "author" };
+    instance.control = { schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "old", seasonId: "season", programHash: instance.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey, startedAt: world.startedAt, updatedAt: world.startedAt };
+    instance.world = world;
+
+    const result = await instance.exportMigrationDraft();
+    expect(result).toMatchObject({ redirectPublished: true, configurationImported: true, oldWorkRenamed: false });
+    const oldRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/old/1").map((item, index) => ({ id: `o${index}`, content: item.content }))).records;
+    expect(oldRecords.some((item: any) => item.record.schema === "fyow.reset/3" && item.record.newWorkId === "editable-new")).toBe(true);
+  });
+
+  it("isolates cached game records by account inside the same app instance", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-account-cache-"));
+    const cacheFile = path.join(directory, "cache.json");
+    try {
+      const first = service({ cacheFile, getAccount: () => ({ accountId: "player-a" }) });
+      first.work = { id: "work", authorAccountId: "author" };
+      first.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+      first.world.players["player-a"] = { accountId: "player-a", displayName: "甲", gold: 111 };
+      first.saveCache();
+
+      const second = service({ cacheFile, getAccount: () => ({ accountId: "player-b" }) });
+      expect(second.loadCache("work")).toBeNull();
+      second.work = { id: "work", authorAccountId: "author" };
+      second.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+      second.world.players["player-b"] = { accountId: "player-b", displayName: "乙", gold: 222 };
+      second.saveCache();
+
+      expect(first.loadCache("work")?.cacheAccountId).toBe("player-a");
+      expect(second.loadCache("work")?.cacheAccountId).toBe("player-b");
+      const persisted = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+      expect(Object.keys(persisted.accounts).sort()).toEqual(["player-a", "player-b"]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes the old ledger as soon as a signed migration redirect is detected", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }) });
+    instance.work = { id: "old-work", authorAccountId: "author" };
+    instance.control = {
+      id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "old-work", seasonId: "season",
+      authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey
+    };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", position: { x: 1, y: 1 }, fieldArmySoldiers: 10, carriedGeneralIds: [] };
+    const reset = signRecord({
+      schema: "fyow.reset/3", resetId: "reset", gameId: "cc.aiero.fyow.grid-conquest", seasonId: "season",
+      oldWorkId: "old-work", newWorkId: "new-work", newWorkUrl: "https://aigirlfriend.baby/zh/explore/installed/new-work",
+      exportSha256: "fixture", issuedAt: 2000
+    }, identity.signingPrivateKey);
+    instance.readHistory = vi.fn(async () => ({
+      assembled: { records: [{ record: reset, sources: [{ id: "reset-comment", account_id: "author", created_at: 2000 }] }] }
+    }));
+    instance.settleLocalClock = vi.fn(async () => null);
+
+    const state = await instance.syncNow(true);
+    expect(state.status).toBe("migrating");
+    expect(state.migration).toMatchObject({ workId: "new-work" });
+    expect(instance.settleLocalClock).not.toHaveBeenCalled();
+    await expect(instance.submitIntent({ type: "quote-march", to: { x: 2, y: 2 }, soldiers: 1 })).rejects.toThrow(/正在搬迁/);
   });
 });

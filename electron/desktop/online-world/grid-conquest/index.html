@@ -14,19 +14,23 @@
         <button id="owner-command-toggle" class="owner-command-toggle hidden" type="button">服主指令</button>
         <span id="clock">--:--:--</span><i></i><b id="year">第 1 年</b>
         <span class="points-balance" aria-label="平台剩余积分"><small>剩余积分</small><b id="points-balance-value">—</b></span>
-        <button id="sound-toggle" class="sound-toggle" type="button" aria-label="调整游戏音效">音效 60%</button>
+        <div class="sound-control">
+          <span id="sound-volume-label">音效 60%</span>
+          <button id="sound-knob" class="sound-knob" type="button" role="slider" aria-label="游戏音效音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="60" aria-valuetext="60%" title="拖动或滚轮调整音量"><i aria-hidden="true"></i></button>
+          <input id="sound-volume" class="visually-hidden" type="range" min="0" max="100" step="5" value="60" tabindex="-1" aria-hidden="true">
+        </div>
       </header>
       <section class="layout social-collapsed">
         <div class="social-dock">
         <button id="toggle-social" class="dock-toggle social-toggle" type="button" aria-expanded="false" aria-controls="social-sidebar" aria-label="展开通讯" title="展开通讯">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg><span>通讯</span><svg class="dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></svg><span>通讯</span><span id="social-unread-badge" class="social-unread-badge hidden" aria-label="未读通讯">0</span><svg class="dock-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
         </button>
         <section id="social-sidebar" class="social-sidebar panel" aria-label="通讯" aria-hidden="true" inert>
           <header><span><small>疆土驿站</small><b>通讯</b></span></header>
           <nav class="social-tabs" aria-label="通讯频道">
-            <button type="button" data-social-tab="world" class="active">世界</button>
-            <button type="button" data-social-tab="generals">将领</button>
-            <button type="button" data-social-tab="letters">书信</button>
+            <button type="button" data-social-tab="world" class="active"><span>世界</span><span class="social-tab-badge hidden" data-social-badge="world" aria-label="未读世界消息">0</span></button>
+            <button type="button" data-social-tab="generals"><span>将领</span><span class="social-tab-badge hidden" data-social-badge="generals" aria-label="未读将领消息">0</span></button>
+            <button type="button" data-social-tab="letters"><span>书信</span><span class="social-tab-badge hidden" data-social-badge="letters" aria-label="未读书信">0</span></button>
           </nav>
           <section id="social-world" class="social-page">
             <div id="world-chat-messages" class="chat-messages" aria-live="polite"></div>
@@ -41,14 +45,42 @@
               <form id="dialogue-form"><textarea id="dialogue-input" maxlength="120" aria-label="将领对话内容" placeholder="想和将领说什么？"></textarea><button id="dialogue-send" class="primary send-icon" type="button" aria-label="发送将领消息" title="发送 · Enter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 11 18-8-8 18-2-8-8-2Z"/><path d="m11 13 10-10"/></svg></button></form>
             </section>
           </section>
-          <section id="social-letters" class="social-page hidden">
-            <header><b>收到的信件</b><strong id="direct-count">0</strong></header>
-            <div id="direct-inbox" class="direct-inbox empty">暂无来信</div>
+          <section id="social-letters" class="social-page letters-page hidden">
+            <header><b>收发书信</b><span class="letters-total"><strong id="direct-count">0</strong><small id="direct-unread" class="social-tab-badge hidden">0</small></span></header>
+            <div class="letters-columns">
+              <section class="letters-column" aria-labelledby="letters-received-title">
+                <header><b id="letters-received-title">收到</b><small id="direct-received-count">0</small></header>
+                <div id="direct-inbox" class="direct-inbox empty" aria-live="polite">暂无收到的书信</div>
+              </section>
+              <section class="letters-column" aria-labelledby="letters-sent-title">
+                <header><b id="letters-sent-title">发出</b><small id="direct-sent-count">0</small></header>
+                <div id="direct-outbox" class="direct-inbox empty" aria-live="polite">暂无发出的书信</div>
+              </section>
+            </div>
           </section>
         </section>
         </div>
         <div class="map-workspace">
         <div class="map-card">
+          <section id="map-region-actions" class="map-region-actions hidden" aria-label="选中区域的行动">
+            <header><span><b>区域行动</b><small id="current-march-army">行军队伍 0 人</small></span><small id="map-actions-coordinate">—</small></header>
+            <div id="territory-actions" class="territory-actions hidden">
+              <span class="mining-control"><button id="start-mining" type="button">开采资源</button><small id="mining-cooldown" class="mining-cooldown" aria-live="polite"></small></span>
+              <label>练兵数量<span class="train-amount-heading"><output id="train-amount-value" for="train-amount">0</output><small> / <span id="train-amount-max">0</span></small></span><input id="train-amount" type="range" min="0" max="0" value="0"><small class="train-cost">消耗 <b id="train-cost">0</b> 金币</small></label>
+              <button id="train" type="button">开始练兵</button>
+            </div>
+            <div class="map-march-actions">
+              <button id="march" class="primary" type="button">向这里行军</button>
+            </div>
+          </section>
+          <section id="map-army-transfer" class="map-army-transfer hidden" aria-label="驻军调度" aria-hidden="true">
+            <header><span><b>驻军调度</b><small>正数征召 · 负数部署</small></span><strong id="territory-army-count">0 / 0</strong></header>
+            <label class="army-transfer-field"><span>调兵数量 <small>+征召 / −部署</small></span><input id="army-transfer-amount" type="number" step="1" value="0" aria-describedby="army-transfer-range army-transfer-confirm-hint"></label>
+            <small id="army-transfer-range" class="army-transfer-range">可部署 0 · 可征召 0</small>
+            <div class="army-transfer-steps" aria-label="快捷调整调兵数量"><button type="button" data-army-delta="-50">−50</button><button type="button" data-army-delta="-10">−10</button><button type="button" data-army-delta="10">+10</button><button type="button" data-army-delta="50">+50</button></div>
+            <div class="army-transfer-presets"><button id="army-transfer-deploy-max" type="button">最大部署</button><button id="army-transfer-gather-all" type="button">全部征召</button></div>
+            <div class="army-transfer-confirm-row"><small id="army-transfer-confirm-hint" class="army-transfer-confirm-hint hidden">按 Enter 确认</small><button id="army-transfer-confirm" class="army-transfer-confirm" type="button" disabled>确认调兵</button></div>
+          </section>
           <div id="map-viewport" class="map-viewport">
             <canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas>
             <div id="map-task-tooltip" class="map-task-tooltip hidden" role="status"></div>
@@ -57,6 +89,9 @@
           </div>
           <div class="legend">
             <span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span>
+            <button id="center-player" type="button" aria-label="定位玩家" title="定位玩家">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
+            </button>
             <span class="legend-tip">滚轮缩放 · 右键拖动</span>
           </div>
         </div>
@@ -67,8 +102,8 @@
               <header><b>选中的区域</b><small id="cell-coordinate">请选择地图格子</small></header>
               <div class="cell-facts"><span><small>人口</small><b id="cell-population">—</b></span><span><small>资源</small><b id="cell-resource">—</b></span><span><small>驻军 / 上限</small><b id="cell-garrison">—</b></span><div class="power-crest"><i aria-hidden="true">⚔</i><div><small>守备战力</small><b id="cell-power">—</b></div></div></div>
             </section>
-            <section class="area-companions"><header><b>身边的将领</b><small>查看 · 交互 · 部署</small></header><div id="carried-generals" class="stack empty">尚无随行将领</div></section>
             <section class="area-owner"><header><small>领地主人</small><b id="cell-owner">—</b></header><div id="deployed-generals" class="deployed-generals empty">此地没有部署将领</div></section>
+            <section class="area-companions"><header><b>随行将领</b><small>前两名影响战力与天赋</small></header><div id="carried-generals" class="stack empty" aria-label="随行将领排序列表">尚无随行将领</div></section>
           </div>
         </section>
         </div>
@@ -84,33 +119,14 @@
             <div id="model-usage-log" class="model-usage-log empty">本次尚未调用模型</div>
           </section>
 
-          <section class="panel march-panel">
-            <header><span><small>可调动兵力</small><b>行军队伍</b></span><strong id="march-available">0 人</strong></header>
-            <div class="march-cost"><span>每移动 1 格</span><b id="march-cost-per-cell">10 金币</b></div>
-          </section>
-
           <section class="panel training-panel">
-            <header><span><small>金币投入 · 永久成长</small><b>战力修炼</b></span><strong id="training-level">0 阶</strong></header>
+            <header><span><small>金币投入 · 永久成长</small><b>闭关修炼</b></span><strong id="training-level">0 / 5 次</strong></header>
             <div class="training-grid">
               <label>修炼对象<select id="training-target"></select></label>
-              <label>连续修炼<input id="training-levels" type="number" min="1" max="10" value="1"></label>
-              <label id="cultivation-gold-field" class="hidden">投入金币<input id="cultivation-gold" type="number" step="1" value="5000"></label>
+              <label id="cultivation-gold-field">投入金币<input id="cultivation-gold" type="number" step="1" value="5000"></label>
               <label id="cultivation-material-field" class="hidden">天材地宝<select id="cultivation-material"></select></label>
               <div id="training-preview" class="training-preview">选择自己或未部署将领</div>
               <button id="start-power-training" class="primary" type="button">开始修炼</button>
-            </div>
-          </section>
-
-          <section class="panel orders-panel">
-            <header><span><small>针对选中区域</small><b>领地行动</b></span></header>
-            <div class="action-grid">
-              <button id="start-mining" type="button">挂机开采</button>
-              <label>练兵数量<input id="train-amount" type="number" min="1" max="10000" value="10"></label>
-              <button id="train" type="button">开始练兵</button>
-              <label>行军士兵<input id="march-soldiers" type="number" min="0" value="0"></label>
-              <div id="march-generals" class="march-generals"><small>随行将领</small><span>暂无可选将领</span></div>
-              <label class="check"><input id="march-attack" type="checkbox"><span>抵达后攻打</span></label>
-              <button id="march" class="primary" type="button">向这里行军</button>
             </div>
           </section>
 
@@ -122,6 +138,12 @@
           <section class="panel captive-panel">
             <header><span><small>等待处置</small><b>俘虏区</b></span><strong id="captive-count">0</strong></header>
             <div id="captives" class="stack empty">暂无俘虏</div>
+          </section>
+
+          <section class="panel market-entry-panel">
+            <button id="market-open" class="market-entry" type="button" aria-label="打开名将市场">
+              <span><small>公开交易</small><b>名将市场</b></span><strong><small>在售数量</small><em id="market-count">0</em></strong>
+            </button>
           </section>
 
           <section class="panel"><header><b>天材地宝</b><small>仅存本机</small></header><div id="material-inventory" class="material-inventory"></div></section>
@@ -203,14 +225,92 @@
       <article class="paper-modal deploy-confirmation"><h2 id="deploy-confirmation-text"></h2><footer><button id="deploy-cancel" type="button">取消</button><button id="deploy-confirm" class="primary" type="button">确认部署</button></footer></article>
     </section>
 
+    <section id="march-confirmation" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="march-confirmation-title">
+      <article class="paper-modal march-confirmation">
+        <header><span><small>出征确认</small><h1 id="march-confirmation-title">确认行军队伍</h1><p id="march-confirmation-route">—</p></span><button id="march-confirmation-close" type="button">关闭</button></header>
+        <div class="march-confirmation-stats">
+          <span><small>随军士兵</small><strong id="march-party-count">0 人</strong></span>
+          <span><small>行军战力</small><strong id="march-party-power">0</strong></span>
+          <span><small>预计耗时</small><strong id="march-party-duration">—</strong></span>
+          <span id="march-party-cost-card"><small>预计消耗</small><strong id="march-party-cost">—</strong></span>
+        </div>
+        <div id="march-army-transfer-slot" class="march-army-transfer-slot hidden" aria-hidden="true"></div>
+        <section class="march-confirmation-generals">
+          <header><b>随行将领</b><small>全部随行，前两名影响战力与天赋</small></header>
+          <div id="march-confirmation-generals" class="march-general-list empty">暂无随行将领</div>
+        </section>
+        <label id="march-attack-field" class="march-attack-field"><input id="march-attack" type="checkbox"><span><b>抵达后攻打</b><small>抵达其他势力或中立地区后立即发起战斗</small></span></label>
+        <p id="march-confirmation-note" class="march-confirmation-note">正在核算行军消耗…</p>
+        <footer><button id="march-quote-retry" class="hidden" type="button">重新核算</button><button id="march-confirmation-cancel" type="button">取消</button><button id="march-confirmation-submit" class="primary" type="button" disabled>确认出征</button></footer>
+      </article>
+    </section>
+
+    <section id="zero-army-march-confirmation" class="overlay zero-army-march-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="zero-army-march-title">
+      <article class="paper-modal zero-army-march-confirmation">
+        <header><span><small>行军确认</small><h1 id="zero-army-march-title">空队行军</h1></span></header>
+        <p>您目前行军队伍中没有士兵，是否开始行军？</p>
+        <footer><button id="zero-army-march-cancel" type="button">取消</button><button id="zero-army-march-confirm" class="primary" type="button">仍然行军</button></footer>
+      </article>
+    </section>
+
+    <section id="general-action-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="general-action-title">
+      <article class="paper-modal general-action-modal">
+        <header><span><small id="general-action-kind">将领请求</small><h1 id="general-action-title">—</h1></span><button id="close-general-action" type="button" aria-label="关闭">关闭</button></header>
+        <p id="general-action-description"></p>
+        <label id="general-action-guidance-field" class="hidden">书信指导<textarea id="general-action-guidance" maxlength="800" placeholder="可以补充希望将领如何措辞"></textarea></label>
+        <footer><button id="general-action-reject" type="button">拒绝</button><button id="general-action-confirm" class="primary" type="button">同意并消耗积分</button></footer>
+      </article>
+    </section>
+
+    <section id="market-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="market-title">
+      <article class="paper-modal market-modal">
+        <header class="market-modal-header"><span><small>公开交易 · 名将流转</small><h1 id="market-title">名将市场</h1><p>查看将领档案与卖家介绍，选中心仪的名将完成交易。</p></span><button id="market-close" type="button" aria-label="关闭名将市场">关闭</button></header>
+        <div class="market-toolbar">
+          <div><b id="market-total-label">当前在售 0 名</b><small>所有价格均以金币结算</small></div>
+          <button id="market-sell-open" class="primary market-sell-open" type="button">上架名将</button>
+        </div>
+        <section id="market-sell-sheet" class="market-sell-sheet hidden" aria-labelledby="market-sell-title">
+          <header><span><small>卖出自己的将领</small><h2 id="market-sell-title">上架名将</h2></span><button id="market-sell-close" type="button" aria-label="关闭上架面板">收起</button></header>
+          <form id="market-sell-form">
+            <div class="market-sell-fields">
+              <label>选择将领<select id="market-sell-general" required></select></label>
+              <label>售价（金币）<input id="market-sell-price" type="number" min="1" max="1000000000" step="1" value="1000" required></label>
+            </div>
+            <label>卖家介绍 <small>可选</small><textarea id="market-sell-note" maxlength="240" placeholder="写一句对这名将领的介绍，让买家更快了解他/她。"></textarea></label>
+            <p id="market-sell-hint" class="market-sell-hint">上架后将领会暂时离开随行列表；下架后可重新带在身边。</p>
+            <footer><button id="market-sell-cancel" type="button">取消</button><button id="market-sell-submit" class="primary" type="button">确认上架</button></footer>
+          </form>
+        </section>
+        <section id="market-manage-sheet" class="market-manage-sheet hidden" aria-labelledby="market-manage-title">
+          <header><span><small>我的在售将领</small><h2 id="market-manage-title">—</h2></span><button id="market-manage-close" type="button" aria-label="关闭下架面板">收起</button></header>
+          <p id="market-manage-text">确认下架后，这名将领会回到你的随行列表。</p>
+          <footer><button id="market-manage-cancel" type="button">暂不下架</button><button id="market-manage-confirm" class="primary" type="button">确认下架</button></footer>
+        </section>
+        <div id="market-listings" class="market-listings"></div>
+      </article>
+    </section>
+
+    <section id="letter-detail-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="letter-detail-title">
+      <article class="paper-modal letter-detail-modal">
+        <header><span><small id="letter-detail-kind">书信</small><h1 id="letter-detail-title">—</h1></span><button id="letter-detail-close" type="button" aria-label="关闭书信">关闭</button></header>
+        <div id="letter-detail-meta" class="letter-detail-meta"></div>
+        <p id="letter-detail-purpose" class="letter-detail-purpose hidden"></p>
+        <div id="letter-detail-text" class="letter-detail-text"></div>
+      </article>
+    </section>
+
+    <section id="general-discovery-confirmation" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="general-discovery-title">
+      <article class="paper-modal discovery-confirmation">
+        <header><span><small>新的发现</small><h1 id="general-discovery-title">似乎发掘到了一位拔尖兵士</h1></span></header>
+        <p id="general-discovery-text">是否要将其提拔为将领？确认后会消耗少量积分生成将领信息。</p>
+        <footer><button id="general-discovery-decline" type="button">暂不提拔</button><button id="general-discovery-confirm" class="primary" type="button">提拔为将领</button></footer>
+      </article>
+    </section>
+
     <section id="owner-command-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="owner-command-title">
       <article class="paper-modal owner-command-modal">
         <header><span><small>仅本游戏服主可用</small><h1 id="owner-command-title">服主指令</h1><p id="owner-account">—</p></span><button id="close-owner-command" type="button">关闭</button></header>
         <div class="owner-server-state"><span><small>服务器状态</small><b id="owner-server-status">尚未开服</b></span><button id="owner-open-server" class="primary" type="button">开服</button></div>
-        <section class="owner-command-section">
-          <h2>游戏更新</h2><p>将作品介绍中的新版游戏发布给本服玩家，保留当前地图和玩家进度。</p>
-          <button id="owner-publish-program" type="button">发布游戏更新</button>
-        </section>
         <section class="owner-command-section">
           <h2>玩家数据</h2>
           <p>重置后清除该玩家的领地、部署将领与角色进度。该玩家下次进入时需要重新创建角色。</p>

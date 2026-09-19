@@ -37,19 +37,19 @@ describe("grid world general chat UI", () => {
     ui.input.value = "谈谈北境战事";
     ui.button.click();
     expect(ui.input.value).toBe("");
-    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["茂密：谈谈北境战事", "正在等待将领回复……"]);
+    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["谈谈北境战事", "正在等待将领回复……"]);
 
     ui.context.failDialogueRequest("request-1", "同步暂时中断");
     expect(ui.input.value).toBe("谈谈北境战事");
-    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["茂密：谈谈北境战事", "发送失败：同步暂时中断"]);
+    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["谈谈北境战事", "发送失败：同步暂时中断"]);
 
     ui.input.value = "谈谈北境战事";
     ui.button.click();
     expect(ui.requests.size).toBe(1);
-    ui.general.interactionHistory.push({ accountId: "player-1", userText: "谈谈北境战事", reply: "北境正待用兵。" });
+    ui.general.interactionHistory.push({ accountId: "player-1", userText: "谈谈北境战事", reply: "北境正待用兵。", narration: "她垂眸整理袖口，随后抬眼望向你。" });
     ui.context.finishDialogueResult("request-1", { dialogue: { reply: "北境正待用兵。" } });
     ui.context.renderDialogue();
-    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["茂密：谈谈北境战事", "赤岚·霜牙：北境正待用兵。"]);
+    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["谈谈北境战事", "北境正待用兵。", "她垂眸整理袖口，随后抬眼望向你。"]);
   });
 
   it("keeps the draft when another dialogue request is already pending", () => {

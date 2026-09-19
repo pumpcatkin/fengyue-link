@@ -39,7 +39,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(20);
+    expect(card.version).toBe(26);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -52,13 +52,15 @@ describe("online world game cards", () => {
     expect(card.companion.configuration.pre_prompt).toContain("只有天生拥有“慧眼”");
     expect(card.companion.configuration.post_text).toContain("单个 JSON 对象");
     expect(card.companion.configuration.post_text).toContain("合理补全");
-    expect(card.companion.configuration.world_book).toHaveLength(5);
+    expect(card.companion.configuration.world_book).toHaveLength(7);
     expect(card.companion.configuration.world_book.map((entry: any) => entry.key)).toEqual([
       "_or_[[FYOW:TASK:general.generate:v1]]",
       "_or_[[FYOW:TASK:player.profile-context:v1]]",
       "_or_[[FYOW:TASK:general.dialogue:v1]]",
       "_or_[[FYOW:TASK:general.captive-dialogue:v1]]",
-      "_or_[[FYOW:TASK:general.memory.update:v1]]"
+      "_or_[[FYOW:TASK:general.memory.update:v1]]",
+      "_or_[[FYOW:TASK:general.letter:v1]]",
+      "_or_[[FYOW:TASK:general.appearance-edit:v1]]"
     ]);
     expect(card.companion.configuration.world_book.every((entry: any) => entry.key_region === 2 && entry.enable === true && entry.probability === 100)).toBe(true);
     expect(card.companion.configuration.world_book[2].value).toContain("最多 180 个汉字");
@@ -71,6 +73,8 @@ describe("online world game cards", () => {
     expect(card.companion.configuration.world_book[2].value).toContain("recipientKey");
     expect(card.companion.configuration.world_book[3].value).toContain("不得输出其他游戏操作或任何账号编号");
     expect(card.companion.configuration.world_book[4].value).toContain("不得改写或遗漏");
+    expect(card.companion.configuration.world_book[5].value).toContain("interactionHistory");
+    expect(card.companion.configuration.world_book[6].value).toContain("changeNote");
   });
 
   it("rejects edits to either the creation snapshot or the whole package", () => {
@@ -127,7 +131,7 @@ describe("online world game cards", () => {
     expect(exported.companion.configuration.app.name).toBe(`艳猎征途[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(exported.companion.configuration.app.summary).toContain("64×64");
     expect(exported.companion.configuration.app.description).toContain("[[FYOW-PROGRAM/1:");
-    expect(exported.companion.configuration.world_book).toHaveLength(5);
+    expect(exported.companion.configuration.world_book).toHaveLength(7);
   });
 
   it("updates the card-level binding after an author-signed migration", () => {

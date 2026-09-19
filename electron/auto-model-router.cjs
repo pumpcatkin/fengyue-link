@@ -67,7 +67,7 @@ function delay(ms, signal) {
 
 // A round visits every live candidate once. Refreshing between rounds admits new
 // models and avoids retrying a cached, removed model forever. No attempt ceiling.
-async function runAutoModel({ loadModels, execute, signal, onState = () => {}, wait = delay }) {
+async function runAutoModel({ loadModels, execute, signal, onState = () => {}, wait = delay, maxAttempts = null }) {
   let attempt = 0;
   let cycle = 0;
   for (;;) {
@@ -81,6 +81,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
       if (!candidates.length) throw new Error("平台暂未返回可用文本模型");
     } catch (error) {
       if (!retryable(error)) throw error;
+      if (maxAttempts != null && Number.isFinite(Number(maxAttempts)) && cycle >= Math.max(1, Number(maxAttempts))) throw error;
       assertActive(signal);
       const retryAfterMs = Math.min(30000, 1500 * 2 ** Math.min(cycle - 1, 5));
       onState({ stage: "waiting", attempt, cycle, retryAfterMs, error: error.message });
@@ -96,6 +97,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
         assertActive(signal);
         return result;
       } catch (error) {
+        if (maxAttempts != null && Number.isFinite(Number(maxAttempts)) && attempt >= Math.max(1, Number(maxAttempts))) throw error;
         if (!retryable(error)) throw error;
         assertActive(signal);
         const retryAfterMs = Math.min(30000, 1000 * 2 ** Math.min(cycle - 1, 5));

@@ -19,13 +19,13 @@ const RARITIES = Object.freeze([
 const RARITY_BY_ID = Object.freeze(Object.fromEntries(RARITIES.map(item => [item.id, item])));
 
 const MATERIALS = Object.freeze([
-  Object.freeze({ id: "white", label: "白色天赋素材", progress: 8, mode: "grow" }),
-  Object.freeze({ id: "green", label: "绿色天赋素材", progress: 20, mode: "grow" }),
-  Object.freeze({ id: "blue", label: "蓝色天赋素材", progress: 42, mode: "grow" }),
-  Object.freeze({ id: "purple", label: "紫色天赋素材", progress: 78, mode: "grow" }),
-  Object.freeze({ id: "gold", label: "金色天赋素材", progress: 135, mode: "grow" }),
-  Object.freeze({ id: "red-ascend", label: "赤曜升格素材", progress: 0, mode: "ascend" }),
-  Object.freeze({ id: "red-reroll", label: "赤曜洗髓素材", progress: 0, mode: "reroll" })
+  Object.freeze({ id: "white", label: "养气丹", progress: 8, mode: "grow" }),
+  Object.freeze({ id: "green", label: "聚灵丹", progress: 20, mode: "grow" }),
+  Object.freeze({ id: "blue", label: "凝元丹", progress: 42, mode: "grow" }),
+  Object.freeze({ id: "purple", label: "紫府丹", progress: 78, mode: "grow" }),
+  Object.freeze({ id: "gold", label: "金髓丹", progress: 135, mode: "grow" }),
+  Object.freeze({ id: "red-ascend", label: "赤曜丹", progress: 0, mode: "ascend" }),
+  Object.freeze({ id: "red-reroll", label: "赤曜丹", progress: 0, mode: "reroll" })
 ]);
 const MATERIAL_BY_ID = Object.freeze(Object.fromEntries(MATERIALS.map(item => [item.id, item])));
 
@@ -325,7 +325,7 @@ function normalizeTalent(talent, seedOrId = "talent", idValue) {
 }
 
 const KEY_LABELS = Object.freeze({
-  marchDuration: "行军时长", marchCost: "行军消耗", combatPower: "战斗力", attackPower: "进攻力", defensePower: "防御力",
+  marchDuration: "行军时长", marchCost: "行军金币消耗", combatPower: "战斗力", attackPower: "进攻力", defensePower: "防御力",
   miningDuration: "采集时长", miningYield: "采集产量", trainingDuration: "练兵时长", trainingCost: "练兵消耗",
   trainingYield: "练兵产量", cultivationCost: "修炼消耗", cultivationPower: "修炼收益", discoveryChance: "发现概率"
 });

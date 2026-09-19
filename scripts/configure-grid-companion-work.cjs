@@ -5,8 +5,9 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
-const { createBundledGridCard, configurationDigest, normalizeConfiguration } = require("../electron/online-world-card.cjs");
-const { FYOW_SCHEMAS, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
+const { createBundledGridCard, configurationDigest, normalizeConfiguration, rebindGameCard } = require("../electron/online-world-card.cjs");
+const { FYOW_SCHEMAS, canonicalJson, createResetDirective, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
+const { parseProgram } = require("../electron/online-world-runtime.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
 const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder } = require("../electron/online-world-service.cjs");
@@ -632,7 +633,9 @@ async function activateSavedProgram(window, card, workId) {
 }
 
 async function main() {
-  const card = createBundledGridCard();
+  const bundledCard = createBundledGridCard();
+  const requestedWorkId = String(process.env.FYOW_COMPANION_WORK_ID || "").trim();
+  const card = requestedWorkId ? rebindGameCard(bundledCard, requestedWorkId, ORIGIN) : bundledCard;
   const workId = card.companion.workId;
   let desired = card.companion.configuration;
   const platformSession = session.fromPartition(`fyow-configure-grid-${Date.now()}`, { cache: false });
@@ -711,6 +714,109 @@ async function main() {
     }
     if (process.env.FYOW_PROBE_AUTO_MODEL === "1") {
       process.stdout.write(`${JSON.stringify(await runAutomaticModelProbe(window, workId), null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_MIGRATE_ACTIVE === "1") {
+      const profileResponse = await api(window, "/go/api/account/profile");
+      if (!profileResponse.ok) throw new Error(`读取当前账号失败：HTTP ${profileResponse.status}`);
+      const profile = unwrap(profileResponse);
+      const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+      const username = String(profile?.name || profile?.username || profile?.email || "服主");
+      const service = new OnlineWorldService({
+        requestConsole: async (endpoint, options) => {
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(response.payload?.message || response.payload?.msg || `平台接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        requestModel: async () => { throw new Error("搬迁不应调用模型"); },
+        getAccount: () => ({ accountId, username }),
+        getIdentity: async () => loadOnlineWorldIdentity(accountId),
+        getOrigin: () => ORIGIN,
+        cacheFile: null,
+        onChange: () => {}
+      });
+      try {
+        const opened = await service.open({ card, displayName: username, orientation: "any" });
+        if (!opened.initialized || !opened.isAuthority) throw new Error("当前账号或设备不是这个服务器的服主");
+        const migration = await service.exportMigrationDraft();
+        process.stdout.write(`${JSON.stringify({ ok: Boolean(migration.redirectPublished), fromWorkId: workId, migration }, null, 2)}\n`);
+      } finally {
+        service.close();
+      }
+      return;
+    }
+    if (process.env.FYOW_LINK_MIGRATION_TARGET) {
+      const targetWorkId = String(process.env.FYOW_LINK_MIGRATION_TARGET).trim();
+      const profileResponse = await api(window, "/go/api/account/profile");
+      if (!profileResponse.ok) throw new Error(`读取当前账号失败：HTTP ${profileResponse.status}`);
+      const profile = unwrap(profileResponse);
+      const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+      const username = String(profile?.name || profile?.username || profile?.email || "服主");
+      const targetConfigResponse = await api(window, `/console/api/apps/${encodeURIComponent(targetWorkId)}/model-config/export`);
+      if (!targetConfigResponse.ok) throw new Error(`读取搬迁目标配置失败：HTTP ${targetConfigResponse.status}`);
+      const targetConfig = findConfig(unwrap(targetConfigResponse));
+      const targetDescription = String(targetConfig?.desc ?? targetConfig?.descr ?? targetConfig?.dsc ?? targetConfig?.intro ?? targetConfig?.description ?? targetConfig?.app?.description ?? "");
+      const targetProgram = parseProgram(targetDescription, card.gameId);
+      if (!targetProgram || targetProgram.digest !== bundledCard.program.digest) throw new Error("搬迁目标尚未安装本次游戏程序");
+      const targetInstalledResponse = await api(window, `/console/api/installed-apps/${encodeURIComponent(targetWorkId)}`);
+      if (!targetInstalledResponse.ok) throw new Error(`读取搬迁目标失败：HTTP ${targetInstalledResponse.status}`);
+      const targetInstalled = unwrap(targetInstalledResponse);
+      const targetApp = targetInstalled?.app || targetInstalled;
+      if (String(targetApp?.created_by_account_id || "") !== accountId) throw new Error("搬迁目标不属于当前服主账号");
+      if (assembleCommentRecords(await readAllComments(window, targetWorkId)).records.some(item => item.record?.schema === FYOW_SCHEMAS.control)) throw new Error("搬迁目标已经存在游戏账本");
+      const service = new OnlineWorldService({
+        requestConsole: async (endpoint, options) => {
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(response.payload?.message || response.payload?.msg || `平台接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        requestModel: async () => { throw new Error("搬迁不应调用模型"); },
+        getAccount: () => ({ accountId, username }),
+        getIdentity: async () => loadOnlineWorldIdentity(accountId),
+        getOrigin: () => ORIGIN,
+        cacheFile: null,
+        onChange: () => {}
+      });
+      try {
+        const opened = await service.open({ card, displayName: username, orientation: "any" });
+        if (!opened.initialized || !opened.isAuthority) throw new Error("当前账号或设备不是来源服务器的服主");
+        const identity = await service.getIdentity();
+        const oldWork = service.work;
+        const oldControl = service.control;
+        const sourceConfigResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
+        if (!sourceConfigResponse.ok) throw new Error(`读取来源配置失败：HTTP ${sourceConfigResponse.status}`);
+        const exportSha256 = crypto.createHash("sha256").update(canonicalJson(findConfig(unwrap(sourceConfigResponse)))).digest("hex");
+        const newWork = {
+          ...oldWork,
+          id: targetWorkId,
+          name: String(targetApp?.name || oldWork.name),
+          description: targetDescription,
+          url: `${ORIGIN}/zh/explore/installed/${encodeURIComponent(targetWorkId)}`,
+          authorAccountId: accountId
+        };
+        const newControlUnsigned = { ...oldControl, id: crypto.randomUUID(), workId: targetWorkId, programHash: bundledCard.program.digest, updatedAt: service.now() };
+        delete newControlUnsigned.signature;
+        const newControl = signRecord(newControlUnsigned, identity.signingPrivateKey);
+        service.work = newWork;
+        service.control = newControl;
+        await service.postRecord(newControl);
+        await service.publishSnapshot();
+        service.work = oldWork;
+        service.control = oldControl;
+        const reset = signRecord(createResetDirective({
+          gameId: oldControl.gameId,
+          seasonId: oldControl.seasonId,
+          oldWorkId: oldWork.id,
+          newWorkId: targetWorkId,
+          newWorkUrl: newWork.url,
+          exportSha256,
+          issuedAt: service.now()
+        }), identity.signingPrivateKey);
+        await service.postRecord(reset);
+        process.stdout.write(`${JSON.stringify({ ok: true, fromWorkId: oldWork.id, workId: targetWorkId, url: newWork.url, controlId: newControl.id, resetId: reset.resetId, programDigest: bundledCard.program.digest }, null, 2)}\n`);
+      } finally {
+        service.close();
+      }
       return;
     }
     if (process.env.FYOW_INSPECT_MODELS === "1") {
@@ -808,6 +914,17 @@ async function main() {
     const beforeResponse = await api(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
     if (!beforeResponse.ok) throw new Error(`读取创作配置失败：HTTP ${beforeResponse.status}`);
     const before = findConfig(unwrap(beforeResponse));
+    if (process.env.FYOW_INSPECT_META === "1") {
+      const installedResponse = await api(window, `/console/api/installed-apps/${encodeURIComponent(workId)}`);
+      const installed = unwrap(installedResponse);
+      process.stdout.write(`${JSON.stringify({
+        ok: true,
+        workId,
+        exported: Object.fromEntries(Object.entries(before || {}).filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))),
+        installed: installed?.app || installed
+      }, null, 2)}\n`);
+      return;
+    }
     const programOnly = process.env.FYOW_PROGRAM_ONLY === "1";
     if (programOnly) {
       desired = normalizeConfiguration(before, card.companion);

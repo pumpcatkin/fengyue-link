@@ -112,7 +112,6 @@
 | `online-world:import-card` / `export-card` | 导入或由作者导出完整卡包 |
 | `online-world:open` / `close` | 打开或关闭游戏卡服务 |
 | `online-world:initialize` | 作者开服 |
-| `online-world:activate-program` | 作者签名启用详细介绍中的新程序 |
 | `online-world:sync` | 静默同步评论区、私信唤醒和本地计时任务 |
 | `online-world:submit-intent` | 串行执行玩家行动 |
 | `online-world:send-direct` | 发送受控将领书信 |

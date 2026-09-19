@@ -6,21 +6,28 @@ const require = createRequire(import.meta.url);
 const { AUTHOR_LINKS, configuredAuthorUrl, publicAuthorInfo } = require("../electron/author-info.cjs");
 
 describe("author information", () => {
-  it("publishes the author and the unique official GitHub repository", () => {
+  it("publishes the author, profile and fixed official GitHub download page", () => {
     const info = publicAuthorInfo();
     expect(info.name).toBe("八爪毛米");
+    expect(info.links.homepage).toEqual({
+      key: "homepage",
+      label: "作者主页",
+      configured: true,
+      url: "https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd"
+    });
     expect(info.links.github).toEqual({
       key: "github",
-      label: "GitHub 项目页",
+      label: "GitHub 下载页",
       configured: true,
-      url: "https://github.com/pumpcatkin/fengyue-link"
+      url: "https://github.com/pumpcatkin/fengyue-link/releases/latest"
     });
-    expect(configuredAuthorUrl("github")).toBe("https://github.com/pumpcatkin/fengyue-link");
+    expect(configuredAuthorUrl("homepage")).toBe("https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd");
+    expect(configuredAuthorUrl("github")).toBe("https://github.com/pumpcatkin/fengyue-link/releases/latest");
   });
 
   it("keeps links awaiting author input visibly unavailable", () => {
     const info = publicAuthorInfo();
-    for (const key of ["homepage", "releasePost", "feedbackPost"] as const) {
+    for (const key of ["releasePost", "feedbackPost"] as const) {
       expect(AUTHOR_LINKS[key]).toBe("");
       expect(info.links[key].configured).toBe(false);
       expect(info.links[key].url).toBeNull();

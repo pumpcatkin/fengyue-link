@@ -631,7 +631,7 @@ class AccountBackend {
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),
       requestModel: (request, options) => this.onlineWorldModelRequest(request, options),
-      runModelTask: (label, execute) => this.withAutoModel(this.onlineWorldService?.work?.id, label, execute, { scope: "online-world" }),
+      runModelTask: (label, execute, options = {}) => this.withAutoModel(this.onlineWorldService?.work?.id, label, execute, { scope: "online-world", ...options }),
       onClose: () => this.cancelAutoModels("online-world"),
       getAccount: () => this.account,
       getIdentity: () => loadOrCreateOnlineWorldIdentity(this.profileId, this.account.accountId),
@@ -3603,7 +3603,7 @@ class AccountBackend {
     }
   }
 
-  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null } = {}) {
+  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null, maxAttempts = null } = {}) {
     this.assertToolLoggedIn();
     if (!appId) throw new Error("尚未选择模型请求的作品");
     const controller = new AbortController();
@@ -3630,6 +3630,7 @@ class AccountBackend {
         this.appendSessionLog("auto-model", { label, ...progress });
         this.emit();
       },
+      maxAttempts,
       execute: async context => {
         checkContext();
         assertActive(context.signal);
@@ -3659,7 +3660,7 @@ class AccountBackend {
     const workId = this.onlineWorldService?.work?.id;
     if (!workId) throw new Error("在线世界尚未绑定伴生作品");
     const task = String(request.task || "");
-    const allowedTasks = new Set(["player.profile-context", "general.generate", "general.dialogue", "general.captive-dialogue", "general.memory.update"]);
+    const allowedTasks = new Set(["player.profile-context", "general.generate", "general.dialogue", "general.captive-dialogue", "general.memory.update", "general.letter", "general.appearance-edit"]);
     if (!allowedTasks.has(task)) throw new Error(`在线世界模型任务未登记：${task || "unknown"}`);
     const taskMarker = `[[FYOW:TASK:${task}:v1]]`;
     const keyword = String(request.keyword || taskMarker).slice(0, 200);
@@ -9339,7 +9340,6 @@ handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorld
 handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));
 handleLocalIpc("online-world:close", () => backend.onlineWorldService.pause());
 handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
-handleLocalIpc("online-world:activate-program", () => backend.onlineWorldService.activateProgramUpdate());
 handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));
 handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineWorldService.submitIntent(intent || {}));
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));

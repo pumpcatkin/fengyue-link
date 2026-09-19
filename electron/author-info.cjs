@@ -3,17 +3,17 @@ const AUTHOR_NAME = "八爪毛米";
 // Keep every public author/community destination in one reviewed allowlist.
 // Empty values are intentionally rendered as “待作者补充” and cannot open.
 const AUTHOR_LINKS = Object.freeze({
-  homepage: "",
+  homepage: "https://staging.aiero.cc/zh/profile/39404f0e-7678-45a1-86c6-9a21116bacbd",
   releasePost: "",
   feedbackPost: "",
-  github: "https://github.com/pumpcatkin/fengyue-link"
+  github: "https://github.com/pumpcatkin/fengyue-link/releases/latest"
 });
 
 const AUTHOR_LINK_LABELS = Object.freeze({
   homepage: "作者主页",
   releasePost: "风月发布帖",
   feedbackPost: "问题反馈帖",
-  github: "GitHub 项目页"
+  github: "GitHub 下载页"
 });
 
 function configuredAuthorUrl(key) {

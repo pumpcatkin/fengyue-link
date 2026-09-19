@@ -104,7 +104,7 @@ describe("desktop model router integration", () => {
     await expect(instance.withAutoModel("work", "stale", async () => { instance.authSessionRevision++; return "old account output"; })).rejects.toMatchObject({ name: "AbortError" });
     expect(instance.autoModelJobs.size).toBe(0);
   });
-  it("routes structured validation retries and always removes previous conversation identifiers", async () => {
+  it("bounds structured validation retries and always removes previous conversation identifiers", async () => {
     const instance = backend();
     const { OnlineWorldService } = require("../electron/online-world-service.cjs");
     const service = new OnlineWorldService({
@@ -118,8 +118,30 @@ describe("desktop model router integration", () => {
       getAccount: () => ({}), onChange: () => {}
     });
     let count = 0;
-    await expect(service.requestStructuredModel({ task: "test", conversation_id: "old", conversationId: "old" }, { validate: (data: any) => data.ok ? null : "not ready" })).resolves.toEqual({ ok: true });
-    expect(count).toBe(6);
-    expect(service.modelUsageEvents).toHaveLength(6);
+    await expect(service.requestStructuredModel({ task: "test", conversation_id: "old", conversationId: "old" }, { attempts: 3, validate: (data: any) => data.ok ? null : "not ready" })).rejects.toThrow(/未返回有效结构化结果/);
+    expect(count).toBe(3);
+    expect(service.modelUsageEvents).toHaveLength(3);
+  });
+  it("counts actual structured requests independently from outer model selection attempts", async () => {
+    const { OnlineWorldService } = require("../electron/online-world-service.cjs");
+    let generated = 0;
+    const service = new OnlineWorldService({
+      requestModel: async () => ({
+        conversationId: `actual-${++generated}`,
+        answer: generated < 3 ? "bad json" : '{"ok":true}'
+      }),
+      runModelTask: async (_label: string, execute: any) => {
+        let lastError: any;
+        for (const attempt of [141, 142, 143]) {
+          try { return await execute({ attempt }); }
+          catch (error) { lastError = error; }
+        }
+        throw lastError;
+      },
+      getAccount: () => ({}), onChange: () => {}
+    });
+    await expect(service.requestStructuredModel({ task: "test" }, { attempts: 3, validate: (data: any) => data.ok ? null : "not ready" })).resolves.toEqual({ ok: true });
+    expect(generated).toBe(3);
+    expect(service.modelUsageEvents.map((item: any) => item.attempt)).toEqual([1, 2, 3]);
   });
 });

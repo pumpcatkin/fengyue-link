@@ -1,112 +1,116 @@
 # Grid balance simulation
 
-## 落地状态说明
+## 现行规则基线
 
-已经落地：每格 30 秒行军、按小时产出的采矿公式及旧采矿任务迁移、五次修炼的
-时间/金币区间、单次消耗一件素材、108 种天赋与叠加效果上限。
-并非所有旧数值都重新设计：练兵基础价格与耗时、将领发现概率仍沿用下文列出的公式。
-目前是离线确定性测算与规则测试，不是 20 名真实玩家的长期联机实测。
-首修“6 小时”是硬解锁时间，不是完成承诺：样本中材料竞争使平均首次完成延至 15.90 小时。
-多领地收入滚雪球、实际宝物抢占和玩家战斗博弈仍需在线数据校准，本轮 UI 更新不擅自改经济。
+本文件记录《猎艳疆土》当前引擎规则，以及平衡模拟必须采用的输入口径。它不是线上玩家行为承诺；领地数量、战斗、素材竞争、天赋与玩家操作都会改变实际进度。
 
-`scripts/simulate-grid-balance.cjs` is a deterministic 20-player, 30-day measurement pass for the 64x64 world. It is a planning model, not a replacement for server settlement. A seed gives the same cells, rolls, and report every time.
+旧报告中的采集循环、初始将领战力、行军金币与首次闭关样本数字已经失效，不再作为当前平衡结论。重新生成报告时，必须先核对下列规则与 `electron/grid-world-game.cjs` 一致。
 
-The requested GPT-6 delegation was not available in this session's subagent selector; the calculation and audit used `gpt-5.6-sol` plus the reproducible Node simulation and engine regression tests, not GPT-6.
+## 地区分布
 
-## Baseline
+64×64 地图上的每一格先由赛季种子产生与旧版相同的基础随机值：
 
-- 20 players, 30 days, one seeded capital cell each.
-- Marching uses Manhattan path length and **30 seconds per cell**. Cost is `distance * (10 + ceil(soldiers / 100))` gold.
-- Mining is settled at 100% uptime while the automatic job remains valid, matching the engine. Cycle time remains 60-3,600 seconds. Base hourly income is `(400 + population * 0.09) * (1 + rank * 0.08)` and each cycle pays `max(1, round(hourly income * cycleSeconds / 3600))` gold.
-- The first cultivation attempt unlocks **6 real elapsed hours after joining the world**. This is an eligibility gate, not a six-hour action duration and not cumulative online time. Later gates use the same wall-clock basis.
-- Troop recruitment uses the engine formulas: `2 * soldiers` gold and `60 + ceil(soldiers / 5)` seconds, capped at one hour.
-- General discovery is rolled only after a victorious neutral conquest, at the target cell's 2.00-25.00% population-scaled chance. Battles award no gold.
-- Treasure supply is one author-triggered scatter, not a periodic roll. The default is 240 ordinary materials; re-scattering replaces unclaimed positions and red counts default to zero.
+```text
+populationBase = 100 + (seededUInt32 % 9901)  // 100..10000
+resourceRank = floor(seedRoll^1.7 * 15)        // D-..S+
+```
 
-Run it with:
+外围与中心使用相同的基础人口随机范围、资源等级分布和地形分布。地图按到中心的切比雪夫距离分为四层，只在基础随机值之后应用内部倍率：
+
+| 层级 | 最终数值倍率 |
+| --- | ---: |
+| 最外围 | 1.0 |
+| 第二层 | 1.2 |
+| 第三层 | 1.5 |
+| 最中心 | 2.0 |
+
+人口、资源产出、驻军上限和中立守军战力随层级同比增加：
+
+```text
+population = round(populationBase * layerMultiplier)
+garrisonCap = floor(population * 0.2)
+neutralPower = floor(population * 0.2)
+hourlyGold = (400 + populationBase * 0.09)
+             * layerMultiplier
+             * (1 + resourceRank * 0.08)
+```
+
+玩家界面只展示最终人口、资源、驻军与战力数值，不单独显示层级倍率。资源等级仍按同一套 D- 到 S+ 随机分布生成；靠近中心提高的是最终资源产出，不是另换一套资源等级随机范围。
+
+## 行军
+
+- 基础时长为曼哈顿路径每格 30 秒；行军时长天赋在此基础上结算。
+- 基础金币消耗为 `distance * (1 + ceil(soldiers / 10) + carriedGeneralCount * 2)`。
+- `carriedGeneralCount` 统计全部随行将领；只有队列最前方两名将领参与行军战力与天赋结算。
+- 行军士兵只能来自玩家已在当前自有领地确认征集到 `fieldArmySoldiers` 的人数。填写行军数量不会直接从驻军临时抽兵。
+- 取消行程不退还已经支付的金币；尚存士兵按行程回收规则返回。
+
+例如，移动 8 格、携带 100 名士兵和 2 名随行将领时，未计天赋的金币消耗为 `8 * (1 + 10 + 4) = 120`。
+
+## 资源采集
+
+- 每次采集固定持续 10 分钟，完成后结算一次并结束，不会自动开始下一轮。
+- 每名玩家最多同时采集 3 块领地。
+- 同一领地正在练兵时不能采集，正在采集时也不能练兵。
+- 一轮产量为 `max(1, round(hourlyGold * 10 / 60))`，再叠加有效的采集产量天赋。
+- 每块领地完成采集后独立进入冷却；D- 为 1 小时，S+ 为 4 小时，中间 13 个等级按资源等级线性插值。
+- 冷却使用宿主校准后的真实时间戳，离线经过的真实时间同样计入。
+
+因此，资源等级越高，一次采集的收益越高，完成后的等待也越长；采集时长本身始终相同。
+
+## 闭关修炼
+
+玩家本人和将领都最多进行五次闭关。首次闭关加入世界后立即开放，不再有 6 小时首修限制；后续开放时间仍按加入世界后的真实时间计算。
+
+| 次数 | 开放时间 | 金币投入范围 | 基础战力增幅范围 |
+| --- | ---: | ---: | ---: |
+| 1 | 立即 | 5,000～8,000 | 6.00%～10.00% |
+| 2 | 48 小时 | 12,000～18,000 | 9.00%～14.00% |
+| 3 | 168 小时 | 30,000～45,000 | 13.00%～20.00% |
+| 4 | 360 小时 | 70,000～100,000 | 18.00%～28.00% |
+| 5 | 576 小时 | 160,000～240,000 | 25.00%～40.00% |
+
+- 玩家闭关只消耗金币，不选择也不消耗天材地宝。
+- 将领闭关每次消耗所选金币及一件有效素材，并据此更新天赋。
+- 红色升格与洗髓素材执行各自的特殊天赋操作，不作为普通进度数值叠加。
+- 闭关结果由宿主按种子、投入和有效天赋确定，模型不决定战力数值。
+
+## 将领生成与发掘
+
+- 所有新生成将领的初始基础战力由赛季种子、玩家账号与来源编号稳定决定，范围为 250～350；同一来源重放得到同一数值。模型返回的 `power` 不参与分配。
+- 成功攻占中立地区后可判定发掘将领，基础概率仍为 `2% + (clamp(population, 100, 10000) - 100) / 9900 * 23%`，即 2%～25%，再叠加有效发现天赋。
+- 练兵也可发掘将领。单兵基础概率为 0.01%，一次练兵最多计入 1,000 名士兵，并保证每 1,000 名士兵的统计窗口内至多出现一名候选将领。
+- 发掘只产生待确认候选；玩家确认并接受积分消耗后才调用模型生成将领，放弃则不生成。
+
+## 练兵
+
+练兵基础金币与耗时公式保持不变：
+
+```text
+cost = 2 * requestedSoldiers
+durationSeconds = min(3600, 60 + ceil(requestedSoldiers / 5))
+```
+
+练兵产量天赋作用于最终新增驻军；实际输入受该格剩余驻军容量约束。练兵发现将领的判定独立于新增驻军是否带有额外产量加成。
+
+## 模拟与回归口径
+
+运行确定性模拟：
 
 ```powershell
 node scripts/simulate-grid-balance.cjs > output/grid-balance-simulation.json
 ```
 
-Or consume it from a test/tool:
+在引用模拟结果前，应确认输出至少满足这些不变量：
 
-```js
-const { runSimulation } = require("../scripts/simulate-grid-balance.cjs");
-const report = runSimulation({ seed: "review-1", players: 20, days: 30 });
-```
+1. 基础人口覆盖 100～10000，四层最终倍率为 1 / 1.2 / 1.5 / 2。
+2. 行军为每格 30 秒，并按每 10 名士兵和全部随行将领计费。
+3. 采集为单次 10 分钟、最多并发 3 块，且结算后进入 1～4 小时冷却。
+4. 首次闭关立即开放；玩家闭关不消耗素材，将领闭关仍消耗一件素材。
+5. 中立战斗和练兵两条路径都纳入将领发掘统计；新生成将领初始战力落在 250～350。
 
-## Cultivation schedule
+脚本或历史 JSON 只要不满足上述不变量，就属于旧口径结果，不能用于评价当前版本。
 
-The ranges below are design targets mirrored from the engine. A gate is only an eligibility time; it does not guarantee that a player can afford the attempt at that instant.
+## 天赋边界
 
-| Attempt | Real elapsed-time gate | Gold range | Power gain range |
-| --- | ---: | ---: | ---: |
-| 1 | 6 hours | 5,000-8,000 | 6.00-10.00% |
-| 2 | 48 hours | 12,000-18,000 | 9.00-14.00% |
-| 3 | 168 hours | 30,000-45,000 | 13.00-20.00% |
-| 4 | 360 hours | 70,000-100,000 | 18.00-28.00% |
-| 5 | 576 hours (day 24) | 160,000-240,000 | 25.00-40.00% |
-
-Across all five attempts the gold envelope is **277,000-411,000** per player. The exact gold paid is linearly mapped inside that attempt's power-gain range, so gold affects combat power and never talent progress.
-
-Every attempt selects and consumes **exactly one** available material. The player may choose white, green, blue, purple, gold, red-ascend, or red-reroll. Ordinary tiers add 8/20/42/78/135 talent progress. Red-ascend and red-reroll are special operations, not numeric progress grants. Materials do not change combat-power gain, gold cost, or the next time gate. Players start with zero materials.
-
-The author scatter defaults to 240 ordinary materials with weights 30% white, 30% green, 22% blue, 12% purple, and 6% gold. For 20 players this is 12 items per player against five required, or 240.00% aggregate coverage. Supply is sufficient only if the author scatters once and claims are reasonably distributed. The engine has no automatic refresh, per-player reservation, or claim-rate guarantee; a player must arrive on the exact cell first. The simulation's 45.00% success per six-hour targeted-travel window is explicitly a sampling assumption, not an engine rule.
-
-## Implemented engine audit
-
-The default `actual` model mirrors the implemented engine formula, including integer rounding once per cycle. The default seed's full 4,096-cell measurement gives these results before talent modifiers:
-
-- 3,301 cells, **80.59%**, produce enough for 5,000 gold by hour 6 from the 500-gold start.
-- Time-to-afford 5,000 gold is 3.24h at p25, 4.09h at median, 5.53h at p75, and 7.23h at p90.
-- The fixed 20-player sample is volatile (17/20 can afford at hour 6), which is why the full-map rate is the decision metric.
-- At identical population, every higher resource rank has strictly higher realized hourly income even after per-cycle rounding. In the seeded map population mix, D- has about 840 gold/hour at the median and S+ about 1,805 gold/hour.
-- Funds can therefore be available near hour 4 for a typical capital, but the first action remains blocked until the hard 6-hour wall-clock gate.
-- An eight-cell march takes 240 seconds and costs 88 gold with 100 soldiers or 160 gold with 1,000 soldiers.
-- Training 100 soldiers costs 200 gold and takes 80 seconds; training 1,000 costs 2,000 gold and takes 260 seconds before modifiers.
-- In the default simulation, 196 victorious neutral conquests produce 16.04 expected general discoveries (0.80/player); the seeded observation is 26 and is reported separately from the expectation.
-
-Operational conclusions:
-
-1. Keep the 5,000-8,000 first band: the implemented formula reaches the intended 80% full-map affordability target while the hard 6-hour gate prevents earlier cultivation.
-2. Show affordability and unlock time separately. Gold readiness around hour 4 does not mean the action is unlocked.
-3. Keep 240 as a workable 20-player scatter baseline, expose remaining global supply, and warn that re-scatter replaces unclaimed items. Red materials remain unavailable until the author explicitly sets nonzero counts.
-
-### Fixed-sample progression
-
-The implemented formula is:
-
-```text
-hourlyGold = (400 + population * 0.09) * (1 + resourceRank * 0.08)
-cycleYield = max(1, round(hourlyGold * cycleSeconds / 3600))
-```
-
-The 400 base is intentional. Before integer cycle rounding, the initially considered 300 base reached 5,000 gold by hour 6 on 71.70% of map cells, while 400 reached 81.81%. The exact implemented, cycle-rounded result is **80.59%**. The existing 1-60 minute cycle is unchanged, and the underlying rate increases by 8.00% per resource rank at equal population.
-
-Actual-model results for the fixed 20-player sample:
-
-- 17/20 can afford 5,000 gold at hour 6; the full-map rate is 80.59%.
-- Six-hour balances are 4,097 minimum, 6,680 median, and 13,868 maximum.
-- Time-to-afford is 3.24h at p25, 4.09h median, 5.53h at p75, and 7.23h at p90.
-- With one manual 240-item scatter and the documented claim policy, cultivation completion is 20/20 for all five attempts; attempts 3-5 complete at their 168/360/576h gates for all players.
-- Only 4/20 complete attempt one exactly at hour 6 despite 17/20 having enough gold, because zero starting materials makes actual treasure collection the other gate. Attempt one averages 15.90h and the latest sample completion is 54h. Attempt two averages 49.50h; attempts 3-5 finish at their gates for all 20 players.
-- The deterministic scatter contains 72 white, 73 green, 52 blue, 34 purple, 9 gold, and zero red materials. All 20 capitals are within five Manhattan cells of at least one scattered item, but this is global availability rather than player reservation.
-
-This is the implemented baseline, not a guarantee: territory count, mining uptime, spending, treasure competition, and talent modifiers change actual affordability.
-
-These findings are measurements, not a balance guarantee. The [Kongregate idle-game math reference](https://www.kongregate.com/en/pages/the-math-of-idle-games-part-i) describes the core tension: costs commonly grow exponentially while production grows linearly or polynomially, so the practical control variable is time-to-afford. The five hard gates and gold bands should therefore be evaluated against the measured affordability distribution after every economy change.
-
-### Legacy regression comparison
-
-`runSimulation({ miningModel: "legacy" })` retains the former formula only for comparison. It produced 41.16% six-hour map coverage and a 7.10h median time-to-afford. Its short cycles also inverted the grade reward: D- measured about 3,420 gold/hour at the median versus about 445 for S+. The implemented formula removes that inversion; this legacy option is not the default and does not describe current gameplay.
-
-## Talent potency
-
-Progress thresholds are 0/100/220/360/520/700 with a hard progress cap of 1,000. Potency bands are 0.20-0.60%, 0.80-1.50%, 1.80-3.00%, 3.50-5.50%, 6.50-9.00%, and 11.00-16.00% for white through red. Modifier caps keep accumulated effects bounded: duration/cost channels bottom out at -45%, combat/mining/training/cultivation power channels top out at +60%, and discovery chance tops out at +12 percentage points.
-
-## Availability interpretation
-
-General discovery uses the engine's 2.00-25.00% population-scaled chance per victorious neutral conquest. Treasure availability is reported as global scattered supply, claimed supply, and remaining supply. It is not represented as a daily probability.
-
-All percentages in the report are rounded to two decimals. The simulation advances in six-hour steps, so its cultivation timeline reports earliest, average, and latest completion hours for all 20 players. Because the RNG is seeded, balance changes can be compared by changing one constant or formula and rerunning the same seed.
+天赋进度阈值为 0/100/220/360/520/700，硬上限 1,000。白至红的强度带依次为 0.20%～0.60%、0.80%～1.50%、1.80%～3.00%、3.50%～5.50%、6.50%～9.00% 和 11.00%～16.00%。叠加上限继续约束累计效果：时长与成本类最低为 -45%，战斗、采集、练兵和修炼收益类最高为 +60%，发现概率最高增加 12 个百分点。

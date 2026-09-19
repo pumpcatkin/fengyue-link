@@ -37,6 +37,7 @@ const MODIFIER_LIMITS = Object.freeze({
   cultivationCost: [-0.45, 0.15], cultivationPower: [-0.2, 0.6],
   discoveryChance: [-0.03, 0.12]
 });
+const DEPLOYED_EFFECT_MULTIPLIER = 1.25;
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -79,6 +80,7 @@ const C = Object.freeze({
   attacking: value => ({ op: "attacking-is", value }),
   armyAtLeast: value => ({ op: "army-size-gte", value }),
   armyAtMost: value => ({ op: "army-size-lte", value }),
+  discoveryKind: value => ({ op: "discovery-kind-is", value }),
   hour: (start, end) => ({ op: "hour-between", start, end })
 });
 
@@ -206,10 +208,25 @@ add("night-visitor", "夜访名士", "discovery", [effect("discoveryChance", "ca
 add("morning-market", "早市访才", "discovery", [effect("discoveryChance", "carried", "discovery", 0.36, [C.hour(6, 10)])]);
 add("neutral-pioneers", "拓荒招贤", "discovery", [effect("discoveryChance", "neighbor-allied", "discovery", 0.4, [C.neutral(true)])]);
 add("wartime-recruiter", "军中拔擢", "discovery", [effect("discoveryChance", "carried", "discovery", 0.4, [C.attacking(true), C.armyAtLeast(1000)])]);
+add("campaign-talent-scout", "阵前识英", "discovery", [effect("discoveryChance", "carried", "discovery", 0.58, [C.discoveryKind("attack")])]);
+add("close-battle-observer", "近阵察才", "discovery", [effect("discoveryChance", "carried", "discovery", 0.52, [C.discoveryKind("attack"), C.armyAtMost(500)])]);
+add("great-army-promotions", "大军擢士", "discovery", [effect("discoveryChance", "carried", "discovery", 0.48, [C.discoveryKind("attack"), C.armyAtLeast(2000)])]);
+add("mountain-campaign-search", "山阵访骁", "discovery", [effect("discoveryChance", "carried", "discovery", 0.46, [C.discoveryKind("attack"), C.terrain("mountain")])]);
+add("training-talent-register", "营中举贤", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.62, [C.discoveryKind("training")])]);
+add("training-talent-patrol", "校场巡才", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.54, [C.discoveryKind("training"), C.armyAtLeast(500)])]);
+add("training-talent-sifter", "小营精拣", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.5, [C.discoveryKind("training"), C.armyAtMost(300)])]);
+add("mountain-drill-scout", "山营察勇", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.46, [C.discoveryKind("training"), C.terrain("mountain")])]);
+add("frontier-drill-scout", "边营访锐", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.44, [C.discoveryKind("training"), C.populationAtMost(2000)])]);
+
+// Mixed deployment talents reward leaving a general in charge of a territory.
+add("stationed-quartermaster", "驻地转饷", "deployment", [effect("miningYield", "own-tile", "mining", 0.55), effect("trainingCost", "own-tile", "training", -0.35)]);
+add("watchtower-command", "望楼督阵", "deployment", [effect("defensePower", "own-tile", "combat", 0.6), effect("discoveryChance", "own-tile", "discovery", 0.3, [C.discoveryKind("training")])]);
+add("border-deployment", "列戍联防", "deployment", [effect("combatPower", "neighbor-allied", "combat", 0.5), effect("marchDuration", "neighbor-allied", "march", -0.3)]);
+add("garrison-mentor", "镇营授业", "deployment", [effect("trainingYield", "own-tile", "training", 0.45), effect("cultivationPower", "own-tile", "cultivation", 0.35)]);
 
 const CONDITION_OPS = new Set([
   "terrain-in", "resource-rank-gte", "resource-rank-lte", "population-gte", "population-lte",
-  "neutral-is", "attacking-is", "army-size-gte", "army-size-lte", "hour-between"
+  "neutral-is", "attacking-is", "army-size-gte", "army-size-lte", "discovery-kind-is", "hour-between"
 ]);
 const SCOPES = new Set(["carried", "own-tile", "neighbor-allied", "neighbor-hostile", "enemy-neighbor"]);
 
@@ -340,7 +357,8 @@ function describeTalent(talent) {
   const definition = TALENT_BY_ID[normalized.talentId];
   const rarity = RARITY_BY_ID[normalized.rarity];
   const clauses = definition.effects.map(item => {
-    const amount = normalized.potency * Math.abs(item.scale);
+    const scopeMultiplier = item.scope === "carried" ? 1 : DEPLOYED_EFFECT_MULTIPLIER;
+    const amount = normalized.potency * Math.abs(item.scale) * scopeMultiplier;
     const direction = item.scale < 0 ? "降低" : "提高";
     return `${SCOPE_LABELS[item.scope]}${KEY_LABELS[item.key]}${direction}${formatPercent(amount)}`;
   });
@@ -386,6 +404,7 @@ function evaluationFacts(state, context) {
     neutral: context.neutral == null ? relation === "neutral" : Boolean(context.neutral),
     attacking: Boolean(context.attacking ?? context.attack),
     armySize: Math.max(0, Number(context.armySize ?? context.soldiers ?? 0) || 0),
+    discoveryKind: ["attack", "training"].includes(String(context.discoveryKind || "")) ? String(context.discoveryKind) : "",
     hour
   };
 }
@@ -401,6 +420,7 @@ function conditionMatches(condition, facts) {
     case "attacking-is": return facts.attacking === condition.value;
     case "army-size-gte": return facts.armySize >= condition.value;
     case "army-size-lte": return facts.armySize <= condition.value;
+    case "discovery-kind-is": return facts.discoveryKind === condition.value;
     case "hour-between": {
       const start = ((condition.start % 24) + 24) % 24;
       const end = ((condition.end % 24) + 24) % 24;
@@ -478,7 +498,8 @@ function talentModifiers(state = {}, context = {}) {
       const item = definition.effects[index];
       if (item.action !== facts.action || !scopeMatches(item.scope, source, facts)) continue;
       if (!item.when.every(condition => conditionMatches(condition, facts))) continue;
-      const value = round6(talent.potency * item.scale);
+      const scopeMultiplier = item.scope === "carried" ? 1 : DEPLOYED_EFFECT_MULTIPLIER;
+      const value = round6(talent.potency * item.scale * scopeMultiplier);
       totals[item.key] += value;
       applied.push(Object.freeze({ generalId: source.generalId || null, talentId: talent.talentId, effectIndex: index, scope: item.scope, key: item.key, value, enemyDebuff: item.scope === "enemy-neighbor" }));
     }
@@ -536,6 +557,7 @@ module.exports = {
   MATERIAL_BY_ID,
   MODIFIER_KEYS,
   MODIFIER_LIMITS,
+  DEPLOYED_EFFECT_MULTIPLIER,
   TALENT_CATALOG,
   TALENT_BY_ID,
   catalog: TALENT_CATALOG,

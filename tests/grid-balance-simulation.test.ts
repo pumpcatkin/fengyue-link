@@ -28,15 +28,15 @@ describe("grid balance simulation", () => {
     const second = simulation.runSimulation({ seed: "test-seed", players: 20, days: 30 });
     expect(first).toEqual(second);
     expect(first.players).toHaveLength(20);
-    expect(first.config).toMatchObject({ days: 30, gridSize: 64, marchSecondsPerCell: 30 });
+    expect(first.config).toMatchObject({ days: 30, gridSize: 64, marchSecondsPerCell: 15 });
   });
 
   it("keeps cultivation gates and the fifth late-game range explicit", () => {
     expect(simulation.CULTIVATION_RANGES).toHaveLength(5);
-    expect(simulation.CULTIVATION_RANGES.map((item: any) => item.gateHours)).toEqual([0, 48, 168, 360, 576]);
+    expect(simulation.CULTIVATION_RANGES.map((item: any) => item.gateHours)).toEqual([0, 0, 0, 0, 0]);
     expect(simulation.CULTIVATION_RANGES.every((item: any) => item.materialCount === 1)).toBe(true);
     const fifth = simulation.CULTIVATION_RANGES[4];
-    expect(fifth).toMatchObject({ goldMin: 160000, goldMax: 240000, powerGainPctMin: 25, powerGainPctMax: 40 });
+    expect(fifth).toMatchObject({ goldMin: 160000, goldMax: 240000, powerGainPctMin: 28, powerGainPctMax: 44 });
     expect(fifth.materialChoices).toEqual(["white", "green", "blue", "purple", "gold", "red-ascend", "red-reroll"]);
     expect(simulation.runSimulation().cultivation.totalGoldRange).toEqual({ min: 277000, max: 411000 });
   });
@@ -92,8 +92,8 @@ describe("grid balance simulation", () => {
     expect(simulation.CULTIVATION_RANGES.map((item: any) => [item.gateHours, item.goldMin, item.goldMax])).toEqual(
       engine.CULTIVATION_RANGES.map((item: any) => [item.gateHours, item.goldMin, item.goldMax])
     );
-    expect(report.formulas.marchDuration).toBe("distanceCells * 30 seconds");
-    expect(engine.marchDurationMs(8)).toBe(8 * 30_000);
+    expect(report.formulas.marchDuration).toBe("distanceCells * 15 seconds");
+    expect(engine.marchDurationMs(8)).toBe(8 * 15_000);
     expect(report.resources.cycleSecondsRange).toEqual({ min: 600, max: 600 });
     expect(engine.resourceCycleMs({ resourceRank: 0 })).toBe(10 * 60_000);
     expect(engine.miningCooldownMs({ resourceRank: 0 })).toBe(60 * 60_000);

@@ -1113,6 +1113,7 @@ describe("online world platform service", () => {
       instance.world.privatePlayers.player = { materials: { white: 0 } };
       instance.world.generals.general = createFallbackGeneral({ id: "general", name: "青禾", gender: "female", holderAccountId: "player", power: 300 });
       instance.world.generals.general.status = "carried";
+      instance.world.generals.general.experience = 100;
       instance.world.treasureSpawns["treasure-1"] = { id: "treasure-1", epoch: 1, x: 2, y: 1, materialId: "white", spawnedAt: 1_000_000 };
       instance.world.treasureEpoch = 1;
       instance.world.jobs.conquest = {

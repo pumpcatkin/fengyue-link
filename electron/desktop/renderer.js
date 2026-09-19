@@ -14,9 +14,12 @@ const autoLoginInput = document.querySelector("#auto-login");
 const submitLogin = document.querySelector("#submit-login");
 const domainList = document.querySelector("#domain-list");
 const domainNote = document.querySelector("#domain-selection-note");
+const manualDomainInput = document.querySelector("#manual-domain");
+const manualDomainButton = document.querySelector("#use-manual-domain");
 const homePage = document.querySelector("#home-page");
 const profilesPage = document.querySelector("#profiles-page");
 const onlineWorldPage = document.querySelector("#online-world-page");
+const onlineWorldSetup = document.querySelector("#online-world-setup");
 const onlineWorldFrame = document.querySelector("#online-world-frame");
 const multiplayerPage = document.querySelector("#multiplayer-page");
 const appVersion = document.querySelector("#app-version");
@@ -1007,6 +1010,19 @@ function renderDomainList(){
 function renderDomainNote(next=state){
   if(!next)return;
   domainNote.textContent=next.domainSelected?`当前节点：${new URL(next.origin).host}`:"请选择节点后登录";
+  if(next.domainSelected&&document.activeElement!==manualDomainInput)manualDomainInput.value=next.origin;
+  const locked=automaticLoginActive||Boolean(next.loginInProgress)||Boolean(next.originLocked);
+  manualDomainInput.disabled=locked;
+  manualDomainButton.disabled=locked||!manualDomainInput.value.trim();
+}
+
+async function useManualDomain(){
+  const value=manualDomainInput.value.trim();
+  if(!value)throw new Error("请粘贴登录域名");
+  const next=await api.setOrigin(value);
+  manualDomainInput.value=next.origin;
+  render(next);
+  toast(`已选择登录域名：${new URL(next.origin).host}`);
 }
 
 async function refreshDomains(force=false){
@@ -1316,11 +1332,42 @@ document.querySelector("#enter-online-world").addEventListener("click",async()=>
   onlineWorldInLibrary=true;showPage("online-world");
   try{renderOnlineWorldCards(await api.listOnlineWorldCards());renderOnlineWorld(await api.getOnlineWorldState())}catch(error){toast(friendlyError(error))}
 });
+function finishOnlineWorldCardImport(result){
+  renderOnlineWorldCards(result);
+  if(result.canceled)return;
+  const imported=Array.isArray(result.importedCards)?result.importedCards.filter(Boolean):result.imported?[result.imported]:[];
+  toast(imported.length===1?`已导入《${imported[0].title}》`:`已导入 ${imported.length} 张游戏卡`);
+}
+
 document.querySelector("#online-world-import-card").addEventListener("click",()=>invoke(async()=>{
   const result=await api.importOnlineWorldCard();
-  renderOnlineWorldCards(result);
-  if(!result.canceled)toast(`已导入《${result.imported.title}》`);
+  finishOnlineWorldCardImport(result);
 }).catch(()=>{}));
+let onlineWorldFileDragDepth=0;
+function onlineWorldDragHasFiles(event){return Array.from(event.dataTransfer?.types||[]).includes("Files")}
+function resetOnlineWorldFileDrag(){onlineWorldFileDragDepth=0;onlineWorldSetup.classList.remove("drop-active")}
+onlineWorldSetup.addEventListener("dragenter",event=>{
+  if(!onlineWorldDragHasFiles(event))return;
+  event.preventDefault();onlineWorldFileDragDepth+=1;onlineWorldSetup.classList.add("drop-active");
+});
+onlineWorldSetup.addEventListener("dragover",event=>{
+  if(!onlineWorldDragHasFiles(event))return;
+  event.preventDefault();event.dataTransfer.dropEffect="copy";
+});
+onlineWorldSetup.addEventListener("dragleave",event=>{
+  if(!onlineWorldDragHasFiles(event))return;
+  onlineWorldFileDragDepth=Math.max(0,onlineWorldFileDragDepth-1);
+  if(!onlineWorldFileDragDepth)onlineWorldSetup.classList.remove("drop-active");
+});
+onlineWorldSetup.addEventListener("drop",event=>{
+  if(!onlineWorldDragHasFiles(event))return;
+  event.preventDefault();event.stopPropagation();resetOnlineWorldFileDrag();
+  const files=Array.from(event.dataTransfer?.files||[]).filter(file=>String(file.name||"").toLocaleLowerCase().endsWith(".json"));
+  if(!files.length){toast("请拖入 JSON 格式的游戏卡");return}
+  invoke(async()=>finishOnlineWorldCardImport(await api.importOnlineWorldCardFiles(files))).catch(()=>{});
+});
+document.addEventListener("dragover",event=>{if(onlineWorldDragHasFiles(event))event.preventDefault()});
+document.addEventListener("drop",event=>{if(onlineWorldDragHasFiles(event)){event.preventDefault();resetOnlineWorldFileDrag()}});
 document.querySelector("#online-world-search").addEventListener("input",event=>{
   onlineWorldSearchQuery=String(event.target.value||"").trim().toLocaleLowerCase();
   renderOnlineWorldCards();
@@ -1382,7 +1429,7 @@ window.addEventListener("message",async event=>{
   if(event.data.type==="library"){
     try{await returnToOnlineWorldLibrary();renderOnlineWorldCards(await api.listOnlineWorldCards())}catch(error){toast(friendlyError(error))}return;
   }
-  if(onlineWorldInLibrary)return;
+  if(onlineWorldInLibrary){if(expectsResult)replyError(new Error("游戏页面已经关闭，请重新进入后再操作"));return}
   if(event.data.type==="admin"){
     const command={...(event.data.command||{})};
     try{
@@ -1426,8 +1473,8 @@ window.addEventListener("message",async event=>{
   if(event.data.type==="preferences"){
     try{
       const next=await api.updateOnlineWorldPreferences(event.data.preferences||{});
-      renderOnlineWorld(next);
       replyResult({preferences:true,state:next});
+      renderOnlineWorld(next);
       toast("性癖偏好已保存在本机");
     }catch(error){replyError(error)}
     return;
@@ -1552,6 +1599,9 @@ document.querySelector("#google-login").addEventListener("click",()=>invoke(asyn
 document.querySelector("#telegram-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("telegram");toast("请在 Telegram 认证窗口中完成登录")}).catch(()=>{}));
 document.querySelector("#clear-credentials").addEventListener("click",()=>invoke(async()=>{await api.clearCredentials();accountInput.value="";passwordInput.value="";rememberInput.checked=false;autoLoginInput.checked=false;toast("已清除这个实例保存的账号和密码")}).catch(()=>{}));
 document.querySelector("#refresh-domains").addEventListener("click",()=>refreshDomains(true).catch(error=>toast(error?.message||String(error))));
+manualDomainButton.addEventListener("click",()=>invoke(useManualDomain).catch(()=>{}));
+manualDomainInput.addEventListener("input",()=>{manualDomainButton.disabled=automaticLoginActive||Boolean(state?.loginInProgress)||Boolean(state?.originLocked)||!manualDomainInput.value.trim()});
+manualDomainInput.addEventListener("keydown",event=>{if(event.key!=="Enter"||event.isComposing)return;event.preventDefault();if(!manualDomainButton.disabled)manualDomainButton.click()});
 document.querySelector("#choose-work").addEventListener("click",()=>state?.room?toast("房间开启期间不能更换作品；退出房间后会恢复"):invoke(()=>api.chooseWork()).catch(()=>{}));
 slot.addEventListener("click",()=>{if(slot.classList.contains("select-work-empty"))invoke(()=>api.chooseWork()).catch(()=>{})});
 slot.addEventListener("keydown",event=>{if(slot.classList.contains("select-work-empty")&&["Enter"," "].includes(event.key)){event.preventDefault();invoke(()=>api.chooseWork()).catch(()=>{})}});

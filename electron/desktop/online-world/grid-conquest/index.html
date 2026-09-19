@@ -93,6 +93,10 @@
             <div id="map-floating-feedback" class="map-floating-feedback hidden" role="status"></div>
             <span id="zoom-label" class="zoom-label">1×</span>
           </div>
+          <button id="battle-report-button" class="battle-report-button hidden" type="button" aria-label="查看战报" title="查看战报">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h12v14H6z"/><path d="M4 7V3h14M20 17v4H6M9 9h6M9 13h6"/></svg>
+            <span>战报</span><strong id="battle-report-count">0</strong>
+          </button>
           <div class="legend">
             <span><i class="neutral"></i>未占领</span><span><i class="mine"></i>我的领地</span><span><i class="other"></i>其他势力</span>
             <button id="center-player" type="button" aria-label="定位玩家" title="定位玩家">
@@ -152,7 +156,7 @@
             </button>
           </section>
 
-          <section class="panel"><header><b>天材地宝</b><small>仅存本机</small></header><div id="material-inventory" class="material-inventory"></div></section>
+          <section class="panel"><header><b>天材地宝</b></header><div id="material-inventory" class="material-inventory"></div></section>
         </aside>
       </section>
     </main>
@@ -210,14 +214,14 @@
         <div id="preference-tags" class="selected-tags"></div>
         <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
         <div id="preference-tag-options" class="tag-options"></div>
-        <footer><span></span><button id="save-preferences" class="primary" type="submit">保存偏好</button></footer>
+        <footer><span></span><button id="save-preferences" class="primary" type="button">保存偏好</button></footer>
       </form>
     </section>
 
     <section id="general-modal" class="overlay hidden" role="dialog" aria-modal="true">
       <article class="paper-modal general-modal">
         <header><span><small id="general-status">将领档案</small><h1 id="general-name">—</h1></span><button id="close-general" type="button">关闭</button></header>
-        <div class="general-stats"><span><small>姓名</small><b id="general-profile-name">—</b></span><span><small>性别</small><b id="general-gender">—</b></span><span><small>身高</small><b id="general-height">—</b></span><span><small>体重</small><b id="general-weight">—</b></span><span><small>三围</small><b id="general-measurements">—</b></span><span><small>战力 / 修炼</small><b id="general-power">0</b></span><span><small>归属</small><b id="general-holder">—</b></span></div>
+        <div class="general-stats"><span><small>姓名</small><b id="general-profile-name">—</b></span><span><small>性别</small><b id="general-gender">—</b></span><span><small>身高</small><b id="general-height">—</b></span><span><small>体重</small><b id="general-weight">—</b></span><span><small>三围</small><b id="general-measurements">—</b></span><span><small>战力 / 修炼</small><b id="general-power">0</b></span><span><small>经验</small><b id="general-experience">0 / 0</b></span><span><small>归属</small><b id="general-holder">—</b></span></div>
         <section><h2>外观设定</h2><p id="general-appearance">—</p></section>
         <section><h2>核心设定</h2><p id="general-core-setting">—</p></section>
         <section><h2>占领天赋</h2><p id="general-talent">—</p></section>
@@ -310,6 +314,24 @@
         <header><span><small>新的发现</small><h1 id="general-discovery-title">似乎发掘到了一位拔尖兵士</h1></span></header>
         <p id="general-discovery-text">是否要将其提拔为将领？确认后会消耗少量积分生成将领信息。</p>
         <footer><button id="general-discovery-decline" type="button">暂不提拔</button><button id="general-discovery-confirm" class="primary" type="button">提拔为将领</button></footer>
+      </article>
+    </section>
+
+    <section id="battle-report-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="battle-report-title">
+      <article class="paper-modal battle-report-modal">
+        <header>
+          <span><small id="battle-report-kind">战斗结算</small><h1 id="battle-report-title">进攻战报</h1><p id="battle-report-meta">—</p><div class="battle-report-navigation"><button id="battle-report-prev" type="button" aria-label="上一份战报" title="上一份战报">‹</button><span id="battle-report-index">1 / 1</span><button id="battle-report-next" type="button" aria-label="下一份战报" title="下一份战报">›</button></div></span>
+          <button id="battle-report-dismiss" class="battle-report-dismiss" type="button" aria-label="标记本战报已阅" title="标记本战报已阅">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+          </button>
+        </header>
+        <div id="battle-report-stats" class="battle-report-stats"></div>
+        <div id="battle-report-specials" class="battle-report-specials hidden"></div>
+        <section id="battle-report-general-picker" class="battle-report-general-picker hidden" aria-labelledby="battle-report-general-picker-title">
+          <header><b id="battle-report-general-picker-title">选择讨论将领</b><small>战报摘要会作为本次交谈的经历背景</small></header>
+          <div id="battle-report-generals" class="battle-report-generals"></div>
+        </section>
+        <footer><button id="battle-report-later" type="button">稍后处理</button><button id="battle-report-discuss" class="primary" type="button">与将领讨论</button></footer>
       </article>
     </section>
 

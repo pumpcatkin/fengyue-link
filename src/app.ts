@@ -105,7 +105,7 @@ export class FengyueLinkApp {
   }
 
   private domainPanel(): string {
-    const items = this.domains.length ? this.domains.map(domain => `<div class="card domain"><span><b>${esc(domain.label)}</b><code>${esc(domain.origin)}</code></span><button class="btn" data-origin="${esc(domain.origin)}">${domain.status === "online" || domain.status === "slow" ? `${domain.latencyMs}ms` : domain.status}</button></div>`).join("") : '<div class="muted">点击后从 aify.pages.dev 获取备用域名并并发测速。</div>';
+    const items = this.domains.length ? this.domains.map(domain => `<div class="card domain"><span><b>${esc(domain.label)}</b><code>${esc(domain.origin)}</code></span><button class="btn" data-origin="${esc(domain.origin)}">${domain.status === "online" || domain.status === "slow" ? `${domain.latencyMs}ms` : domain.status}</button></div>`).join("") : '<div class="muted">点击后从两个官方发布页合并备用域名并并发测速。</div>';
     return `<div class="stack"><button class="btn primary" data-action="scan-domains">获取并测试全部节点</button>${items}</div>`;
   }
 

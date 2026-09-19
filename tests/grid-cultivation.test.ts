@@ -33,9 +33,14 @@ describe("grid cultivation and integrated talents", () => {
       const cycleMs = game.resourceCycleMs(cell);
       expect(cycleMs).toBe(10 * game.MINUTE);
       const yieldPerCycle = game.resourceYield(cell);
-      const expected = Math.max(1, Math.round((400 + population * 0.09) * (1 + resourceRank * 0.08) * cycleMs / game.HOUR));
+      const expected = Math.max(1, Math.round((400 + population * 0.09) * (1 + resourceRank * 0.08)
+        * game.MINING_GRADE_YIELD_MULTIPLIERS[resourceRank] * cycleMs / game.HOUR));
+      const legacy = Math.max(1, Math.round((400 + population * 0.09) * (1 + resourceRank * 0.08) * cycleMs / game.HOUR));
       const hourly = yieldPerCycle * game.HOUR / cycleMs;
       expect(yieldPerCycle).toBe(expected);
+      // Integer rounding can leave the displayed run one coin below an exact
+      // rounded 2.8x threshold; compare the underlying ratio with that bound.
+      expect(yieldPerCycle).toBeGreaterThanOrEqual(legacy * 2.8 - 1);
       expect(hourly).toBeGreaterThan(previousHourly);
       previousHourly = hourly;
     }
@@ -73,16 +78,17 @@ describe("grid cultivation and integrated talents", () => {
     state.players.a.gold = 20_000;
     expect(state.privatePlayers.a.materials.white).toBe(0);
     state.privatePlayers.a.materials.white = 1;
+    state.generals.cultivator.experience = game.generalExperienceRequirement(state.generals.cultivator);
     const before = state.generals.cultivator.power;
     const cultivated = game.applyIntent(state, {
       type: "cultivate-general", generalId: "cultivator", goldInvestment: 8000, materialId: "white", idempotencyKey: "cultivate-1"
     }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result.durationMs).toBe(0);
-    expect(cultivated.result.basePowerGainPercent).toBe(10);
+    expect(cultivated.result.basePowerGainPercent).toBe(11);
     expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.9);
     expect(cultivated.result.randomFactor).toBeLessThan(1.1);
-    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(9);
-    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(11.2);
+    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(9.9);
+    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(12.2);
     expect(cultivated.state.jobs).toEqual({});
     expect(cultivated.state.privatePlayers.a.materials.white).toBe(0);
     expect(cultivated.state.generals.cultivator.cultivationCount).toBe(1);
@@ -97,10 +103,10 @@ describe("grid cultivation and integrated talents", () => {
     state.privatePlayers.a.materials.white = 3;
     const beforePower = state.players.a.power;
     const cultivated = game.applyIntent(state, {
-      type: "cultivate-player", goldInvestment: 5000, materialId: "white", idempotencyKey: "player-cultivate-1"
+      type: "cultivate-player", goldInvestment: 12500, materialId: "white", idempotencyKey: "player-cultivate-1"
     }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result).toMatchObject({ targetType: "player", materialId: null, materialCount: 0, durationMs: 0, cultivationCount: 1 });
-    expect(cultivated.state.players.a.gold).toBe(15_000);
+    expect(cultivated.state.players.a.gold).toBe(7_500);
     expect(cultivated.state.players.a.power).toBeGreaterThan(beforePower);
     expect(cultivated.state.privatePlayers.a.materials.white).toBe(3);
     expect(cultivated.state.jobs).toEqual({});
@@ -111,20 +117,22 @@ describe("grid cultivation and integrated talents", () => {
     const state = grant(joined(joinedAt), joinedAt, "instant-gate-check");
     state.players.a.gold = 20_000;
     state.privatePlayers.a.materials.white = 1;
-    const playerQuote = game.cultivationQuote(state.players.a, state.players.a, joinedAt, { state, targetType: "player", goldInvestment: 5000 });
+    const playerQuote = game.cultivationQuote(state.players.a, state.players.a, joinedAt, { state, targetType: "player", goldInvestment: 12500 });
+    state.generals["instant-gate-check"].experience = game.generalExperienceRequirement(state.generals["instant-gate-check"]);
     const generalQuote = game.cultivationQuote(state.generals["instant-gate-check"], state.players.a, joinedAt, { state, goldInvestment: 5000, materialId: "white" });
     expect(playerQuote).toMatchObject({ attempt: 1, gateHours: 0, unlocked: true });
     expect(generalQuote).toMatchObject({ attempt: 1, gateHours: 0, unlocked: true });
   });
 
   it("keeps later cultivation intervals while allowing the first attempt immediately", () => {
-    expect(game.CULTIVATION_RANGES.map((range: any) => range.gateHours)).toEqual([0, 48, 168, 360, 576]);
+    expect(game.CULTIVATION_RANGES.map((range: any) => range.gateHours)).toEqual([0, 0, 0, 0, 0]);
     const now = 1_000_000;
     const state = grant(joined(now), now, "interval-check");
     state.generals["interval-check"].cultivationCount = 1;
+    state.generals["interval-check"].experience = game.generalExperienceRequirement(state.generals["interval-check"]);
     const quote = game.cultivationQuote(state.generals["interval-check"], state.players.a, now, { state, goldInvestment: 12000, materialId: "white" });
-    expect(quote.unlocked).toBe(false);
-    expect(quote.unlockAt).toBe(now + 48 * game.HOUR);
+    expect(quote.unlocked).toBe(true);
+    expect(quote.unlockAt).toBe(0);
   });
 
   it("keeps cultivation fluctuation stable across repeated previews", () => {
@@ -150,6 +158,7 @@ describe("grid cultivation and integrated talents", () => {
     const late = now + 600 * game.HOUR;
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       const range = game.CULTIVATION_RANGES[attempt - 1];
+      state.generals.five.experience = game.generalExperienceRequirement(state.generals.five);
       state = game.applyIntent(state, {
         type: "cultivate-general", generalId: "five", goldInvestment: range.goldMin,
         materialId: "white", idempotencyKey: `five-${attempt}`
@@ -188,15 +197,15 @@ describe("grid cultivation and integrated talents", () => {
   });
 
   it("uses 30 seconds per cell and applies selected carried talents to march quotes", () => {
-    expect(game.marchDurationMs(126)).toBe(126 * 30_000);
+    expect(game.marchDurationMs(126)).toBe(126 * 15_000);
     const now = 1_000_000;
     let state = grant(joined(now), now, "runner");
     const target = adjacent(state.players.a.position);
     state.generals.runner.talent = talentEngine.normalizeTalent({ instanceId: "runner", talentId: "swift-column", progress: 1000 });
     state.players.a.fieldArmySoldiers = 1;
     const quote = game.marchQuote(state, "a", target, 1, ["runner"], false, now + 1);
-    expect(quote.baseDurationMs).toBe(30_000);
-    expect(quote.durationMs).toBe(Math.round(30_000 * 0.84));
+    expect(quote.baseDurationMs).toBe(15_000);
+    expect(quote.durationMs).toBe(Math.round(15_000 * 0.84));
     const march = game.applyIntent(state, {
       type: "march", to: target, soldiers: 1, generalIds: ["runner"], attack: false, idempotencyKey: "talented-march"
     }, { actorAccountId: "a", now: now + 1 });

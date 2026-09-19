@@ -9,8 +9,11 @@ declare const GM_xmlhttpRequest: undefined | ((options: {
   ontimeout: () => void;
 }) => void);
 
-const DIRECTORY_URL = "https://aify.pages.dev/";
-export const TRUSTED_ORIGINS = new Set([
+export const DIRECTORY_URLS = [
+  "https://aifordum.github.io/",
+  "https://aify.pages.dev/"
+] as const;
+export const FALLBACK_ORIGINS = [
   "https://acepro.store",
   "https://acquainte.xyz",
   "https://acquant.xyz",
@@ -18,29 +21,62 @@ export const TRUSTED_ORIGINS = new Set([
   "https://aiwhatis.xyz",
   "https://ai-xan.xyz",
   "https://aquantancee.xyz",
-  "https://aquante.xyz"
-]);
+  "https://aigirlfriend.baby",
+  "https://aquante.xyz",
+  "https://aisearches.xyz"
+] as const;
+export const TRUSTED_ORIGINS = new Set<string>(FALLBACK_ORIGINS);
+
+const RESERVED_TLDS = new Set(["example", "invalid", "localhost", "local", "test"]);
+
+function normalizePublishedOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port) return null;
+    const hostname = url.hostname.toLowerCase();
+    const labels = hostname.split(".").filter(Boolean);
+    if (labels.length < 2 || RESERVED_TLDS.has(labels.at(-1) || "") || /^\d+(?:\.\d+){3}$/.test(hostname)) return null;
+    return `https://${hostname}`;
+  } catch { return null; }
+}
 
 export function parseDomainDirectory(html: string): DomainCandidate[] {
   const seen = new Set<string>();
   const result: DomainCandidate[] = [];
   const append = (value: string, label = "") => {
     try {
-      const url = new URL(value, DIRECTORY_URL);
-      if (url.protocol !== "https:" || !TRUSTED_ORIGINS.has(url.origin) || seen.has(url.origin)) return;
-      seen.add(url.origin);
-      result.push({ label: label.trim() || url.hostname, origin: url.origin, status: "untested" });
+      const origin = normalizePublishedOrigin(value);
+      if (!origin || seen.has(origin)) return;
+      const url = new URL(origin);
+      TRUSTED_ORIGINS.add(origin);
+      seen.add(origin);
+      result.push({ label: label.trim() || url.hostname, origin, status: "untested" });
     } catch { /* ignore invalid links */ }
   };
 
-  const sites = html.match(/const\s+SITES\s*=\s*\[([\s\S]*?)\]/i)?.[1] || "";
-  for (const match of sites.matchAll(/["'](https:\/\/[^"'/?#]+)["']/gi)) {
-    if (match[1]) append(match[1]);
+  for (const block of html.matchAll(/(?:const|let|var)\s+SITES\s*=\s*\[([\s\S]*?)\]/gi)) {
+    for (const match of String(block[1] || "").matchAll(/["'](https?:\/\/[^"'\s]+)["']/gi)) {
+      if (match[1]) append(match[1]);
+    }
   }
   if (result.length) return result;
 
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const anchor of doc.querySelectorAll<HTMLAnchorElement>('a[href^="https://"]')) append(anchor.href, anchor.textContent || "");
+  for (const match of html.matchAll(/<a\b[^>]*\bhref=["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    if (match[1]) append(match[1], String(match[2] || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
+  }
+  return result;
+}
+
+export function mergeDomainDirectories(documents: string[]): DomainCandidate[] {
+  const result: DomainCandidate[] = [];
+  const seen = new Set<string>();
+  for (const html of documents) {
+    for (const candidate of parseDomainDirectory(html)) {
+      if (seen.has(candidate.origin)) continue;
+      seen.add(candidate.origin);
+      result.push(candidate);
+    }
+  }
   return result;
 }
 
@@ -74,10 +110,16 @@ function request(url: string, method = "GET", timeout = 8000): Promise<{ status:
 }
 
 export async function fetchDomains(): Promise<DomainCandidate[]> {
-  const response = await request(DIRECTORY_URL);
-  const result = parseDomainDirectory(response.text);
-  if (!result.length) throw new Error("域名目录中没有找到可用节点");
-  return result;
+  const responses = await Promise.allSettled(DIRECTORY_URLS.map(url => request(url)));
+  const documents = responses
+    .filter((item): item is PromiseFulfilledResult<{ status: number; text: string; finalUrl: string }> => item.status === "fulfilled" && item.value.status >= 200 && item.value.status < 400)
+    .map(item => item.value.text);
+  const live = mergeDomainDirectories(documents);
+  const result = documents.length === DIRECTORY_URLS.length ? live : mergeDomainDirectories([
+    `const SITES=${JSON.stringify(live.map(item => item.origin))}`,
+    `const SITES=${JSON.stringify(FALLBACK_ORIGINS)}`
+  ]);
+  return result.length ? result : FALLBACK_ORIGINS.map(origin => ({ label: new URL(origin).hostname, origin, status: "untested" }));
 }
 
 export async function testDomain(candidate: DomainCandidate): Promise<DomainCandidate> {

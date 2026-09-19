@@ -34,18 +34,29 @@ const ACTIVE_CARRIED_GENERAL_LIMIT = 2;
 const DEFAULT_PLAYER_BASE_POWER = 500;
 const STARTING_PLAYER_GOLD = 500;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
-const RESOURCE_YIELD_FORMULA_VERSION = 4;
+const RESOURCE_YIELD_FORMULA_VERSION = 5;
 const MINING_DURATION_MS = 10 * MINUTE;
 const MAX_CONCURRENT_MINING_JOBS = 3;
 const MINING_COOLDOWN_MIN_MS = HOUR;
 const MINING_COOLDOWN_MAX_MS = 4 * HOUR;
-const MARCH_MS_PER_CELL = 30 * 1000;
+const MARCH_MS_PER_CELL = 15 * 1000;
+const MINING_GRADE_YIELD_MULTIPLIERS = Object.freeze(
+  RESOURCE_GRADES.map((_, index) => 2.8 + index * 0.18)
+);
+const GENERAL_EXPERIENCE_REQUIREMENTS = Object.freeze([100, 300, 800, 1800, 3600]);
+const GENERAL_TRAINING_EXPERIENCE_MINUTES = Object.freeze([30, 90, 180, 360, 720]);
+const GENERAL_IDLE_EXPERIENCE_MINUTES = Object.freeze([180, 540, 1080, 2160, 4320]);
+const GENERAL_DEFENSE_CULTIVATION_BONUSES = Object.freeze([0.05, 0.1, 0.2, 0.4, 0.6, 0.9]);
+const PLAYER_CULTIVATION_GOLD_MULTIPLIER = 2.5;
+const PLAYER_CULTIVATION_POWER_MULTIPLIER = 0.9;
+const GENERAL_BATTLE_EXPERIENCE_MAX_RATE = 0.48;
+const GENERAL_BATTLE_EXPERIENCE_MIN_RATE = 0.1;
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainMin: 0.06, powerGainMax: 0.10 }),
-  Object.freeze({ attempt: 2, gateHours: 48, goldMin: 12000, goldMax: 18000, powerGainMin: 0.09, powerGainMax: 0.14 }),
-  Object.freeze({ attempt: 3, gateHours: 168, goldMin: 30000, goldMax: 45000, powerGainMin: 0.13, powerGainMax: 0.20 }),
-  Object.freeze({ attempt: 4, gateHours: 360, goldMin: 70000, goldMax: 100000, powerGainMin: 0.18, powerGainMax: 0.28 }),
-  Object.freeze({ attempt: 5, gateHours: 576, goldMin: 160000, goldMax: 240000, powerGainMin: 0.25, powerGainMax: 0.40 })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainMin: 0.065, powerGainMax: 0.11 }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 12000, goldMax: 18000, powerGainMin: 0.10, powerGainMax: 0.155 }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 30000, goldMax: 45000, powerGainMin: 0.145, powerGainMax: 0.22 }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 70000, goldMax: 100000, powerGainMin: 0.20, powerGainMax: 0.31 }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 160000, goldMax: 240000, powerGainMin: 0.28, powerGainMax: 0.44 })
 ]);
 const MATERIAL_IDS = Object.freeze(TALENT_MATERIALS.map(item => item.id));
 const CULTIVATION_MATERIAL_IDS = MATERIAL_IDS;
@@ -285,13 +296,13 @@ function selectGeneralDirectionTags(privatePlayer, seed, ...parts) {
 }
 
 function generalDiscoveryChance(population) {
-  return 0.02 + ((clamp(Number(population), 100, 10000) - 100) / 9900) * 0.23;
+  return 0.019 + ((clamp(Number(population), 100, 10000) - 100) / 9900) * 0.221;
 }
 
 // Training discovery is intentionally much rarer than discovering a local
 // notable after a battle. The roll is capped at the first 1,000 trained
 // soldiers and produces at most one candidate for a completed training job.
-const TRAINING_GENERAL_DISCOVERY_PER_SOLDIER = 0.0001;
+const TRAINING_GENERAL_DISCOVERY_PER_SOLDIER = 0.000095;
 
 function trainingGeneralDiscoveryChance(soldiers) {
   const count = clamp(Math.trunc(Number(soldiers) || 0), 0, 1000);
@@ -349,7 +360,8 @@ function resourceYield(cell) {
     ? clamp(Number(cell.populationBase), 100, 10000)
     : population / resourceMultiplier;
   const resourceRank = clamp(Math.trunc(Number(cell?.resourceRank) || 0), 0, RESOURCE_GRADES.length - 1);
-  const hourlyGold = (400 + basePopulation * 0.09) * resourceMultiplier * (1 + resourceRank * 0.08);
+  const gradeMultiplier = MINING_GRADE_YIELD_MULTIPLIERS[resourceRank];
+  const hourlyGold = (400 + basePopulation * 0.09) * resourceMultiplier * (1 + resourceRank * 0.08) * gradeMultiplier;
   return Math.max(1, Math.round(hourlyGold * resourceCycleMs({ ...cell, population, resourceRank }) / HOUR));
 }
 
@@ -375,6 +387,119 @@ function ensurePowerProgress(target, fallbackBasePower = DEFAULT_PLAYER_BASE_POW
   target.trainingLevel = trainingLevel;
   target.power = trainingPower(target.basePower, trainingLevel);
   return target;
+}
+
+function generalExperienceRequirement(generalOrCount) {
+  const count = typeof generalOrCount === "object"
+    ? clamp(Math.trunc(Number(generalOrCount?.cultivationCount) || 0), 0, CULTIVATION_RANGES.length)
+    : clamp(Math.trunc(Number(generalOrCount) || 0), 0, CULTIVATION_RANGES.length);
+  return count >= CULTIVATION_RANGES.length ? 0 : GENERAL_EXPERIENCE_REQUIREMENTS[count];
+}
+
+function ensureGeneralExperience(general) {
+  if (!general || typeof general !== "object") return general;
+  const required = generalExperienceRequirement(general);
+  const experience = Math.max(0, Number(general.experience) || 0);
+  general.experience = required ? Math.min(required, Math.round(experience * 1000) / 1000) : 0;
+  const updatedAt = Number(general.experienceUpdatedAt || 0);
+  general.experienceUpdatedAt = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0;
+  return general;
+}
+
+function grantGeneralExperience(general, amountValue) {
+  ensureGeneralExperience(general);
+  const required = generalExperienceRequirement(general);
+  if (!required) return 0;
+  const before = general.experience;
+  const amount = Math.max(0, Number(amountValue) || 0);
+  general.experience = Math.min(required, Math.round((before + amount) * 1000) / 1000);
+  return Math.max(0, Math.round((general.experience - before) * 1000) / 1000);
+}
+
+function generalDefenseCultivationRate(generalOrCount) {
+  const count = typeof generalOrCount === "object"
+    ? clamp(Math.trunc(Number(generalOrCount?.cultivationCount) || 0), 0, CULTIVATION_RANGES.length)
+    : clamp(Math.trunc(Number(generalOrCount) || 0), 0, CULTIVATION_RANGES.length);
+  return GENERAL_DEFENSE_CULTIVATION_BONUSES[count];
+}
+
+function generalDefenseBonusPower(general) {
+  return Math.max(0, Math.round(generalPower(general) * generalDefenseCultivationRate(general)));
+}
+
+function deployedGeneralIdsAt(state, accountId, x, y) {
+  const cell = state.cells?.[keyOf(x, y)];
+  if (!cell || String(cell.ownerAccountId || "") !== String(accountId || "")) return [];
+  return (cell.generalIds || []).filter(id => {
+    const general = state.generals?.[id];
+    return general?.status === "deployed"
+      && String(general.holderAccountId || "") === String(accountId || "")
+      && Number(general.location?.x) === Number(x)
+      && Number(general.location?.y) === Number(y);
+  });
+}
+
+function generalBattleExperienceGain(general, powerDifferenceValue) {
+  const required = generalExperienceRequirement(general);
+  if (!required) return 0;
+  const difference = Math.max(0, Number(powerDifferenceValue) || 0);
+  const rate = Math.max(
+    GENERAL_BATTLE_EXPERIENCE_MIN_RATE,
+    GENERAL_BATTLE_EXPERIENCE_MAX_RATE / (1 + difference / 250)
+  );
+  return Math.max(0.001, Math.round(required * rate * 1000) / 1000);
+}
+
+function generalMarchExperienceGain(general, distanceValue) {
+  const required = generalExperienceRequirement(general);
+  const distance = Math.max(0, Math.trunc(Number(distanceValue) || 0));
+  return required && distance ? Math.max(0.001, Math.round(required * distance / 12000 * 1000) / 1000) : 0;
+}
+
+function accrueDeployedGeneralExperience(state, nowValue, experienceSinceValue, effects = [], activeAccountId = null) {
+  const now = Number(nowValue);
+  const experienceSince = Math.max(0, Number(experienceSinceValue) || 0);
+  for (const [generalId, general] of Object.entries(state.generals || {})) {
+    if (general?.status !== "deployed" || !general.location) continue;
+    if (activeAccountId && String(general.holderAccountId || "") !== String(activeAccountId)) continue;
+    ensureGeneralExperience(general);
+    const required = generalExperienceRequirement(general);
+    const previousCursor = Number(general.experienceUpdatedAt || 0);
+    let cursor = Math.max(previousCursor || experienceSince || now, experienceSince);
+    if (!Number.isFinite(cursor) || cursor <= 0 || cursor > now) cursor = now;
+    const minutes = Math.floor((now - cursor) / MINUTE);
+    if (!minutes) {
+      if (!previousCursor) general.experienceUpdatedAt = cursor;
+      continue;
+    }
+    let amount = 0;
+    for (let index = 1; index <= minutes; index += 1) {
+      const minuteAt = cursor + index * MINUTE;
+      const training = Object.values(state.jobs || {}).some(job => job?.type === "training"
+        && String(job.accountId || "") === String(general.holderAccountId || "")
+        && Number(job.x) === Number(general.location.x)
+        && Number(job.y) === Number(general.location.y)
+        && Number(job.startedAt || 0) < minuteAt
+        && Number(job.finishAt || 0) >= minuteAt);
+      const level = clamp(Math.trunc(Number(general.cultivationCount) || 0), 0, CULTIVATION_RANGES.length - 1);
+      const targetMinutes = training
+        ? GENERAL_TRAINING_EXPERIENCE_MINUTES[level]
+        : GENERAL_IDLE_EXPERIENCE_MINUTES[level];
+      amount += required / targetMinutes;
+    }
+    general.experienceUpdatedAt = cursor + minutes * MINUTE;
+    const gained = grantGeneralExperience(general, amount);
+    if (gained > 0) effects.push({
+      type: "general-experience-gained",
+      source: "deployed",
+      generalId,
+      accountId: general.holderAccountId,
+      amount: gained,
+      experience: general.experience,
+      required
+    });
+  }
+  return effects;
 }
 
 function powerTrainingCost(basePowerValue, currentLevelValue, levelsValue = 1) {
@@ -475,6 +600,7 @@ function actionTalentModifiers(state, accountId, action, position, options = {})
     cell: { ...info, ...cell, terrain: info.terrain, population: info.population, resourceGrade: info.resourceGrade, resourceRank: info.resourceRank },
     attacking: Boolean(options.attacking),
     armySize: Number(options.armySize || 0),
+    discoveryKind: options.discoveryKind || null,
     now: options.now,
     talents: sources
   });
@@ -508,10 +634,11 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
   if (cultivationCount >= CULTIVATION_RANGES.length) throw new Error(`${targetType === "player" ? "玩家" : "该将领"}已经完成五次修炼`);
   const range = CULTIVATION_RANGES[cultivationCount];
   const now = Number(nowValue);
-  // The first cultivation is available as soon as the player joins. Later
-  // attempts retain their progression intervals.
-  const unlockAt = range.attempt === 1 ? 0 : Number(player.joinedAt || state?.startedAt || 0) + range.gateHours * HOUR;
-  const investment = integer(options.goldInvestment ?? range.goldMin, "修炼投入", range.goldMin, range.goldMax);
+  const unlockAt = 0;
+  const goldMultiplier = targetType === "player" ? PLAYER_CULTIVATION_GOLD_MULTIPLIER : 1;
+  const goldMin = Math.ceil(range.goldMin * goldMultiplier);
+  const goldMax = Math.ceil(range.goldMax * goldMultiplier);
+  const investment = integer(options.goldInvestment ?? goldMin, "修炼投入", goldMin, goldMax);
   const material = targetType === "general" && options.materialId != null ? String(options.materialId) : null;
   if (targetType === "general" && material != null && !CULTIVATION_MATERIAL_IDS.includes(material)) throw new Error("请选择一件有效的天赋素材");
   const position = player.position || { x: 0, y: 0 };
@@ -519,11 +646,12 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
     carriedGeneralIds: targetType === "general" && target.status === "carried" ? [target.id] : activeCarriedGeneralIds(player), now
   }) : { cultivationCost: 0, cultivationPower: 0, applied: [], evaluatedTalents: 0 };
   const cost = roundByModifier(investment, modifiers.cultivationCost, 1);
-  const investmentRatio = (investment - range.goldMin) / Math.max(1, range.goldMax - range.goldMin);
-  const baseGain = range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin);
+  const investmentRatio = (investment - goldMin) / Math.max(1, goldMax - goldMin);
+  const targetPowerMultiplier = targetType === "player" ? PLAYER_CULTIVATION_POWER_MULTIPLIER : 1;
+  const baseGain = (range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin)) * targetPowerMultiplier;
   const targetKey = String(target.id || target.accountId || player.accountId || targetType);
   const randomFactor = 0.9 + randomUnit(String(options.seed ?? state?.seed ?? "cultivation"), "cultivation-power", targetKey, range.attempt) * 0.2;
-  const powerGainFraction = Math.min(0.6, baseGain * randomFactor * (1 + modifiers.cultivationPower));
+  const powerGainFraction = Math.min(0.75, baseGain * randomFactor * (1 + modifiers.cultivationPower));
   const currentPower = generalPower(target);
   const targetPower = currentPower + Math.max(1, Math.round(currentPower * powerGainFraction));
   const currentBasePower = clamp(Math.trunc(Number(target.basePower || target.power || 1)), 1, 100000);
@@ -532,10 +660,14 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
   while (nextBasePower > currentBasePower && trainingPower(nextBasePower - 1, target.trainingLevel) >= targetPower) nextBasePower -= 1;
   const nextPower = trainingPower(nextBasePower, target.trainingLevel);
   const powerGain = Math.max(0, nextPower - currentPower);
+  if (targetType === "general") ensureGeneralExperience(target);
+  const experienceRequired = targetType === "general" ? generalExperienceRequirement(target) : 0;
+  const experience = targetType === "general" ? Number(target.experience || 0) : 0;
   return Object.freeze({
     attempt: range.attempt, unlockAt, unlocked: Number.isFinite(now) && now >= unlockAt, gateHours: range.gateHours,
-    goldMin: range.goldMin, goldMax: range.goldMax, goldInvestment: investment, cost,
+    goldMin, goldMax, goldInvestment: investment, cost,
     materialId: material, materialCount: targetType === "general" ? 1 : 0, remaining: CULTIVATION_RANGES.length - cultivationCount,
+    experience, experienceRequired, experienceReady: targetType !== "general" || experience >= experienceRequired,
     durationMs: 0,
     randomFactor: Math.round(randomFactor * 10000) / 10000,
     basePowerGainPercent: Math.round(baseGain * 10000) / 100,
@@ -551,6 +683,7 @@ function cultivationActionQuote(state, accountId, generalId, goldInvestment, mat
   if (!general || String(general.holderAccountId) !== String(accountId)) throw new Error("只能修炼自己的将领");
   const quote = cultivationQuote(general, player, nowValue, { state, goldInvestment, materialId });
   if (!quote.unlocked) throw new Error(`第${quote.attempt}次修炼尚未开放`);
+  if (!quote.experienceReady) throw new Error(`将领经验不足，需要 ${quote.experienceRequired} 经验才能修炼`);
   return quote;
 }
 
@@ -664,12 +797,20 @@ function regionDefenseQuote(state, xValue, yValue, nowValue = Date.now()) {
   const y = coordinate(yValue, "纵坐标");
   const cell = state.cells?.[keyOf(x, y)] || { ownerAccountId: null, soldiers: 0, generalIds: [] };
   const basePower = regionPower(state, x, y);
-  if (!cell.ownerAccountId) return Object.freeze({ x, y, ownerAccountId: null, basePower, power: basePower, modifiers: null });
+  const cultivationBonusPower = (cell.generalIds || []).reduce((total, id) => {
+    const general = state.generals?.[id];
+    return total + (general?.status === "deployed" ? generalDefenseBonusPower(general) : 0);
+  }, 0);
+  if (!cell.ownerAccountId) return Object.freeze({ x, y, ownerAccountId: null, basePower, cultivationBonusPower: 0, talentBonusPower: 0, power: basePower, modifiers: null });
   const modifiers = actionTalentModifiers(state, cell.ownerAccountId, "combat", { x, y }, {
     attacking: false, armySize: Number(cell.soldiers || 0), carriedGeneralIds: [], now: nowValue
   });
-  const power = Math.max(0, Math.round(basePower * (1 + modifiers.combatPower + modifiers.defensePower)));
-  return Object.freeze({ x, y, ownerAccountId: cell.ownerAccountId, basePower, power, modifiers });
+  const powerBeforeTalents = basePower + cultivationBonusPower;
+  const power = Math.max(0, Math.round(powerBeforeTalents * (1 + modifiers.combatPower + modifiers.defensePower)));
+  return Object.freeze({
+    x, y, ownerAccountId: cell.ownerAccountId, basePower, cultivationBonusPower,
+    talentBonusPower: Math.max(0, power - powerBeforeTalents), power, modifiers
+  });
 }
 
 function pathBetween(from, to) {
@@ -811,7 +952,8 @@ function battleCasualties(attackerPowerValue, defenderPowerValue, attackerSoldie
   const loserLosses = Math.min(loserSoldiers, Math.floor(loserPower * 0.8));
   const winnerLosses = Math.min(
     winnerSoldiers,
-    Math.floor(Math.max(0, winnerPower - loserPower) / Math.max(1, winnerPower + loserPower) * loserPower)
+    Math.floor(0.9 * loserPower * loserPower / Math.max(1, winnerPower)),
+    Math.floor(winnerPower * 0.9)
   );
   return Object.freeze({
     attackerWon,
@@ -820,6 +962,79 @@ function battleCasualties(attackerPowerValue, defenderPowerValue, attackerSoldie
     attackerSurvivors: Math.max(0, attackerSoldiers - (attackerWon ? winnerLosses : loserLosses)),
     defenderSurvivors: Math.max(0, defenderSoldiers - (attackerWon ? loserLosses : winnerLosses))
   });
+}
+
+function battleReportsFor(state, accountId) {
+  state.privatePlayers ||= {};
+  const privatePlayer = state.privatePlayers[String(accountId)] ||= { orientation: "any" };
+  if (!Array.isArray(privatePlayer.battleReports)) privatePlayer.battleReports = [];
+  return privatePlayer.battleReports;
+}
+
+function battleReportSummary(report, state = null) {
+  if (!report || typeof report !== "object") return "";
+  const parts = [
+    report.outcome === "victory" ? "我方获胜并占领目标" : "我方战败并返回出发地",
+    `双方战力 ${Math.max(0, Math.trunc(Number(report.attackerPower || 0)))}/${Math.max(0, Math.trunc(Number(report.defenderPower || 0)))}`
+  ];
+  if (Number(report.soldiersGained || 0) > 0) parts.push(`获得士兵 ${Math.trunc(Number(report.soldiersGained))}`);
+  if (Number(report.ownLosses || 0) > 0) parts.push(`我方牺牲 ${Math.trunc(Number(report.ownLosses))} 名士兵`);
+  if (Number(report.ownSurvivors || 0) > 0) parts.push(`我方幸存 ${Math.trunc(Number(report.ownSurvivors))} 名士兵`);
+  const capturedNames = (report.capturedGenerals || []).map(item => String(item?.name || state?.generals?.[item?.id]?.name || "").trim()).filter(Boolean);
+  if (capturedNames.length) parts.push(`俘虏将领：${capturedNames.join("、")}`);
+  const discoveredName = String(report.discoveredGeneralName || "").trim();
+  if (discoveredName) parts.push(`发掘将领：${discoveredName}`);
+  else if (report.discoveryId) parts.push("发现一名待提拔的拔尖兵士");
+  const target = report.target || {};
+  return `战报：于 (${Number(target.x)}, ${Number(target.y)}) 发动进攻，${parts.join("；")}。`;
+}
+
+function recordBattleReport(state, accountId, value) {
+  const reports = battleReportsFor(state, accountId);
+  const id = String(value?.id || value?.jobId || crypto.randomUUID()).slice(0, 100);
+  const report = {
+    id,
+    jobId: String(value?.jobId || id).slice(0, 100),
+    createdAt: Number(value?.createdAt || Date.now()),
+    target: { x: coordinate(value?.target?.x, "战报横坐标"), y: coordinate(value?.target?.y, "战报纵坐标") },
+    outcome: value?.outcome === "victory" ? "victory" : "defeat",
+    attackerPower: Math.max(0, Math.trunc(Number(value?.attackerPower || 0))),
+    defenderPower: Math.max(0, Math.trunc(Number(value?.defenderPower || 0))),
+    soldiersGained: Math.max(0, Math.trunc(Number(value?.soldiersGained || 0))),
+    ownLosses: Math.max(0, Math.trunc(Number(value?.ownLosses || 0))),
+    ownSurvivors: Math.max(0, Math.trunc(Number(value?.ownSurvivors || 0))),
+    capturedGenerals: (value?.capturedGeneralIds || []).map(idValue => ({
+      id: String(idValue),
+      name: String(state.generals?.[idValue]?.name || "无名将领").slice(0, 24)
+    })),
+    discoveryId: value?.discoveryId ? String(value.discoveryId).slice(0, 120) : null,
+    discoveredGeneralId: value?.discoveredGeneralId ? String(value.discoveredGeneralId).slice(0, 120) : null,
+    discoveredGeneralName: value?.discoveredGeneralName ? String(value.discoveredGeneralName).slice(0, 24) : ""
+  };
+  const existing = reports.findIndex(item => String(item?.id || "") === id);
+  if (existing >= 0) reports.splice(existing, 1, report);
+  else reports.push(report);
+  if (reports.length > 20) reports.splice(0, reports.length - 20);
+  return report;
+}
+
+function grantMarchExperience(state, job, distance, effects) {
+  for (const generalId of [...new Set((job.generalIds || []).map(String))]) {
+    const general = state.generals?.[generalId];
+    if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
+    const gained = grantGeneralExperience(general, generalMarchExperienceGain(general, distance));
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "march", generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general) });
+  }
+}
+
+function grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects) {
+  const difference = Math.abs(Number(attackerPower || 0) - Number(defenderPower || 0));
+  for (const generalId of activeGeneralIds || []) {
+    const general = state.generals?.[generalId];
+    if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
+    const gained = grantGeneralExperience(general, generalBattleExperienceGain(general, difference));
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "battle", generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), powerDifference: difference });
+  }
 }
 
 function gameYear(state, timestamp) {
@@ -924,6 +1139,7 @@ function ensureGeneralProfile(general) {
   general.marketRelistAvailableAt = Number.isFinite(relistAvailableAt) && relistAvailableAt > 0 ? relistAvailableAt : 0;
   ensurePowerProgress(general, general.power || 300);
   ensureGeneralTalent(general);
+  ensureGeneralExperience(general);
   return general;
 }
 
@@ -947,6 +1163,8 @@ function publicMarketGeneralState(general) {
     trainingLevel: clamp(Math.trunc(Number(normalized.trainingLevel) || 0), 0, MAX_TRAINING_LEVEL),
     power: Math.max(0, Math.trunc(Number(normalized.power || 0))),
     cultivationCount: clamp(Math.trunc(Number(normalized.cultivationCount) || 0), 0, CULTIVATION_RANGES.length),
+    experience: Number(normalized.experience || 0),
+    experienceRequired: generalExperienceRequirement(normalized),
     talent: clone(normalized.talent),
     talentSummary: talentSummary(normalized),
     masterHistory: clone(normalized.masterHistory || []),
@@ -984,6 +1202,7 @@ function ensureGeneralTalent(general, seed = "legacy-grid-talent") {
     ? normalizeTalent(general.talent, seed, id)
     : rollTalent(seed, id);
   general.cultivationCount = clamp(Math.trunc(Number(general.cultivationCount) || 0), 0, CULTIVATION_RANGES.length);
+  ensureGeneralExperience(general);
   return general;
 }
 
@@ -1028,6 +1247,8 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, heightC
     trainingLevel: 0,
     power: integer(power ?? 300, "将领战力", 1, 100000),
     cultivationCount: 0,
+    experience: 0,
+    experienceUpdatedAt: 0,
     talent: rollTalent(String(talentSeed || holderAccountId || "general"), String(id)),
     holderAccountId: String(holderAccountId),
     loyalToAccountId: String(holderAccountId),
@@ -1062,7 +1283,7 @@ function canInteractWithGeneral(state, player, general) {
     && general.location?.y === player.position?.y;
 }
 
-function settleWorld(inputState, nowValue = Date.now()) {
+function settleWorld(inputState, nowValue = Date.now(), options = {}) {
   const state = clone(inputState);
   const now = Number(nowValue);
   if (!Number.isFinite(now) || now < state.startedAt) throw new Error("宿主时间无效");
@@ -1077,6 +1298,7 @@ function settleWorld(inputState, nowValue = Date.now()) {
   for (const general of Object.values(state.generals)) ensureGeneralTalent(general, state.seed);
   for (const privatePlayer of Object.values(state.privatePlayers)) ensureMaterialInventory(privatePlayer);
   const effects = [];
+  accrueDeployedGeneralExperience(state, now, options.experienceSince, effects, options.activeAccountId);
   for (const [jobId, job] of Object.entries(state.jobs)) {
     if (job.type === "mining") {
       const cell = dynamicCell(state, job.x, job.y);
@@ -1123,8 +1345,10 @@ function settleWorld(inputState, nowValue = Date.now()) {
       if (accepted > 0) {
         const privatePlayer = state.privatePlayers[job.accountId] ||= { orientation: "any" };
         const discoveryModifiers = actionTalentModifiers(state, job.accountId, "discovery", { x: job.x, y: job.y }, {
-          armySize: accepted, now
+          armySize: accepted, discoveryKind: "training", now
         });
+        const deployedCount = deployedGeneralIdsAt(state, job.accountId, job.x, job.y).length;
+        const deploymentMultiplier = 2 ** deployedCount;
         const discoveryWindow = normalizeTrainingDiscoveryWindow(privatePlayer);
         let remaining = accepted;
         let segment = 0;
@@ -1132,7 +1356,7 @@ function settleWorld(inputState, nowValue = Date.now()) {
           const room = 1000 - discoveryWindow.trained;
           const chunk = Math.min(remaining, room);
           const discoveryChance = clamp(
-            trainingGeneralDiscoveryChance(chunk) + Number(discoveryModifiers.discoveryChance || 0),
+            (trainingGeneralDiscoveryChance(chunk) + Number(discoveryModifiers.discoveryChance || 0)) * deploymentMultiplier,
             0, 1
           );
           if (!discoveryWindow.discovered
@@ -1153,6 +1377,8 @@ function settleWorld(inputState, nowValue = Date.now()) {
               resourceGrade: info.resourceGrade,
               trainedSoldiers: chunk,
               discoveryChance,
+              deployedGeneralCount: deployedCount,
+              deploymentMultiplier,
               createdAt: now
             });
             const candidate = effects[effects.length - 1];
@@ -1193,6 +1419,8 @@ function settleWorld(inputState, nowValue = Date.now()) {
       general.basePower = clamp(Number(general.basePower) + Number(job.basePowerGain || 0), 1, 100000);
       general.power = trainingPower(general.basePower, general.trainingLevel);
       general.cultivationCount = clamp(Number(general.cultivationCount || 0) + 1, 0, CULTIVATION_RANGES.length);
+      general.experience = 0;
+      general.experienceUpdatedAt = now;
       general.talent = upgradeTalent(general.talent, job.materialId, { seed: state.seed, nonce: `${job.id}:${general.cultivationCount}` }).talent;
       appendGeneralMemory(general, {
         year: gameYear(state, now), category: "deed",
@@ -1234,6 +1462,7 @@ function resolveMarch(state, job, effects, now) {
   const player = state.players[job.accountId];
   if (!player) return;
   const path = storedMarchPath(job.path) || pathBetween(job.from, job.to);
+  grantMarchExperience(state, job, path.length, effects);
   const blocked = path.find(point => {
     const owner = dynamicCell(state, point.x, point.y).ownerAccountId;
     return owner && owner !== job.accountId;
@@ -1260,10 +1489,10 @@ function resolveMarch(state, job, effects, now) {
       attacking: false, armySize: Number(target.soldiers || 0), carriedGeneralIds: [], now
     }) : null;
     const discoveryModifiers = neutral ? actionTalentModifiers(state, job.accountId, "discovery", job.to, {
-      attacking: true, armySize: job.soldiers, carriedGeneralIds: activeGeneralIds, now
+      attacking: true, armySize: job.soldiers, carriedGeneralIds: activeGeneralIds, discoveryKind: "attack", now
     }) : null;
-    const rawDefenderPower = enemy ? regionPower(state, job.to.x, job.to.y) : targetInfo.neutralPower;
-    const defenderPower = Math.max(1, Math.round(rawDefenderPower * (1 + Number(defenseModifiers?.combatPower || 0) + Number(defenseModifiers?.defensePower || 0))));
+    const defenseQuote = enemy ? regionDefenseQuote(state, job.to.x, job.to.y, now) : null;
+    const defenderPower = enemy ? Math.max(1, defenseQuote.power) : Math.max(1, targetInfo.neutralPower);
     const attackerGeneralPower = activeGeneralIds.reduce((sum, id) => sum + generalPower(state.generals[id]), 0);
     ensurePowerProgress(player, DEFAULT_PLAYER_BASE_POWER);
     const rawAttackerPower = job.soldiers + player.power + attackerGeneralPower;
@@ -1283,6 +1512,11 @@ function resolveMarch(state, job, effects, now) {
           targetOwnerAccountId: defenderOwnerBefore,
           attackerLosses: casualties.attackerLosses, defenderLosses: casualties.defenderLosses,
           defenderSurvivors: casualties.defenderSurvivors, attackModifiers, defenseModifiers
+        });
+        recordBattleReport(state, job.accountId, {
+          jobId: job.id, createdAt: now, target: job.to, outcome: "defeat",
+          attackerPower, defenderPower, ownLosses: casualties.attackerLosses,
+          ownSurvivors: casualties.attackerSurvivors
         });
         return;
       }
@@ -1318,20 +1552,39 @@ function resolveMarch(state, job, effects, now) {
         attackerSurvivors: casualties.attackerSurvivors, defenderSurvivors: casualties.defenderSurvivors,
         attackModifiers, defenseModifiers
       });
+      grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects);
+      recordBattleReport(state, job.accountId, {
+        jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
+        attackerPower, defenderPower, soldiersGained: target.soldiers, ownLosses: casualties.attackerLosses,
+        ownSurvivors: casualties.attackerSurvivors, capturedGeneralIds
+      });
       claimTreasureAt(state, job.accountId, job.to, now, effects);
       return;
     }
-    if (attackerPower <= defenderPower) {
-      const survivors = Math.max(0, Math.floor(job.soldiers * attackerPower / Math.max(1, defenderPower) * 0.35));
-      returnArmy(state, player, job, survivors);
+    const neutralCasualties = battleCasualties(attackerPower, defenderPower, job.soldiers, targetInfo.neutralPower);
+    if (!neutralCasualties.attackerWon) {
+      returnArmy(state, player, job, neutralCasualties.attackerSurvivors);
       player.position = { ...job.from };
-      effects.push({ type: "battle-lost", jobId: job.id, accountId: job.accountId, at: job.to, attackerPower, defenderPower, survivors, attackerLosses: Math.max(0, job.soldiers - survivors), defenderLosses: 0, attackModifiers, defenseModifiers });
+      effects.push({
+        type: "battle-lost", jobId: job.id, accountId: job.accountId, at: job.to,
+        attackerPower, defenderPower, survivors: neutralCasualties.attackerSurvivors,
+        attackerSoldiers: job.soldiers, defenderSoldiers: targetInfo.neutralPower,
+        attackerLosses: neutralCasualties.attackerLosses,
+        defenderLosses: neutralCasualties.defenderLosses,
+        defenderSurvivors: neutralCasualties.defenderSurvivors,
+        attackModifiers, defenseModifiers
+      });
+      recordBattleReport(state, job.accountId, {
+        jobId: job.id, createdAt: now, target: job.to, outcome: "defeat",
+        attackerPower, defenderPower, ownLosses: neutralCasualties.attackerLosses,
+        ownSurvivors: neutralCasualties.attackerSurvivors
+      });
       return;
     }
     const previousOwner = target.ownerAccountId;
     const capturedGeneralIds = [...(target.generalIds || [])];
-    const losses = Math.min(job.soldiers, Math.floor(defenderPower * 0.45));
-    const survivors = Math.max(0, job.soldiers - losses);
+    const losses = neutralCasualties.attackerLosses;
+    const survivors = neutralCasualties.attackerSurvivors;
     target.ownerAccountId = job.accountId;
     target.soldiers = Math.min(targetInfo.garrisonCap, survivors);
     target.generalIds = [];
@@ -1353,8 +1606,16 @@ function resolveMarch(state, job, effects, now) {
       general.captivityHistory.push({ captorAccountId: job.accountId, formerMasterAccountId, year });
       appendGeneralMemory(general, { year, category: "deed", text: `战败，被${playerDisplayName(state, job.accountId)}俘虏`, accountId: job.accountId, intimacyDelta: -5 });
     }
-    effects.push({ type: "battle-won", jobId: job.id, accountId: job.accountId, at: job.to, previousOwner, attackerPower, defenderPower, soldiers: target.soldiers, capturedGeneralIds, attackModifiers, defenseModifiers });
+    effects.push({
+      type: "battle-won", jobId: job.id, accountId: job.accountId, at: job.to, previousOwner,
+      attackerPower, defenderPower, soldiers: target.soldiers, capturedGeneralIds,
+      attackerSoldiers: job.soldiers, defenderSoldiers: targetInfo.neutralPower,
+      attackerLosses: losses, defenderLosses: neutralCasualties.defenderLosses,
+      attackerSurvivors: survivors, defenderSurvivors: neutralCasualties.defenderSurvivors,
+      attackModifiers, defenseModifiers
+    });
     claimTreasureAt(state, job.accountId, job.to, now, effects);
+    let discoveryId = null;
     if (neutral) {
       const chance = clamp(generalDiscoveryChance(targetInfo.population) + discoveryModifiers.discoveryChance, 0, 1);
       if (randomUnit(state.seed, "discover-general", state.seasonId, job.id, job.to.x, job.to.y) < chance) {
@@ -1376,9 +1637,16 @@ function resolveMarch(state, job, effects, now) {
         });
         const candidate = effects[effects.length - 1];
         candidate.discoveryId = `neutral-battle:${job.id}`;
+        discoveryId = candidate.discoveryId;
         queueGeneralDiscovery(state, candidate);
       }
     }
+    grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects);
+    recordBattleReport(state, job.accountId, {
+      jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
+      attackerPower, defenderPower, soldiersGained: target.soldiers, ownLosses: losses, ownSurvivors: survivors,
+      capturedGeneralIds, discoveryId
+    });
     return;
   }
   player.position = { ...job.to };
@@ -1445,7 +1713,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
   if (inputState.bans[actorAccountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁");
   const idempotencyKey = String(intent.idempotencyKey || context.eventId || crypto.randomUUID()).slice(0, 100);
   if (inputState.processedIntents.includes(idempotencyKey)) return { state: clone(inputState), duplicate: true, effects: [], event: null };
-  const settled = settleWorld(inputState, now);
+  const settled = settleWorld(inputState, now, { activeAccountId: actorAccountId, experienceSince: context.experienceSince });
   const state = settled.state;
   state.marketListings ||= {};
   state.marketSales ||= {};
@@ -1506,7 +1774,15 @@ function applyIntent(inputState, rawIntent, context = {}) {
     result = { capital, gold: STARTING_PLAYER_GOLD, power: DEFAULT_PLAYER_BASE_POWER, soldiers: cell.soldiers };
   } else {
     const player = ensurePlayer(state, actorAccountId);
-    if (type === "confirm-general-discovery" || type === "decline-general-discovery") {
+    if (type === "dismiss-battle-report") {
+      const reportId = String(intent.reportId || "").trim();
+      if (!reportId) throw new Error("缺少战报编号");
+      const reports = battleReportsFor(state, actorAccountId);
+      const index = reports.findIndex(item => String(item?.id || "") === reportId);
+      if (index < 0) throw new Error("这份战报已经处理或不存在");
+      reports.splice(index, 1);
+      result = { reportId, dismissed: true };
+    } else if (type === "confirm-general-discovery" || type === "decline-general-discovery") {
       const discoveryId = String(intent.discoveryId || "").trim();
       if (!discoveryId) throw new Error("缺少待提拔将领编号");
       const candidate = (state.privatePlayers?.[actorAccountId]?.pendingGeneralDiscoveries || [])
@@ -1637,6 +1913,8 @@ function applyIntent(inputState, rawIntent, context = {}) {
       general.basePower = clamp(general.basePower + quote.basePowerGain, 1, 100000);
       general.power = trainingPower(general.basePower, general.trainingLevel);
       general.cultivationCount += 1;
+      general.experience = 0;
+      general.experienceUpdatedAt = now;
       general.talent = upgradeTalent(general.talent, quote.materialId, { seed: state.seed, nonce: `${idempotencyKey}:${general.cultivationCount}` }).talent;
       appendGeneralMemory(general, {
         year: gameYear(state, now), category: "deed",
@@ -1779,6 +2057,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const path = quote.path;
       const cost = quote.cost;
       if (player.gold < cost) throw new Error("金币不足");
+      battleReportsFor(state, actorAccountId).splice(0);
       player.fieldArmySoldiers = available - requested;
       player.gold -= cost;
       const id = crypto.randomUUID();
@@ -1805,6 +2084,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       cell.generalIds.push(generalId);
       general.status = "deployed";
       general.location = { x, y };
+      general.experienceUpdatedAt = now;
       result = { generalId, x, y, publishGeneralArchive: true };
     } else if (type === "recall-general") {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("行军途中不能召回将领");
@@ -1817,6 +2097,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (!player.carriedGeneralIds.includes(generalId)) player.carriedGeneralIds.push(generalId);
       general.status = "carried";
       general.location = null;
+      general.experienceUpdatedAt = now;
       result = { generalId, removeGeneralWorldBook: false };
     } else if (type === "take-general") {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("行军途中不能带走留置将领");
@@ -1834,12 +2115,17 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (!canInteractWithGeneral(state, player, general)) throw new Error("只能与身边、俘虏区或当前位置的自家部署将领交谈");
       const topic = String(intent.topic || "").trim().slice(0, 120);
       if (!topic) throw new Error("请输入谈话内容");
+      const battleReportId = String(intent.battleReportId || "").trim();
+      const battleReport = battleReportId
+        ? battleReportsFor(state, actorAccountId).find(item => String(item?.id || "") === battleReportId)
+        : null;
+      if (battleReportId && !battleReport) throw new Error("这份战报已经失效，请重新选择话题");
       const privatePlayer = state.privatePlayers[actorAccountId] ||= { orientation: "any" };
       privatePlayer.lastDialogueAtByGeneral ||= {};
       const lastDialogueAt = Number(privatePlayer.lastDialogueAtByGeneral[generalId] || 0);
       if (lastDialogueAt && now - lastDialogueAt < DIALOGUE_COOLDOWN_MS) throw new Error("将领对话请求过于频繁，请稍后再试");
       privatePlayer.lastDialogueAtByGeneral[generalId] = now;
-      result = { generalId, topic, modelRequest: buildGeneralDialogueRequest(state, general, player, topic, now) };
+      result = { generalId, topic, battleReportId: battleReport?.id || null, modelRequest: buildGeneralDialogueRequest(state, general, player, topic, now, battleReport) };
     } else if (type === "record-general-dialogue") {
       const generalId = String(intent.generalId || "");
       const general = state.generals[generalId];
@@ -1947,6 +2233,13 @@ function applyIntent(inputState, rawIntent, context = {}) {
       state.generals[general.id] = general;
       if (!player.carriedGeneralIds.includes(general.id)) player.carriedGeneralIds.push(general.id);
       if (intent.initial && state.privatePlayers[actorAccountId]) state.privatePlayers[actorAccountId].initialGeneralGranted = true;
+      if (intent.discoveryId) {
+        for (const report of battleReportsFor(state, actorAccountId)) {
+          if (String(report.discoveryId || "") !== String(intent.discoveryId)) continue;
+          report.discoveredGeneralId = general.id;
+          report.discoveredGeneralName = general.name;
+        }
+      }
       result = { generalId: general.id, name: general.name, status: general.status, location: general.location };
     } else throw new Error(`未知游戏行动：${type}`);
   }
@@ -1990,7 +2283,7 @@ function buildGeneralGenerationRequest(state, effect, idempotencyKey) {
   };
 }
 
-function buildGeneralDialogueRequest(state, general, player, topic, now) {
+function buildGeneralDialogueRequest(state, general, player, topic, now, battleReport = null) {
   const captive = general.status === "captured" && general.loyalToAccountId !== player.accountId;
   const formerLords = formerLordRouting(state, general, player.accountId);
   const playerContext = clone(state.privatePlayers?.[player.accountId]?.playerContext || null);
@@ -1998,6 +2291,18 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
   ensureGeneralTalent(general, state.seed);
   const deployedAveragePower = deployedGeneralAveragePower(state);
   const opposingAveragePower = opposingDeployedGeneralAveragePower(state, player.accountId);
+  const recentInteractions = modelRecentInteractions(general);
+  if (battleReport) recentInteractions.push({
+    year: gameYear(state, Number(battleReport.createdAt || now)),
+    speakerName: player.displayName,
+    kind: "battle-report",
+    category: "deed",
+    summary: battleReportSummary(battleReport, state),
+    emotion: "",
+    userText: "",
+    reply: "",
+    narration: ""
+  });
   return {
     task: captive ? "general.captive-dialogue" : "general.dialogue",
     keyword: `${captive ? "[[FYOW:TASK:general.captive-dialogue:v1]]" : "[[FYOW:TASK:general.dialogue:v1]]"}\n${general.name}`,
@@ -2012,7 +2317,7 @@ function buildGeneralDialogueRequest(state, general, player, topic, now) {
         talent: { ...clone(general.talent), summary: talentSummary(general, state.seed) },
         memory: general.memoryText, memoryEntries: clone(general.memory?.entries || []), intimacy: general.memory?.intimacy?.[player.accountId] || 0,
         masterHistory: modelMasterHistory(state, general), captivityHistory: modelCaptivityHistory(state, general),
-        recentInteractions: modelRecentInteractions(general)
+        recentInteractions
       },
       speaker: {
         name: player.displayName,
@@ -2162,6 +2467,10 @@ function publicGeneralState(general) {
     trainingLevel: clamp(Math.trunc(Number(general?.trainingLevel) || 0), 0, MAX_TRAINING_LEVEL),
     power: Math.max(0, Math.trunc(Number(general?.power || 0))),
     cultivationCount: clamp(Math.trunc(Number(general?.cultivationCount) || 0), 0, CULTIVATION_RANGES.length),
+    experience: Number(general?.experience || 0),
+    experienceRequired: generalExperienceRequirement(general),
+    defenseBonusRate: generalDefenseCultivationRate(general),
+    defenseBonusPower: generalDefenseBonusPower(general),
     talent: clone(general.talent),
     talentSummary: talentSummary(general),
     holderAccountId: String(general?.holderAccountId || ""),
@@ -2296,9 +2605,16 @@ module.exports = {
   MINUTE,
   HOUR,
   MARCH_MS_PER_CELL,
+  MINING_GRADE_YIELD_MULTIPLIERS,
   MARKET_RELIST_COOLDOWN_MS,
   ACTIVE_CARRIED_GENERAL_LIMIT,
   CULTIVATION_RANGES,
+  GENERAL_EXPERIENCE_REQUIREMENTS,
+  GENERAL_TRAINING_EXPERIENCE_MINUTES,
+  GENERAL_IDLE_EXPERIENCE_MINUTES,
+  GENERAL_DEFENSE_CULTIVATION_BONUSES,
+  PLAYER_CULTIVATION_GOLD_MULTIPLIER,
+  PLAYER_CULTIVATION_POWER_MULTIPLIER,
   MATERIAL_IDS,
   CULTIVATION_MATERIAL_IDS,
   RESOURCE_YIELD_FORMULA_VERSION,
@@ -2334,6 +2650,13 @@ module.exports = {
   trainDurationMs,
   trainingPower,
   ensurePowerProgress,
+  ensureGeneralExperience,
+  generalExperienceRequirement,
+  grantGeneralExperience,
+  generalBattleExperienceGain,
+  generalMarchExperienceGain,
+  generalDefenseCultivationRate,
+  generalDefenseBonusPower,
   ensureGeneralProfile,
   generatedGeneralPower,
   ensureGeneralTalent,

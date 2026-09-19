@@ -56,6 +56,9 @@ let draggedGeneralId = null;
 let pendingGeneralAction = null;
 let generalDiscoveryId = null;
 let generalDiscoverySubmitting = false;
+let activeBattleReportId = null;
+let battleReportGeneralPickerOpen = false;
+let battleDiscussionContext = null;
 const worldChatDrafts = new Map();
 const MATERIAL_NAMES = { white: "养气丹", green: "聚灵丹", blue: "凝元丹", purple: "紫府丹", gold: "金髓丹", "red-ascend": "赤曜丹", "red-reroll": "赤曜丹" };
 const MATERIAL_PURPOSES = { "red-ascend": "升格效果", "red-reroll": "洗髓效果" };
@@ -71,13 +74,23 @@ function host(type, data = {}, options = {}) {
   const message = { source: "fyow-grid-conquest", protocol: HOST_PROTOCOL, type, ...data };
   if (requestId) message.requestId = requestId;
   if (requestId) {
-    const control = !options.silent && document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
+    const control = !options.silent && options.control instanceof HTMLButtonElement
+      ? options.control
+      : !options.silent && document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
     if (control && !control.disabled) {
       control.disabled = true;
       control.classList.add("host-pending");
     }
-    pendingHostRequests.set(requestId, { key, control, silent: Boolean(options.silent) });
+    const pending = { key, control, silent: Boolean(options.silent), timeoutId: null };
+    pendingHostRequests.set(requestId, pending);
     if (key) pendingHostKeys.set(key, requestId);
+    const timeoutMs = Number(options.timeoutMs || 0);
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) pending.timeoutId = setTimeout(() => {
+      const expired = finishHostRequest(requestId);
+      if (!expired || expired.silent) return;
+      showToast(String(options.timeoutMessage || "操作请求超时，请重试"));
+      playSound("notice");
+    }, timeoutMs);
   }
   parent.postMessage(message, "*");
   return requestId || true;
@@ -89,6 +102,7 @@ function finishHostRequest(requestId) {
   const pending = pendingHostRequests.get(id);
   if (!pending) return false;
   pendingHostRequests.delete(id);
+  if (pending.timeoutId) clearTimeout(pending.timeoutId);
   if (pending.key && pendingHostKeys.get(pending.key) === id) pendingHostKeys.delete(pending.key);
   if (pending.control) {
     pending.control.disabled = false;
@@ -104,6 +118,12 @@ function ownPlayer() {
 }
 function allGenerals() { return payload?.world?.generals || {}; }
 function pendingGeneralDiscoveries() { return payload?.world?.privatePlayers?.[ownAccountId()]?.pendingGeneralDiscoveries || []; }
+function battleReports() {
+  return [...(payload?.world?.privatePlayers?.[ownAccountId()]?.battleReports || [])]
+    .filter(item => item && item.id)
+    .sort((left, right) => Number(left.createdAt || 0) - Number(right.createdAt || 0));
+}
+function battleReportById(id) { return battleReports().find(item => String(item.id) === String(id || "")) || null; }
 function cellKey(x, y) { return `${x},${y}`; }
 function dynamicCell(x, y) { return payload?.world?.cells?.[cellKey(x, y)] || { ownerAccountId: null, soldiers: 0, generalIds: [] }; }
 function fact(x, y) { return payload?.mapFacts?.[y * 64 + x] || { x, y, population: 0, resourceGrade: "—", resourceRank: 0, garrisonCap: 0, neutralPower: 0 }; }
@@ -145,6 +165,30 @@ function showMapFeedback(text, anchor = document.querySelector("#march")) {
   node.classList.remove("hidden");
   clearTimeout(floatingFeedbackTimer);
   floatingFeedbackTimer = setTimeout(() => node.classList.add("hidden"), 1800);
+}
+function generalExperienceLabel(general) {
+  const required = Math.max(0, Math.trunc(Number(general?.experienceRequired) || 0));
+  const experience = Math.max(0, Math.trunc(Number(general?.experience) || 0));
+  return required > 0 ? `${formatNumber(Math.min(experience, required))} / ${formatNumber(required)}` : "修炼圆满";
+}
+function battleReportMarker(report) {
+  const target = report?.target || {};
+  const time = new Date(Number(report?.createdAt || hostTime())).toLocaleString("zh-CN", {
+    month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+  });
+  return `【战报-${time} 对(${Number(target.x)},${Number(target.y)})发动的进攻】`;
+}
+function withoutBattleReportMarker(value, marker) {
+  const text = String(value || "");
+  if (!marker) return text.trim();
+  return text.replace(marker, "").replace(/^\s+/, "").trim();
+}
+function clearInvalidBattleDiscussion() {
+  const discussion = battleDiscussionContext;
+  if (!discussion || battleReportById(discussion.reportId)) return;
+  const input = document.querySelector("#dialogue-input");
+  if (input) input.value = withoutBattleReportMarker(input.value, discussion.marker);
+  battleDiscussionContext = null;
 }
 
 let audioContext = null;
@@ -438,6 +482,7 @@ function applyHostedState(next, background = false) {
   const previous = stateSoundSnapshot;
   const current = captureSoundState(next);
   payload = next;
+  clearInvalidBattleDiscussion();
   serverNow = Number(payload?.serverNow || Date.now());
   receivedAt = Date.now();
   const hostedVolume = Number(next?.uiPreferences?.soundVolume);
@@ -594,7 +639,7 @@ function marchMapRoute(from, to, options = {}) {
   const path = validStoredMarchPath(options.path) || localMarchPath(from, to, Boolean(options.attack));
   if (!path) return null;
   const points = [{ x: from.x + .5, y: from.y + .5 }, ...path.map(point => ({ x: point.x + .5, y: point.y + .5 }))];
-  return { from, to, path, points, distance: path.length, durationMs: path.length * 30000 };
+  return { from, to, path, points, distance: path.length, durationMs: path.length * 15000 };
 }
 function marchDraftValue() {
   return Math.max(0, Math.trunc(Number(ownPlayer()?.fieldArmySoldiers) || 0));
@@ -973,10 +1018,14 @@ function renderPowerTraining() {
   const material = document.querySelector("#cultivation-material").value;
   const materialCount = isGeneral ? Number(ownPlayer()?.materials?.[material] || 0) : Number.POSITIVE_INFINITY;
   const materialText = isGeneral ? " + 1 件天材地宝；材料只改变将领天赋" : "；玩家闭关不使用天材地宝";
+  const experienceReady = !isGeneral || quote.experienceReady !== false;
+  const experienceText = isGeneral
+    ? `经验 ${formatNumber(quote.experience)} / ${formatNumber(quote.experienceRequired)}。`
+    : "玩家闭关无需经验。";
   const lockText = unlocked ? "" : `第 ${quote.attempt} 次闭关修炼尚未开放，剩余 ${formatDuration(Number(quote.unlockAt || 0) - hostTime())}。`;
-  preview.textContent = `第 ${quote.attempt} 次 · 可投入 ${formatNumber(quote.goldMin)}—${formatNumber(quote.goldMax)} 金币。实际消耗 ${formatNumber(cost)} 金币${materialText}。金币越多，战力增幅越高（含随机浮动）。${lockText}`;
-  button.disabled = !unlocked || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
-  button.textContent = !unlocked ? "尚未开放" : quote.eligible === false ? "当前不可修炼" : materialCount < 1 ? "尚无材料" : "闭关一次";
+  preview.textContent = `第 ${quote.attempt} 次 · ${experienceText}可投入 ${formatNumber(quote.goldMin)}—${formatNumber(quote.goldMax)} 金币。实际消耗 ${formatNumber(cost)} 金币${materialText}。金币越多，战力增幅越高（含随机浮动）。${lockText}`;
+  button.disabled = !unlocked || !experienceReady || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
+  button.textContent = !unlocked ? "尚未开放" : !experienceReady ? "经验不足" : quote.eligible === false ? "当前不可修炼" : materialCount < 1 ? "尚无材料" : "闭关一次";
 }
 
 function marchAvailable() {
@@ -1290,6 +1339,9 @@ function generalCard(general, mode) {
   line.append(name, power);
   const note = document.createElement("small");
   note.textContent = mode === "captive" ? `原主：${accountLabel(general.loyalToAccountId || general.capturedFromAccountId)}` : general.status === "waiting" ? `留置于 ${general.location?.x},${general.location?.y}` : "随行中";
+  const experience = document.createElement("small");
+  experience.className = "general-experience";
+  experience.textContent = `经验 ${generalExperienceLabel(general)}`;
   const buttons = document.createElement("div"); buttons.className = "buttons";
   buttons.append(makeButton("详情", () => openGeneral(general.id)));
   if (canInteract(general)) buttons.append(makeButton("交互", () => openDialogue(general.id), "primary"));
@@ -1300,7 +1352,7 @@ function generalCard(general, mode) {
   if (mode === "captive" && general.status === "captured") {
     buttons.append(makeButton("处死", () => openExecutionAction(general.id), "danger"));
   }
-  node.append(line, note);
+  node.append(line, note, experience);
   if (general.talentSummary) {
     const talent = document.createElement("span"); talent.className = `talent-chip rarity-${general.talentSummary.rarity}`;
     talent.textContent = general.talentSummary.text || general.talentSummary.name;
@@ -1560,10 +1612,13 @@ function renderMaterials() {
   holder.replaceChildren(); select.replaceChildren();
   for (const [id, label] of Object.entries(MATERIAL_NAMES)) {
     const count = Number(inventory[id] || 0);
+    if (count <= 0) continue;
     const displayLabel = MATERIAL_PURPOSES[id] ? `${label}（${MATERIAL_PURPOSES[id]}）` : label;
     const chip = document.createElement("span"); chip.className = `material-chip rarity-${id}`; chip.textContent = `${displayLabel} × ${count}`; holder.append(chip);
-    if (count > 0) { const option = document.createElement("option"); option.value = id; option.textContent = `${displayLabel} × ${count}`; select.append(option); }
+    const option = document.createElement("option"); option.value = id; option.textContent = `${displayLabel} × ${count}`; select.append(option);
   }
+  holder.classList.toggle("empty", !holder.children.length);
+  if (!holder.children.length) holder.textContent = "暂无天材地宝";
   if ([...select.options].some(option => option.value === previous)) select.value = previous;
   if (!select.options.length) { const option = document.createElement("option"); option.value = ""; option.textContent = "暂无天材地宝"; select.append(option); }
 }
@@ -1578,8 +1633,14 @@ function renderDeployed(cell) {
     const node = document.createElement("div"); node.className = "deployed-card";
     const info = document.createElement("span");
     const name = document.createElement("b"); name.textContent = general.name;
-    const power = document.createElement("small"); power.textContent = `战力 ${formatNumber(general.power)}`;
-    info.append(name, power);
+    const power = document.createElement("small"); power.className = "deployed-power";
+    const basePower = Math.max(0, Math.trunc(Number(general.power ?? trainingPower(general)) || 0));
+    const bonusPower = Math.max(0, Math.trunc(Number(general.defenseBonusPower) || Math.floor(basePower * Number(general.defenseBonusRate || 0))));
+    power.append(`战力 ${formatNumber(basePower)}`);
+    const bonus = document.createElement("strong"); bonus.className = "defense-bonus"; bonus.textContent = `+${formatNumber(bonusPower)}`;
+    power.append(bonus);
+    const experience = document.createElement("small"); experience.className = "general-experience"; experience.textContent = `经验 ${generalExperienceLabel(general)}`;
+    info.append(name, power, experience);
     const buttons = document.createElement("span");
     buttons.append(makeButton("查看", () => openGeneral(general.id)));
     const player = ownPlayer();
@@ -1901,6 +1962,132 @@ function accountLabel(accountId) {
 function redactAccountIds(text) {
   return String(text || "").replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, id => accountLabel(id));
 }
+function battleReportCandidates() {
+  return Object.values(allGenerals()).filter(general => canInteract(general));
+}
+function battleReportTime(report) {
+  return new Date(Number(report?.createdAt || hostTime())).toLocaleString("zh-CN", {
+    month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+  });
+}
+function appendBattleReportStat(holder, label, value, className = "") {
+  const item = document.createElement("span");
+  if (className) item.className = className;
+  const title = document.createElement("small"); title.textContent = label;
+  const content = document.createElement("strong"); content.textContent = value;
+  item.append(title, content); holder.append(item);
+}
+function renderBattleReportGeneralPicker(report) {
+  const picker = document.querySelector("#battle-report-general-picker");
+  const target = document.querySelector("#battle-report-generals");
+  const candidates = battleReportCandidates();
+  picker.classList.toggle("hidden", !battleReportGeneralPickerOpen);
+  target.replaceChildren();
+  if (!battleReportGeneralPickerOpen) return;
+  if (!candidates.length) {
+    const empty = document.createElement("p"); empty.textContent = "当前没有可交谈的将领。"; target.append(empty); return;
+  }
+  for (const general of candidates) {
+    const button = makeButton(general.name, () => discussBattleReportWithGeneral(report.id, general.id));
+    const detail = document.createElement("small");
+    detail.textContent = `${general.status === "captured" ? "俘虏" : general.status === "deployed" ? "驻守" : "随行"} · 战力 ${formatNumber(general.power)}`;
+    button.append(detail); target.append(button);
+  }
+}
+function renderBattleReports() {
+  const reports = battleReports();
+  const launcher = document.querySelector("#battle-report-button");
+  const modal = document.querySelector("#battle-report-modal");
+  launcher.classList.toggle("hidden", !reports.length);
+  document.querySelector("#battle-report-count").textContent = String(reports.length);
+  const latest = reports[reports.length - 1];
+  launcher.classList.toggle("victory", latest?.outcome === "victory");
+  launcher.classList.toggle("defeat", latest?.outcome === "defeat");
+  if (!reports.length) {
+    activeBattleReportId = null;
+    battleReportGeneralPickerOpen = false;
+    modal.classList.add("hidden");
+    return;
+  }
+  if (modal.classList.contains("hidden")) return;
+  const report = battleReportById(activeBattleReportId);
+  if (!report) {
+    activeBattleReportId = null;
+    battleReportGeneralPickerOpen = false;
+    modal.classList.add("hidden");
+    return;
+  }
+  const victory = report.outcome === "victory";
+  const target = report.target || {};
+  const reportIndex = reports.findIndex(item => String(item.id) === String(report.id));
+  document.querySelector("#battle-report-index").textContent = `${reportIndex + 1} / ${reports.length}`;
+  document.querySelector("#battle-report-prev").disabled = reportIndex <= 0;
+  document.querySelector("#battle-report-next").disabled = reportIndex >= reports.length - 1;
+  modal.querySelector(".battle-report-modal").classList.toggle("victory", victory);
+  modal.querySelector(".battle-report-modal").classList.toggle("defeat", !victory);
+  document.querySelector("#battle-report-kind").textContent = victory ? "攻占成功" : "进攻失利";
+  document.querySelector("#battle-report-title").textContent = victory ? "我方获胜" : "我方战败";
+  document.querySelector("#battle-report-meta").textContent = `${battleReportTime(report)} · 目标 (${Number(target.x)}, ${Number(target.y)})`;
+  const stats = document.querySelector("#battle-report-stats"); stats.replaceChildren();
+  appendBattleReportStat(stats, "我方战力", formatNumber(report.attackerPower));
+  appendBattleReportStat(stats, "守方战力", formatNumber(report.defenderPower));
+  if (Number(report.ownSurvivors || 0) > 0) appendBattleReportStat(stats, "幸存士兵", `${formatNumber(report.ownSurvivors)} 人`);
+  if (Number(report.soldiersGained || 0) > 0) appendBattleReportStat(stats, "获得士兵", `${formatNumber(report.soldiersGained)} 人`, "gained");
+  if (Number(report.ownLosses || 0) > 0) appendBattleReportStat(stats, "我方牺牲", `${formatNumber(report.ownLosses)} 人`, "losses");
+  const specials = document.querySelector("#battle-report-specials"); specials.replaceChildren();
+  const captured = (report.capturedGenerals || []).map(item => String(item?.name || allGenerals()[item?.id]?.name || "").trim()).filter(Boolean);
+  if (captured.length) {
+    const item = document.createElement("article"); item.className = "battle-report-special captive";
+    const title = document.createElement("small"); title.textContent = "俘虏将领";
+    const content = document.createElement("b"); content.textContent = captured.join("、");
+    item.append(title, content); specials.append(item);
+  }
+  const discoveredName = String(report.discoveredGeneralName || allGenerals()[report.discoveredGeneralId]?.name || "").trim();
+  if (discoveredName || report.discoveryId) {
+    const item = document.createElement("article"); item.className = "battle-report-special discovered";
+    const title = document.createElement("small"); title.textContent = "发掘将领";
+    const content = document.createElement("b"); content.textContent = discoveredName || "待提拔的拔尖兵士";
+    item.append(title, content); specials.append(item);
+  }
+  specials.classList.toggle("hidden", !specials.children.length);
+  const candidates = battleReportCandidates();
+  const discuss = document.querySelector("#battle-report-discuss");
+  discuss.disabled = !candidates.length;
+  discuss.textContent = candidates.length ? (battleReportGeneralPickerOpen ? "收起将领列表" : "与将领讨论") : "暂无可讨论将领";
+  renderBattleReportGeneralPicker(report);
+}
+function openBattleReport() {
+  const reports = battleReports();
+  if (!reports.length) return;
+  activeBattleReportId = String(reports[reports.length - 1].id);
+  battleReportGeneralPickerOpen = false;
+  document.querySelector("#battle-report-modal").classList.remove("hidden");
+  renderBattleReports();
+}
+function closeBattleReport() {
+  battleReportGeneralPickerOpen = false;
+  document.querySelector("#battle-report-modal").classList.add("hidden");
+}
+function dismissBattleReport() {
+  const report = battleReportById(activeBattleReportId);
+  if (!report) { closeBattleReport(); return; }
+  const reportId = String(report.id);
+  closeBattleReport();
+  activeBattleReportId = null;
+  sendIntent({ type: "dismiss-battle-report", reportId });
+}
+function discussBattleReportWithGeneral(reportId, generalId) {
+  const report = battleReportById(reportId);
+  const general = allGenerals()[generalId];
+  if (!report || !canInteract(general)) { showToast("这份战报或将领已经不在可用范围内"); renderBattleReports(); return; }
+  const marker = battleReportMarker(report);
+  closeBattleReport();
+  openDialogue(generalId);
+  battleDiscussionContext = { reportId: String(report.id), generalId: String(general.id), marker };
+  const input = document.querySelector("#dialogue-input");
+  input.value = `${marker}\n`;
+  input.focus();
+}
 function openGeneral(id) {
   generalDetailId = id;
   const general = allGenerals()[id];
@@ -1914,6 +2101,7 @@ function openGeneral(id) {
   const measurements = general.measurements || {};
   document.querySelector("#general-measurements").textContent = `${Number(measurements.chestCm || 0)} / ${Number(measurements.waistCm || 0)} / ${Number(measurements.hipCm || 0)} cm`;
   document.querySelector("#general-power").textContent = `${formatNumber(trainingPower(general))} / 修炼 ${Number(general.cultivationCount || 0)} 次`;
+  document.querySelector("#general-experience").textContent = generalExperienceLabel(general);
   document.querySelector("#general-holder").textContent = accountLabel(general.holderAccountId);
   document.querySelector("#general-appearance").textContent = redactAccountIds(general.appearanceSetting || "沿用旧档案，暂无独立外观分类。");
   document.querySelector("#general-core-setting").textContent = redactAccountIds(general.coreSetting || general.setting || "暂无核心设定");
@@ -1977,7 +2165,13 @@ function failDialogueRequest(requestId, message) {
   request.status = "failed";
   request.error = String(message || "行动失败");
   const input = document.querySelector("#dialogue-input");
-  if (dialogueGeneralId === request.generalId && !input.value.trim()) input.value = request.topic;
+  if (dialogueGeneralId === request.generalId && !input.value.trim()) {
+    const report = request.battleReportId && typeof battleReportById === "function" ? battleReportById(request.battleReportId) : null;
+    if (report && typeof battleDiscussionContext !== "undefined") {
+      battleDiscussionContext = { reportId: request.battleReportId, generalId: request.generalId, marker: request.battleReportMarker || battleReportMarker(report) };
+      input.value = `${battleDiscussionContext.marker}\n${request.topic}`.trimEnd();
+    } else input.value = request.topic;
+  }
   if (dialogueGeneralId === request.generalId) renderDialogue();
 }
 function finishDialogueResult(requestId, result) {
@@ -2078,6 +2272,12 @@ function renderGeneralDiscoveryPrompt() {
 function openDialogue(id) {
   const general = allGenerals()[id];
   if (!canInteract(general)) { showToast("当前所在位置不支持与这名将领交互"); return; }
+  if (typeof clearInvalidBattleDiscussion === "function") clearInvalidBattleDiscussion();
+  if (typeof battleDiscussionContext !== "undefined" && battleDiscussionContext && String(battleDiscussionContext.generalId) !== String(id)) {
+    const input = document.querySelector("#dialogue-input");
+    input.value = withoutBattleReportMarker(input.value, battleDiscussionContext.marker);
+    battleDiscussionContext = null;
+  }
   dialogueGeneralId = id;
   setSocialOpen(true);
   switchSocialTab("generals");
@@ -2089,7 +2289,7 @@ function openDialogue(id) {
 }
 
 function renderAll() {
-  renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); renderMarket(); draw();
+  renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); renderMarket(); renderBattleReports(); draw();
   const notice = document.querySelector("#connection-notice");
   notice.textContent = ["degraded", "error"].includes(payload?.status) ? "连接中断，暂时无法操作。恢复后即可继续。" : "";
   notice.classList.toggle("hidden", !notice.textContent);
@@ -2301,7 +2501,11 @@ function dispatchRetriedIntent(intent = {}) {
     for (const [id, item] of dialogueRequests) {
       if (item.generalId === next.generalId && item.topic === next.topic && item.status === "failed") dialogueRequests.delete(id);
     }
-    dialogueRequests.set(requestId, { generalId: next.generalId, topic: next.topic, status: "sending", error: "" });
+    dialogueRequests.set(requestId, {
+      generalId: next.generalId, topic: next.topic, status: "sending", error: "",
+      battleReportId: next.battleReportId || "", battleReportMarker: next.battleReportMarker || ""
+    });
+    battleDiscussionContext = null;
     const input = document.querySelector("#dialogue-input");
     if (dialogueGeneralId === next.generalId) { input.value = ""; renderDialogue(); }
   } else if (next.type === "prepare-join") {
@@ -2365,11 +2569,20 @@ document.querySelector("#add-preference-tag").addEventListener("click", () => {
   if (!tag) return;
   preferenceDraft.tags.set(tag, preferenceDraft.tags.get(tag) || ""); input.value = ""; renderPreferenceTags();
 });
-document.querySelector("#preferences-form").addEventListener("submit", event => {
-  event.preventDefault();
+const preferencesForm = document.querySelector("#preferences-form");
+const savePreferencesButton = document.querySelector("#save-preferences");
+function savePreferences() {
   if (!preferenceDraft.tags.size) { showToast("请至少添加一个性癖标签"); return; }
-  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, { expectResult: true, key: "preferences" });
-});
+  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, {
+    expectResult: true,
+    key: "preferences",
+    control: savePreferencesButton,
+    timeoutMs: 10000,
+    timeoutMessage: "保存偏好请求超时，请重试"
+  });
+}
+preferencesForm.addEventListener("submit", event => { event.preventDefault(); savePreferences(); });
+savePreferencesButton.addEventListener("click", savePreferences);
 for (const category of [...new Set(tagCatalog.map(item => item.category))]) {
   const option = document.createElement("option"); option.value = category; option.textContent = category;
   document.querySelector("#tag-category").append(option);
@@ -2598,6 +2811,24 @@ document.querySelector("#center-player").addEventListener("click", () => {
   const player = ownPlayer();
   if (player?.position) centerMap(player.position);
 });
+document.querySelector("#battle-report-button").addEventListener("click", openBattleReport);
+document.querySelector("#battle-report-dismiss").addEventListener("click", dismissBattleReport);
+document.querySelector("#battle-report-later").addEventListener("click", closeBattleReport);
+document.querySelector("#battle-report-prev").addEventListener("click", () => {
+  const reports = battleReports();
+  const index = reports.findIndex(item => String(item.id) === String(activeBattleReportId));
+  if (index > 0) { activeBattleReportId = String(reports[index - 1].id); battleReportGeneralPickerOpen = false; renderBattleReports(); }
+});
+document.querySelector("#battle-report-next").addEventListener("click", () => {
+  const reports = battleReports();
+  const index = reports.findIndex(item => String(item.id) === String(activeBattleReportId));
+  if (index >= 0 && index < reports.length - 1) { activeBattleReportId = String(reports[index + 1].id); battleReportGeneralPickerOpen = false; renderBattleReports(); }
+});
+document.querySelector("#battle-report-discuss").addEventListener("click", () => {
+  if (!battleReportById(activeBattleReportId)) return;
+  battleReportGeneralPickerOpen = !battleReportGeneralPickerOpen;
+  renderBattleReports();
+});
 document.querySelector("#close-general").addEventListener("click", () => document.querySelector("#general-modal").classList.add("hidden"));
 document.querySelector("#market-open").addEventListener("click", openMarket);
 document.querySelector("#market-close").addEventListener("click", () => { closeMarketSheets(); document.querySelector("#market-modal").classList.add("hidden"); });
@@ -2618,14 +2849,26 @@ document.querySelector("#close-dialogue").addEventListener("click", () => { docu
 document.querySelector("#dialogue-form").addEventListener("submit", event => { event.preventDefault(); sendDialogue(); });
 function sendDialogue() {
   const input = document.querySelector("#dialogue-input");
-  const topic = input.value.trim();
-  if (!topic || !dialogueGeneralId) return;
-  const requestId = sendIntent({ type: "talk-general", generalId: dialogueGeneralId, topic });
+  const rawText = input.value.trim();
+  if (!rawText || !dialogueGeneralId) return;
+  if (typeof clearInvalidBattleDiscussion === "function") clearInvalidBattleDiscussion();
+  const discussion = typeof battleDiscussionContext !== "undefined" && battleDiscussionContext
+    && String(battleDiscussionContext.generalId) === String(dialogueGeneralId)
+    && typeof battleReportById === "function" && battleReportById(battleDiscussionContext.reportId) ? battleDiscussionContext : null;
+  const topic = discussion ? withoutBattleReportMarker(rawText, discussion.marker) : rawText;
+  if (!topic) { showToast("请在战报标记下补充想讨论的内容"); return; }
+  const intent = { type: "talk-general", generalId: dialogueGeneralId, topic };
+  if (discussion) intent.battleReportId = discussion.reportId;
+  const requestId = sendIntent(intent);
   if (!requestId) return;
   for (const [id, item] of dialogueRequests) {
     if (item.generalId === dialogueGeneralId && item.status === "failed" && item.topic === topic) dialogueRequests.delete(id);
   }
-  dialogueRequests.set(requestId, { generalId: dialogueGeneralId, topic, status: "sending", error: "" });
+  dialogueRequests.set(requestId, {
+    generalId: dialogueGeneralId, topic, status: "sending", error: "",
+    battleReportId: discussion?.reportId || "", battleReportMarker: discussion?.marker || ""
+  });
+  if (typeof battleDiscussionContext !== "undefined") battleDiscussionContext = null;
   input.value = "";
   renderDialogue();
 }
@@ -2641,6 +2884,7 @@ document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListene
   if (overlay.id === "march-confirmation") { closeMarchConfirmation(); return; }
   if (overlay.id === "market-modal") closeMarketSheets();
   if (overlay.id === "letter-detail-modal") closeLetterDetail();
+  if (overlay.id === "battle-report-modal") { closeBattleReport(); return; }
   overlay.classList.add("hidden");
 }));
 

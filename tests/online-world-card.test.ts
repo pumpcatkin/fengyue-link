@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,7 +18,10 @@ const {
   gameCardLibraryKey,
   summarizeGameCard,
   loadGameCardLibrary,
-  saveGameCardLibrary
+  saveGameCardLibrary,
+  readGameCardFile,
+  scanGameCardDirectory,
+  removeGameCardDirectoryFiles
 } = require("../electron/online-world-card.cjs");
 const { parseProgram } = require("../electron/online-world-runtime.cjs");
 
@@ -41,7 +44,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(28);
+    expect(card.version).toBe(29);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -131,6 +134,42 @@ describe("online world game cards", () => {
     Map.prototype.delete.call(afterRestart, libraryId);
     saveGameCardLibrary(file, afterRestart);
     expect(loadGameCardLibrary(file, null).has(libraryId)).toBe(false);
+  });
+
+  it("scans the writable game-card directory and tracks every source for removal", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-installed-cards-"));
+    temporaryDirectories.push(directory);
+    const card = createBundledGridCard();
+    const first = join(directory, "猎艳疆土.json");
+    const second = join(directory, "猎艳疆土-副本.json");
+    writeFileSync(first, JSON.stringify(card));
+    writeFileSync(second, JSON.stringify(card));
+    writeFileSync(join(directory, "损坏.json"), "{not-json");
+
+    const scanned = scanGameCardDirectory(directory);
+    const libraryId = gameCardLibraryKey(card);
+    expect(scanned.cards.get(libraryId)?.packageSha256).toBe(card.packageSha256);
+    expect([...scanned.sources.get(libraryId)]).toEqual(expect.arrayContaining([first, second]));
+    expect(scanned.errors).toEqual([{ fileName: "损坏.json", message: "游戏卡 JSON 内容无效" }]);
+
+    expect(removeGameCardDirectoryFiles(directory, scanned.sources.get(libraryId))).toHaveLength(2);
+    expect(existsSync(first)).toBe(false);
+    expect(existsSync(second)).toBe(false);
+  });
+
+  it("uses one strict validator for dialog, drop, and directory imports", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-card-validator-"));
+    temporaryDirectories.push(directory);
+    const valid = join(directory, "valid.json");
+    writeFileSync(valid, `\uFEFF${JSON.stringify(createBundledGridCard())}`);
+    expect(readGameCardFile(valid).card.title).toBe("猎艳疆土");
+
+    const wrongExtension = join(directory, "card.txt");
+    writeFileSync(wrongExtension, "{}");
+    expect(() => readGameCardFile(wrongExtension)).toThrow(/必须是 JSON/);
+    expect(() => readGameCardFile("relative.json")).toThrow(/路径无效/);
+    expect(() => readGameCardFile(valid, { maxBytes: 64 })).toThrow(/超过/);
+    expect(() => removeGameCardDirectoryFiles(directory, [join(directory, "..", "outside.json")])).toThrow(/目录之外/);
   });
 
   it("normalizes the rotating aliases returned by the creation export endpoint", () => {

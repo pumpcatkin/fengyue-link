@@ -26,6 +26,9 @@
 .domain-option span.online { color: var(--mint); }
 .domain-option span.offline { color: var(--danger); }
 .domain-option.selected { border-color: #75deb477; background: #75deb418; box-shadow: inset 0 0 0 1px #75deb422; }
+.manual-domain-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.manual-domain-entry input { min-width: 0; padding: 7px 8px; font-size: 10px; }
+.manual-domain-entry button { min-width: 78px; padding: 7px 9px; color: var(--blue); font-size: 9px; }
 .domain-picker > small { color: var(--muted); font-size: 9px; }
 .domain-directory-error { color: #fbbf24 !important; }
 .platform-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

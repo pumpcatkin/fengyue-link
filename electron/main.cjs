@@ -49,9 +49,25 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
+const {
+  OFFICIAL_DOMAIN_DIRECTORY_URLS,
+  FALLBACK_PLATFORM_ORIGINS,
+  normalizePublishedOrigin,
+  mergePublishedOrigins
+} = require("./domain-directory.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
-const { validateGameCard, summarizeGameCard, gameCardLibraryKey, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
+const {
+  validateGameCard,
+  summarizeGameCard,
+  gameCardLibraryKey,
+  loadGameCardLibrary,
+  saveGameCardLibrary,
+  readGameCardFile,
+  scanGameCardDirectory,
+  removeGameCardDirectoryFiles,
+  rebindGameCard
+} = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
 
@@ -59,18 +75,9 @@ const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
 const APPLICATION_ID = "cc.aiero.fengyue.link";
 const APPLICATION_NAME = "风月联机工具";
-const DOMAIN_DIRECTORY_URL = "https://aify.pages.dev/";
-const AIFY_FALLBACK_ORIGINS = [
-  "https://acepro.store",
-  "https://acquainte.xyz",
-  "https://acquant.xyz",
-  "https://affectional.xyz",
-  "https://aiwhatis.xyz",
-  "https://ai-xan.xyz",
-  "https://aquantancee.xyz",
-  "https://aquante.xyz"
-];
-const TRUSTED_PLATFORM_ORIGINS = new Set([DEFAULT_ORIGIN, ...AIFY_FALLBACK_ORIGINS]);
+const DOMAIN_DIRECTORY_URLS = OFFICIAL_DOMAIN_DIRECTORY_URLS;
+const OFFICIAL_FALLBACK_ORIGINS = FALLBACK_PLATFORM_ORIGINS;
+const TRUSTED_PLATFORM_ORIGINS = new Set([DEFAULT_ORIGIN, ...OFFICIAL_FALLBACK_ORIGINS]);
 const WORK_PATH = /\/(?:zh\/)?explore\/installed\/[^/?#]+/;
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const WIRE_PREFIX = "§FYMP1§";
@@ -229,6 +236,10 @@ function onlineWorldCachePath(profileId) {
 
 function onlineWorldCardLibraryPath(profileId) {
   return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.json`);
+}
+
+function onlineWorldCardInstallDirectory() {
+  return path.join(app.getPath("userData"), "游戏卡");
 }
 
 function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
@@ -475,12 +486,13 @@ function currentDomainCandidates(selectedOrigin = null) {
     }
   }
   const origins = [...new Set([
-    ...AIFY_FALLBACK_ORIGINS,
+    ...OFFICIAL_FALLBACK_ORIGINS,
     ...cachedItems.map(item => item.origin),
     selectedOrigin
   ].map(normalizeOrigin).filter(origin => origin && origin !== DEFAULT_ORIGIN))];
   return {
-    directoryUrl: DOMAIN_DIRECTORY_URL,
+    directoryUrl: DOMAIN_DIRECTORY_URLS[0],
+    directoryUrls: [...DOMAIN_DIRECTORY_URLS],
     directoryError: domainStatusCache?.directoryError || null,
     cachedAt: domainStatusCacheAt || null,
     probing: true,
@@ -497,24 +509,24 @@ function currentDomainCandidates(selectedOrigin = null) {
 
 async function discoverDomainStatuses(force = false) {
   if (!force && domainStatusCache && Date.now() - domainStatusCacheAt < 60_000) return domainStatusCache;
-  let directoryError = null;
-  let origins = [];
-  try {
-    const response = await net.fetch(DOMAIN_DIRECTORY_URL, { redirect: "follow", signal: AbortSignal.timeout(4_000) });
-    if (!response.ok) throw new Error(`域名目录返回 ${response.status}`);
-    const html = await response.text();
-    const source = html.match(/const\s+SITES\s*=\s*\[([\s\S]*?)\]/i)?.[1] || "";
-    origins = [...source.matchAll(/["'](https?:\/\/[^"'/?#]+)["']/gi)]
-      .map(match => normalizeOrigin(match[1]))
-      .filter(Boolean);
-    if (!origins.length) throw new Error("域名目录中没有找到 SITES 列表");
-  } catch (error) {
-    directoryError = error?.message || String(error);
-  }
-  // staging.aiero.cc was previously injected as a test node.  Only expose the
-  // production domains returned by aify (or the production fallback list).
-  origins = [...new Set(origins.filter(origin => TRUSTED_PLATFORM_ORIGINS.has(origin) && origin !== DEFAULT_ORIGIN))];
-  if (!origins.length) origins = [...AIFY_FALLBACK_ORIGINS];
+  const directorySources = await Promise.all(DOMAIN_DIRECTORY_URLS.map(async url => {
+    try {
+      const response = await net.fetch(url, { redirect: "follow", signal: AbortSignal.timeout(4_000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      if (!mergePublishedOrigins([html]).length) throw new Error("没有找到 SITES 列表");
+      return { url, ok: true, html };
+    } catch (error) {
+      return { url, ok: false, error: error?.message || String(error) };
+    }
+  }));
+  let origins = mergePublishedOrigins(directorySources.filter(item => item.ok).map(item => item.html));
+  if (directorySources.some(item => !item.ok)) origins = [...new Set([...origins, ...OFFICIAL_FALLBACK_ORIGINS])];
+  for (const origin of origins) TRUSTED_PLATFORM_ORIGINS.add(origin);
+  origins = origins.filter(origin => origin !== DEFAULT_ORIGIN);
+  const directoryWarnings = directorySources.filter(item => !item.ok).map(item => `${item.url}: ${item.error}`);
+  const directoryError = origins.length ? null : directoryWarnings.join("；") || "官方域名发布页没有返回节点";
+  if (!origins.length) origins = [...OFFICIAL_FALLBACK_ORIGINS];
   const statuses = await mapConcurrent(origins, 12, async origin => {
     const startedAt = Date.now();
     try {
@@ -527,13 +539,20 @@ async function discoverDomainStatuses(force = false) {
         statusCode: response.status,
         latency: Date.now() - startedAt,
         finalOrigin,
-        source: "aify"
+        source: "official-directory"
       };
     } catch (error) {
-      return { origin, online: false, statusCode: null, latency: null, error: error?.message || String(error), source: "aify" };
+      return { origin, online: false, statusCode: null, latency: null, error: error?.message || String(error), source: "official-directory" };
     }
   });
-  domainStatusCache = { directoryUrl: DOMAIN_DIRECTORY_URL, directoryError, domains: statuses };
+  domainStatusCache = {
+    directoryUrl: DOMAIN_DIRECTORY_URLS[0],
+    directoryUrls: [...DOMAIN_DIRECTORY_URLS],
+    directorySources: directorySources.map(({ html, ...item }) => item),
+    directoryWarnings,
+    directoryError,
+    domains: statuses
+  };
   domainStatusCacheAt = Date.now();
   return domainStatusCache;
 }
@@ -630,6 +649,15 @@ class AccountBackend {
     this.migrationResumeAttempt = 0;
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    this.onlineWorldCardInstallDirectory = onlineWorldCardInstallDirectory();
+    const installedCards = scanGameCardDirectory(this.onlineWorldCardInstallDirectory);
+    this.onlineWorldCardSources = installedCards.sources;
+    this.onlineWorldCardScanErrors = installedCards.errors;
+    for (const [libraryId, card] of installedCards.cards) {
+      const current = this.onlineWorldCards.get(libraryId);
+      if (!current || Number(card.version || 0) >= Number(current.version || 0)) this.onlineWorldCards.set(libraryId, card);
+    }
+    if (installedCards.cards.size) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     this.onlineWorldService = new OnlineWorldService({
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),
@@ -2656,10 +2684,10 @@ class AccountBackend {
 
   async setOrigin(value) {
     if (this.originLocked || this.loggedIn || this.loginInProgress || this.room) throw new Error("本次工具会话的登录域名已经锁定");
-    const origin = normalizeOrigin(value);
-    if (!origin || !TRUSTED_PLATFORM_ORIGINS.has(origin)) throw new Error("请选择受信任的风月域名");
+    const origin = normalizePublishedOrigin(value);
+    if (!origin || !TRUSTED_PLATFORM_ORIGINS.has(origin)) throw new Error("请输入两个官方发布页列出的风月域名");
     const item = currentDomainCandidates(this.origin).domains.find(domain => domain.origin === origin || domain.finalOrigin === origin);
-    if (!item) throw new Error("所选域名不在当前域名目录中");
+    if (!item) throw new Error("输入的域名不在当前官方节点目录中");
     this.origin = item.finalOrigin || item.origin;
     this.domainSelected = true;
     this.authSessionRevision += 1;
@@ -3479,7 +3507,8 @@ class AccountBackend {
     const accountId = String(this.account.accountId || "");
     const cards = entries.map(([libraryId, card]) => ({
       ...summarizeGameCard(card, libraryId),
-      isCurrentUserAuthor: Boolean(accountId && card?.companion?.authorAccountId === accountId)
+      isCurrentUserAuthor: Boolean(accountId && card?.companion?.authorAccountId === accountId),
+      installedFromFolder: Boolean(this.onlineWorldCardSources?.has(libraryId))
     }));
     return {
       cards,
@@ -3573,21 +3602,37 @@ class AccountBackend {
   async importOnlineWorldCard() {
     const selected = await dialog.showOpenDialog(this.window, {
       title: "导入在线游戏世界游戏卡",
-      properties: ["openFile"],
+      properties: ["openFile", "multiSelections"],
       filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
     });
-    if (selected.canceled || !selected.filePaths[0]) return { canceled: true, ...await this.listOnlineWorldCards() };
-    const file = selected.filePaths[0];
-    const size = fs.statSync(file).size;
-    if (size > 8 * 1024 * 1024) throw new Error("游戏卡文件超过 8 MiB 上限");
-    const card = validateGameCard(JSON.parse(fs.readFileSync(file, "utf8")));
-    const libraryId = gameCardLibraryKey(card);
-    this.onlineWorldCards.set(libraryId, card);
+    if (selected.canceled || !selected.filePaths.length) return { canceled: true, ...await this.listOnlineWorldCards() };
+    return this.importOnlineWorldCardFiles(selected.filePaths);
+  }
+
+  async importOnlineWorldCardFiles(files) {
+    if (!Array.isArray(files) || !files.length) throw new Error("请选择要导入的游戏卡文件");
+    if (files.length > 32) throw new Error("一次最多导入 32 张游戏卡");
+    const loaded = files.map(file => readGameCardFile(file));
+    const imported = new Map();
+    for (const { file, card } of loaded) {
+      const libraryId = gameCardLibraryKey(card);
+      this.onlineWorldCards.set(libraryId, card);
+      imported.set(libraryId, summarizeGameCard(card, libraryId));
+      const relativeInstallPath = path.relative(path.resolve(this.onlineWorldCardInstallDirectory), file);
+      if (relativeInstallPath && !path.isAbsolute(relativeInstallPath)
+        && !relativeInstallPath.startsWith(`..${path.sep}`) && path.dirname(relativeInstallPath) === ".") {
+        if (!this.onlineWorldCardSources.has(libraryId)) this.onlineWorldCardSources.set(libraryId, new Set());
+        this.onlineWorldCardSources.get(libraryId).add(file);
+      }
+    }
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     const persisted = loadGameCardLibrary(this.onlineWorldCardFile, null);
-    if (!Map.prototype.has.call(persisted, libraryId)) throw new Error("游戏卡保存后回读失败");
+    for (const libraryId of imported.keys()) {
+      if (!Map.prototype.has.call(persisted, libraryId)) throw new Error("游戏卡保存后回读失败");
+    }
     this.onlineWorldCards = persisted;
-    return { canceled: false, imported: summarizeGameCard(card, libraryId), ...await this.listOnlineWorldCards() };
+    const importedCards = [...imported.values()];
+    return { canceled: false, imported: importedCards[0], importedCards, ...await this.listOnlineWorldCards() };
   }
 
   async removeOnlineWorldCard(libraryId) {
@@ -3598,6 +3643,9 @@ class AccountBackend {
     if (this.onlineWorldService?.card && gameCardLibraryKey(this.onlineWorldService.card) === key) {
       await this.onlineWorldService.forgetOpenedCard();
     }
+    const installedFiles = this.onlineWorldCardSources?.get(key);
+    if (installedFiles?.size) removeGameCardDirectoryFiles(this.onlineWorldCardInstallDirectory, installedFiles);
+    this.onlineWorldCardSources?.delete(key);
     if (!Map.prototype.delete.call(this.onlineWorldCards, key)) throw new Error("游戏卡已经不在本机游戏库中");
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     const persisted = loadGameCardLibrary(this.onlineWorldCardFile, null);
@@ -9495,6 +9543,7 @@ handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
 handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
+handleLocalIpc("online-world:import-card-files", (_event, files) => backend.importOnlineWorldCardFiles(files));
 handleLocalIpc("online-world:remove-card", (_event, libraryId) => backend.removeOnlineWorldCard(libraryId));
 handleLocalIpc("online-world:export-card", (_event, cardId) => backend.exportOnlineWorldCard(cardId));
 handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorldCard(options || {}));

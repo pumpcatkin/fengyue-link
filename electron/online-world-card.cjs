@@ -10,6 +10,7 @@ const { GRID_GAME_ID } = require("./grid-world-game.cjs");
 
 const GAME_CARD_SCHEMA = "fyow.game-card/1";
 const CARD_LIBRARY_SCHEMA = "fyow.game-card-library/1";
+const MAX_GAME_CARD_FILE_BYTES = 8 * 1024 * 1024;
 const GRID_CARD_ID = "cc.aiero.fyow.grid-conquest.official";
 const GRID_COMPANION_WORK_ID = "faeaacf3-8c3a-4338-b2a2-8b704633ebf1";
 const GRID_COMPANION_AUTHOR_ACCOUNT_ID = "39404f0e-7678-45a1-86c6-9a21116bacbd";
@@ -189,7 +190,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 28,
+    version: 29,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null
@@ -352,8 +353,76 @@ function saveGameCardLibrary(file, cards) {
   atomicWriteJsonSync(fs, file, { schema: CARD_LIBRARY_SCHEMA, cards: [...values.values()] }, { pretty: true });
 }
 
+function readGameCardFile(file, options = {}) {
+  const requested = String(file || "");
+  if (!requested || !path.isAbsolute(requested)) throw new Error("游戏卡文件路径无效");
+  const resolved = path.resolve(requested);
+  if (path.extname(resolved).toLowerCase() !== ".json") throw new Error("游戏卡必须是 JSON 文件");
+  let stat;
+  try { stat = fs.statSync(resolved); } catch { throw new Error("游戏卡文件不存在或不可读取"); }
+  if (!stat.isFile()) throw new Error("游戏卡路径不是文件");
+  const maxBytes = Number(options.maxBytes || MAX_GAME_CARD_FILE_BYTES);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("游戏卡文件大小上限无效");
+  if (stat.size > maxBytes) throw new Error(`游戏卡文件超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB 上限`);
+  let value;
+  try { value = JSON.parse(fs.readFileSync(resolved, "utf8").replace(/^\uFEFF/, "")); } catch { throw new Error("游戏卡 JSON 内容无效"); }
+  return { file: resolved, card: validateGameCard(value), size: stat.size, modifiedAt: stat.mtimeMs };
+}
+
+function scanGameCardDirectory(directory, options = {}) {
+  const requested = String(directory || "");
+  if (!requested) throw new Error("游戏卡安装目录无效");
+  const root = path.resolve(requested);
+  fs.mkdirSync(root, { recursive: true });
+  const cards = new GameCardLibrary();
+  const sources = new Map();
+  const selectedModifiedAt = new Map();
+  const errors = [];
+  const entries = fs.readdirSync(root, { withFileTypes: true })
+    .filter(entry => entry.isFile() && path.extname(entry.name).toLowerCase() === ".json")
+    .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  for (const entry of entries) {
+    try {
+      const loaded = readGameCardFile(path.join(root, entry.name), options);
+      const libraryId = gameCardLibraryKey(loaded.card);
+      if (!sources.has(libraryId)) sources.set(libraryId, new Set());
+      sources.get(libraryId).add(loaded.file);
+      const current = cards.get(libraryId);
+      const currentVersion = Number(current?.version || 0);
+      const nextVersion = Number(loaded.card.version || 0);
+      if (!current || nextVersion > currentVersion
+        || (nextVersion === currentVersion && loaded.modifiedAt >= Number(selectedModifiedAt.get(libraryId) || 0))) {
+        cards.set(libraryId, loaded.card);
+        selectedModifiedAt.set(libraryId, loaded.modifiedAt);
+      }
+    } catch (error) {
+      errors.push({ fileName: entry.name, message: error?.message || String(error) });
+    }
+  }
+  return { directory: root, cards, sources, errors };
+}
+
+function removeGameCardDirectoryFiles(directory, files) {
+  const requested = String(directory || "");
+  if (!requested) throw new Error("游戏卡安装目录无效");
+  const root = path.resolve(requested);
+  const removed = [];
+  for (const value of files || []) {
+    const file = path.resolve(String(value || ""));
+    const relative = path.relative(root, file);
+    if (!relative || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)
+      || path.dirname(relative) !== "." || path.extname(file).toLowerCase() !== ".json") {
+      throw new Error("拒绝移除游戏卡安装目录之外的文件");
+    }
+    try { fs.rmSync(file, { force: true }); } catch { throw new Error("游戏卡安装文件正在使用，请关闭占用后重试"); }
+    removed.push(file);
+  }
+  return removed;
+}
+
 module.exports = {
   GAME_CARD_SCHEMA,
+  MAX_GAME_CARD_FILE_BYTES,
   GRID_CARD_ID,
   GRID_COMPANION_WORK_ID,
   GRID_COMPANION_AUTHOR_ACCOUNT_ID,
@@ -373,5 +442,8 @@ module.exports = {
   gameCardLibraryKey,
   summarizeGameCard,
   loadGameCardLibrary,
-  saveGameCardLibrary
+  saveGameCardLibrary,
+  readGameCardFile,
+  scanGameCardDirectory,
+  removeGameCardDirectoryFiles
 };

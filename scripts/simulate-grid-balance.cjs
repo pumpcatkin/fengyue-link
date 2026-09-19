@@ -19,26 +19,27 @@ const GENERAL_POWER_MAX = 350;
 const MATERIAL_PROGRESS = Object.freeze({ white: 8, green: 20, blue: 42, purple: 78, gold: 135, "red-ascend": 0, "red-reroll": 0 });
 const MATERIAL_TIERS = Object.freeze(Object.keys(MATERIAL_PROGRESS));
 const PROPOSED_MINING_BALANCE = Object.freeze({ baseHourlyGold: 400, populationHourlyFactor: 0.09, rankMultiplierPerLevel: 0.08 });
+const MINING_GRADE_YIELD_MULTIPLIERS = Object.freeze(RESOURCE_GRADES.map((_, index) => 2.8 + index * 0.18));
 
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainPctMin: 6, powerGainPctMax: 10, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 2, gateHours: 48, goldMin: 12000, goldMax: 18000, powerGainPctMin: 9, powerGainPctMax: 14, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 3, gateHours: 168, goldMin: 30000, goldMax: 45000, powerGainPctMin: 13, powerGainPctMax: 20, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 4, gateHours: 360, goldMin: 70000, goldMax: 100000, powerGainPctMin: 18, powerGainPctMax: 28, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 5, gateHours: 576, goldMin: 160000, goldMax: 240000, powerGainPctMin: 25, powerGainPctMax: 40, materialCount: 1, materialChoices: MATERIAL_TIERS })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainPctMin: 6.5, powerGainPctMax: 11, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 12000, goldMax: 18000, powerGainPctMin: 10, powerGainPctMax: 15.5, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 30000, goldMax: 45000, powerGainPctMin: 14.5, powerGainPctMax: 22, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 70000, goldMax: 100000, powerGainPctMin: 20, powerGainPctMax: 31, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 160000, goldMax: 240000, powerGainPctMin: 28, powerGainPctMax: 44, materialCount: 1, materialChoices: MATERIAL_TIERS })
 ]);
 
 const BALANCE_BASELINE = Object.freeze({
   players: 20,
   days: 30,
   gridSize: GRID_SIZE,
-  marchSecondsPerCell: 30,
+  marchSecondsPerCell: 15,
   startingGold: 500,
   centralLayerMultipliers: CENTRAL_LAYER_MULTIPLIERS,
   miningCycleSeconds: Object.freeze({ min: 600, max: 600 }),
   miningCooldownSeconds: Object.freeze({ min: 3600, max: 14400 }),
   maxConcurrentMiningJobs: MAX_CONCURRENT_MINING_JOBS,
-  miningFormula: "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08)) * 600 / 3600)) gold per run",
+  miningFormula: "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08) * (2.8 + resourceRank * 0.18)) * 600 / 3600)) gold per run",
   generalPower: Object.freeze({ min: GENERAL_POWER_MIN, max: GENERAL_POWER_MAX }),
   training: Object.freeze({ costPerSoldier: 2, durationBaseSeconds: 60, durationPerFiveSoldiersSeconds: 1, maxGarrisonPct: 20 }),
   cultivationAttempts: 5,
@@ -192,7 +193,8 @@ function actualHourlyRate(cell) {
     ? Number(cell.populationBase)
     : Number(cell.population || 100) / layerMultiplier;
   return (PROPOSED_MINING_BALANCE.baseHourlyGold + populationBase * PROPOSED_MINING_BALANCE.populationHourlyFactor)
-    * layerMultiplier * (1 + PROPOSED_MINING_BALANCE.rankMultiplierPerLevel * cell.resourceRank);
+    * layerMultiplier * (1 + PROPOSED_MINING_BALANCE.rankMultiplierPerLevel * cell.resourceRank)
+    * MINING_GRADE_YIELD_MULTIPLIERS[cell.resourceRank];
 }
 
 function actualYieldPerCycle(cell) {
@@ -369,7 +371,7 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
       }
     }
 
-    // Marches are short enough to be meaningful in a 30-second-per-cell world.
+    // Marches are short enough to be meaningful in a 15-second-per-cell world.
     if (random() < 0.65) {
       const distance = 1 + Math.floor(random() * 8);
       const force = Math.max(20, Math.floor(soldiers * (0.18 + random() * 0.15)));
@@ -592,15 +594,15 @@ function runSimulation(options = {}) {
       percentEffects: Object.fromEntries(TALENT_POTENCY.map(item => [item.rarity, { min: round2(item.potencyMinPct), max: round2(item.potencyMaxPct) }]))
     },
     formulas: {
-      marchDuration: "distanceCells * 30 seconds",
+      marchDuration: "distanceCells * 15 seconds",
       marchCost: "distanceCells * (1 + ceil(soldiers / 10) + generals * 2) gold",
       miningCycle: "600 seconds for every resource grade; then that territory cools down for 3600..14400 seconds by resource rank",
       miningYield: miningModel === "actual"
-        ? "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08)) * 600 / 3600)) gold per run"
+        ? "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08) * (2.8 + resourceRank * 0.18)) * 600 / 3600)) gold per run"
         : "max(1, floor(population * (resourceRank + 2) / 180)) gold per cycle (legacy comparison)",
       generalPower: "250 + stableHash(seed, accountId, sourceId) % 101",
       training: "cost = soldiers * 2 gold; duration = 60 + ceil(soldiers / 5) seconds, capped at 3600 seconds",
-      generalDiscovery: "0.02 + ((population - 100) / 9900) * 0.23 per victorious neutral conquest",
+      generalDiscovery: "0.019 + ((population - 100) / 9900) * 0.221 per victorious neutral conquest",
       treasure: "author manually scatters 240 by default; conquering the exact cell claims one; re-scatter replaces unclaimed positions",
       cultivationPower: "linear interpolation from powerGainPctMin to powerGainPctMax using the chosen gold within its attempt range",
       cultivationTalent: "one chosen material; talent progress only, no combat-power change"
@@ -609,7 +611,7 @@ function runSimulation(options = {}) {
       observedGeneralChancePctPerVictoriousConquest: round2(sumBy(playerRecords, player => player.discovery.generals) / Math.max(1, totalWins) * 100),
       expectedGeneralsTotal: round2(sumBy(playerRecords, player => player.discovery.expectedGenerals)),
       expectedGeneralsPerPlayer: round2(sumBy(playerRecords, player => player.discovery.expectedGenerals) / players),
-      generalChancePctRangePerVictoriousConquest: { min: 2, max: 25 },
+      generalChancePctRangePerVictoriousConquest: { min: 1.9, max: 24 },
       treasureClaimedTotal: sumBy(playerRecords, player => player.discovery.treasures),
       treasureSupplyTotal: BALANCE_BASELINE.treasureScatter.count
     }
@@ -626,6 +628,7 @@ module.exports = {
   CULTIVATION_RANGES,
   BALANCE_BASELINE,
   PROPOSED_MINING_BALANCE,
+  MINING_GRADE_YIELD_MULTIPLIERS,
   TALENT_POTENCY,
   TALENT_CAPS,
   CENTRAL_LAYER_MULTIPLIERS

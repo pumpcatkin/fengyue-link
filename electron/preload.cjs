@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("fengyueBackend", {
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
@@ -60,6 +60,10 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   getOnlineWorldState: () => ipcRenderer.invoke("online-world:get-state"),
   listOnlineWorldCards: () => ipcRenderer.invoke("online-world:list-cards"),
   importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card"),
+  importOnlineWorldCardFiles: files => {
+    const paths = Array.from(files || [], file => webUtils.getPathForFile(file)).filter(Boolean);
+    return ipcRenderer.invoke("online-world:import-card-files", paths);
+  },
   removeOnlineWorldCard: libraryId => ipcRenderer.invoke("online-world:remove-card", libraryId),
   exportOnlineWorldCard: cardId => ipcRenderer.invoke("online-world:export-card", cardId),
   openOnlineWorld: options => ipcRenderer.invoke("online-world:open", options),

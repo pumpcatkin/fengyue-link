@@ -38,6 +38,7 @@ const {
   normalizedCharacterTags,
   generatedGeneralPower,
   ensurePowerProgress,
+  generalExperienceRequirement,
   ensureGeneralProfile,
   publicMarketListingState,
   projectWorldState,
@@ -291,6 +292,35 @@ function publicGenerals(state) {
     .map(([id, general]) => [id, publicGeneralState(general)]));
 }
 
+function changedPublicGenerals(beforeWorld, afterWorld) {
+  const before = publicGenerals(beforeWorld);
+  const after = publicGenerals(afterWorld);
+  const changes = {};
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const previous = Object.hasOwn(before, key) ? before[key] : null;
+    const next = Object.hasOwn(after, key) ? after[key] : null;
+    const comparable = value => {
+      if (!value) return value;
+      const copy = cloneJson(value);
+      delete copy.experience;
+      return copy;
+    };
+    if (canonicalJson(comparable(previous)) !== canonicalJson(comparable(next))) changes[key] = cloneJson(next);
+  }
+  return changes;
+}
+
+function deployedGeneralProgressFor(state, accountId) {
+  const owner = String(accountId || "");
+  return Object.fromEntries(Object.entries(state?.generals || {})
+    .filter(([, general]) => general?.status === "deployed" && String(general.holderAccountId || "") === owner)
+    .map(([id, general]) => [id, {
+      cultivationCount: Math.max(0, Math.trunc(Number(general.cultivationCount || 0))),
+      experience: Math.max(0, Number(general.experience || 0)),
+      experienceUpdatedAt: Math.max(0, Number(general.experienceUpdatedAt || 0))
+    }]));
+}
+
 function publicMarketListings(state) {
   return Object.fromEntries(Object.entries(state?.marketListings || {})
     .map(([id, listing]) => [id, publicMarketListingState(state, listing)]));
@@ -358,7 +388,7 @@ function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAcco
   }
   return {
     cells: changedEntries(publicCells(beforeWorld), publicCells(afterWorld)),
-    generals: changedEntries(publicGenerals(beforeWorld), publicGenerals(afterWorld)),
+    generals: changedPublicGenerals(beforeWorld, afterWorld),
     marketListings: changedEntries(publicMarketListings(beforeWorld), publicMarketListings(afterWorld)),
     marketSales: changedEntries(beforeWorld?.marketSales || {}, afterWorld?.marketSales || {}),
     claimedTreasures: claims,
@@ -772,6 +802,8 @@ class OnlineWorldService {
     this.pollFailureCount = 0;
     this.syncPaused = false;
     this.mapFactsCache = null;
+    this.experienceSessionStartedAt = null;
+    this.localDeployedGeneralProgress = {};
   }
 
   account() {
@@ -945,6 +977,10 @@ class OnlineWorldService {
     if (!this.world) return null;
     const accountId = this.account().accountId;
     const allowed = candidate => String(candidate) === accountId;
+    const deployedGeneralProgress = {
+      ...deployedGeneralProgressFor(this.world, accountId),
+      ...this.localDeployedGeneralProgress
+    };
     return {
       playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0))),
       privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
@@ -960,6 +996,7 @@ class OnlineWorldService {
         ...(finiteStoredNumber(player.joinedAt) ? { joinedAt: Number(player.joinedAt) } : {})
       }])),
       generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
+      deployedGeneralProgress,
       jobs: Object.fromEntries(Object.entries(this.world.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
       processedIntents: [...(this.world.processedIntents || [])]
     };
@@ -1023,6 +1060,13 @@ class OnlineWorldService {
       this.clearResetLocalPlayer(accountId);
       overlay = null;
     }
+    if (!overlay) this.localDeployedGeneralProgress = {};
+    this.localDeployedGeneralProgress = {
+      ...this.localDeployedGeneralProgress,
+      ...(overlay?.deployedGeneralProgress && typeof overlay.deployedGeneralProgress === "object"
+        ? cloneJson(overlay.deployedGeneralProgress)
+        : {})
+    };
     if (overlay) {
       Object.assign(this.world.privatePlayers, overlay.privatePlayers || {});
       for (const [accountId, fields] of Object.entries(overlay.players || {})) if (this.world.players[accountId]) Object.assign(this.world.players[accountId], fields);
@@ -1030,6 +1074,7 @@ class OnlineWorldService {
       Object.assign(this.world.jobs, overlay.jobs || {});
       this.world.processedIntents = [...new Set([...(this.world.processedIntents || []), ...(overlay.processedIntents || [])])].slice(-1000);
     }
+    this.applyLocalDeployedGeneralProgress();
     if (accountId && this.world.players[accountId]) {
       this.world.privatePlayers[accountId] ||= {};
       this.world.privatePlayers[accountId].orientation = this.localPreferences.orientation;
@@ -1041,6 +1086,20 @@ class OnlineWorldService {
     this.recoverOwnLocalPlayerState();
     this.pruneForeignPrivateState();
     this.reconcileMarketSales();
+  }
+
+  applyLocalDeployedGeneralProgress() {
+    if (!this.world) return;
+    const accountId = this.account().accountId;
+    for (const [generalId, progress] of Object.entries(this.localDeployedGeneralProgress || {})) {
+      const general = this.world.generals?.[generalId];
+      if (!general || general.status !== "deployed" || String(general.holderAccountId || "") !== accountId) continue;
+      if (Number(progress?.cultivationCount || 0) !== Number(general.cultivationCount || 0)) continue;
+      const required = generalExperienceRequirement(general);
+      if (!required) continue;
+      general.experience = Math.min(required, Math.max(Number(general.experience || 0), Number(progress.experience || 0)));
+      general.experienceUpdatedAt = Math.max(Number(general.experienceUpdatedAt || 0), Number(progress.experienceUpdatedAt || 0));
+    }
   }
 
   reconcileMarketSales() {
@@ -1307,6 +1366,7 @@ class OnlineWorldService {
     this.migrationDraft = null;
     this.pendingJoinPreview = null;
     this.localEvents = [];
+    this.localDeployedGeneralProgress = {};
     this.directInbox = [];
     this.directHistory = [];
     this.seenDirectMessageIds.clear();
@@ -1342,6 +1402,9 @@ class OnlineWorldService {
     this.syncPaused = false;
     this.pendingMigration = null;
     this.migrationProof = migrationProof && typeof migrationProof === "object" ? cloneJson(migrationProof) : null;
+    // The cache loaded below is scoped to the referenced work. Drop the
+    // previous session's experience overlay before restoring that cache.
+    this.localDeployedGeneralProgress = {};
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
     const origin = String(this.getOrigin?.() || "").replace(/\/$/, "");
@@ -1365,6 +1428,7 @@ class OnlineWorldService {
     }
     this.notify();
     await this.calibrateClock().catch(() => null);
+    this.experienceSessionStartedAt = this.now();
     this.card = normalizedCard;
     const cached = this.loadCache(reference.workId);
     const verifiedCachedServer = normalizedCard ? this.verifiedCachedServer(normalizedCard, cached) : null;
@@ -2336,8 +2400,12 @@ class OnlineWorldService {
         const conqueredLocation = locationKey && String(record.changes.cells?.[locationKey]?.ownerAccountId || "") === actorAccountId;
         if (existing?.holderAccountId !== actorAccountId && !conqueredLocation) continue;
         delete this.world.generals[id];
+        delete this.localDeployedGeneralProgress[id];
       }
-      else this.world.generals[id] = publicGeneralState(general);
+      else {
+        this.world.generals[id] = publicGeneralState(general);
+        this.applyLocalDeployedGeneralProgress();
+      }
       this.publicGeneralOrders[id] = order;
     }
     this.world.marketListings ||= {};
@@ -3005,7 +3073,13 @@ class OnlineWorldService {
     const identity = await this.getIdentity();
     bindWorldAuthority(this.world, this.control);
     const beforeWorld = cloneJson(this.world);
-    const outcome = applyIntent(this.world, intent, { actorAccountId, actorAccountName: this.account().username, authorityAccountId: this.control.authorityAccountId, now: actionTime });
+    const outcome = applyIntent(this.world, intent, {
+      actorAccountId,
+      actorAccountName: this.account().username,
+      authorityAccountId: this.control.authorityAccountId,
+      now: actionTime,
+      experienceSince: this.experienceSessionStartedAt
+    });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
     this.world = outcome.state;
     this.holdTreasureRewards(beforeWorld);
@@ -3102,7 +3176,10 @@ class OnlineWorldService {
   async settleLocalClock(nowValue = this.now()) {
     if (!this.world) return [];
     const beforeWorld = cloneJson(this.world);
-    const settled = settleWorld(this.world, nowValue);
+    const settled = settleWorld(this.world, nowValue, {
+      activeAccountId: this.account().accountId,
+      experienceSince: this.experienceSessionStartedAt
+    });
     if (!settled.effects.length) return [];
     this.world = normalizeWorldState(settled.state);
     this.holdTreasureRewards(beforeWorld);

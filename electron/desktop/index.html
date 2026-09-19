@@ -30,6 +30,7 @@
           <section class="domain-picker">
             <div class="domain-picker-head"><b>登录域名</b><button id="refresh-domains" type="button">重新检测</button></div>
             <div id="domain-list" class="domain-list"><span>正在读取并检测域名…</span></div>
+            <div class="manual-domain-entry"><input id="manual-domain" type="text" inputmode="url" autocomplete="url" spellcheck="false" placeholder="粘贴域名或完整链接"><button id="use-manual-domain" type="button">使用域名</button></div>
             <small id="domain-selection-note">尚未选择节点</small>
           </section>
           <label>账号<input id="login-account" autocomplete="username" placeholder="邮箱或用户名" required></label>
@@ -60,6 +61,7 @@
     </section>
     <section id="online-world-page" class="online-world-page hidden">
       <section id="online-world-setup" class="online-world-library">
+        <div id="online-world-drop-hint" class="online-world-drop-hint" aria-hidden="true"><strong>释放以导入游戏卡</strong><small>支持一个或多个 JSON 文件</small></div>
         <header class="online-world-library-head">
           <span><small>在线游戏世界</small><h1 id="online-world-title">游戏库</h1></span>
           <div><button id="online-world-import-card" type="button">＋ 添加游戏</button><button id="online-world-back" type="button">返回主页</button></div>
@@ -315,7 +317,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.15.6</div>
+    <div id="app-version" aria-label="当前版本">v0.15.7</div>
     <div id="model-loading" class="model-loading hidden" role="status" aria-live="polite">
       <span class="model-loading-logo" aria-hidden="true">✦</span>
       <div><strong id="model-loading-title">正在生成</strong><small id="model-loading-detail"></small></div>

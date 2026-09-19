@@ -238,17 +238,17 @@ describe("grid world map task overlays", () => {
   it("previews the same stepwise shortest route and real-time duration as the game rules", () => {
     const { ctx } = harness();
     const route = ctx.mapTaskOverlays[0];
-    expect(route).toMatchObject({ type: "march", preview: true, durationMs: 180000, cost: 66 });
+    expect(route).toMatchObject({ type: "march", preview: true, durationMs: 90000, cost: 66 });
     expect(route.points).toEqual([
       { x: 4.5, y: 7.5 }, { x: 5.5, y: 7.5 }, { x: 6.5, y: 7.5 },
       { x: 7.5, y: 7.5 }, { x: 8.5, y: 7.5 }, { x: 8.5, y: 8.5 }, { x: 8.5, y: 9.5 }
     ]);
-    expect(ctx.marchMapRoute({ x: 0, y: 0 }, { x: 63, y: 63 }).durationMs).toBe(126 * 30000);
+    expect(ctx.marchMapRoute({ x: 0, y: 0 }, { x: 63, y: 63 }).durationMs).toBe(126 * 15000);
     expect(ctx.marchMapRoute({ x: 4, y: 7 }, { x: 4, y: 7 })).toBeNull();
     for (const bad of [{ x: -1, y: 7 }, { x: 64, y: 7 }, { x: 1.5, y: 7 }, { x: NaN, y: 7 }, null]) {
       expect(ctx.marchMapRoute(bad, { x: 1, y: 1 })).toBeNull();
     }
-    expect(ctx.mapTaskDescription(route)).toContain("预计耗时：180秒");
+    expect(ctx.mapTaskDescription(route)).toContain("预计耗时：90秒");
   });
 
   it("keeps the active route from its stored origin even after a different tile is selected", () => {
@@ -371,7 +371,7 @@ describe("grid world map task overlays", () => {
     const { ctx, tooltip, jobs } = harness();
     ctx.mapPointer = { x: 174, y: 129 };
     ctx.renderMapTaskTooltip();
-    expect(tooltip.textContent).toContain("预计耗时：180秒");
+    expect(tooltip.textContent).toContain("预计耗时：90秒");
     expect(tooltip.textContent).not.toContain("预计消耗");
     expect(tooltip.children).toHaveLength(0);
 

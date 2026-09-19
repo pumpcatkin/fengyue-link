@@ -164,6 +164,17 @@ main { display: grid; width: 100%; height: 100%; grid-template-rows: 34px minmax
 .map-task-tooltip .route-cost { display: block; color: #795116; }
 .map-floating-feedback { position: fixed; z-index: 45; pointer-events: none; color: #c32a24; font-size: 20px; font-weight: 1000; text-shadow: -1px -1px #fff5d9, 1px 1px #fff5d9; animation: float-feedback 1.7s ease-out both; }
 @keyframes float-feedback { from { opacity: 1; transform: translate(-50%, 0); } to { opacity: 0; transform: translate(-50%, -50px); } }
+.battle-report-button {
+  position: absolute; right: 12px; bottom: 42px; z-index: 9; display: inline-flex; min-width: 54px; height: 36px;
+  align-items: center; justify-content: center; gap: 4px; border: 2px solid #69452c; border-radius: 5px 9px 9px 5px;
+  background: #f5dda8; color: #70432e; padding: 4px 7px; box-shadow: 2px 3px 0 #382719aa; font-size: 10px;
+}
+.battle-report-button::before, .battle-report-button::after { content: ""; position: absolute; left: -4px; width: 5px; height: 7px; border: 1px solid #69452c; border-radius: 3px; background: #dfb978; }
+.battle-report-button::before { top: 5px; } .battle-report-button::after { bottom: 5px; }
+.battle-report-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.battle-report-button strong { min-width: 15px; height: 15px; border-radius: 999px; background: #9e3430; color: #fff8e1; font-size: 8px; line-height: 15px; text-align: center; }
+.battle-report-button.victory { border-color: #55743f; color: #42623d; } .battle-report-button.victory strong { background: #55743f; }
+.battle-report-button.defeat { border-color: #8e3c31; color: #8e3c31; }
 canvas {
   display: block; width: 2048px; height: 2048px; border: 4px solid var(--line); background: #a9bd81;
   box-shadow: 5px 5px 0 var(--shadow); cursor: crosshair; image-rendering: pixelated; transform-origin: top left;
@@ -345,6 +356,34 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .discovery-confirmation { width: min(500px, 92vw); }
 #general-discovery-confirmation { z-index: 30; }
 .discovery-confirmation p { margin: 10px 0 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.battle-report-modal { width: min(620px, 94vw); background: #f3dfb0; }
+.battle-report-modal > header { align-items: flex-start; }
+.battle-report-modal > header p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+.battle-report-navigation { display: flex; align-items: center; gap: 5px; margin-top: 6px; color: var(--muted); font-size: 9px; font-weight: 900; }
+.battle-report-navigation button { display: grid; width: 22px; height: 20px; place-items: center; border-width: 1px; border-radius: 5px; padding: 0; font-size: 15px; line-height: 1; box-shadow: 1px 1px 0 var(--shadow); }
+.battle-report-navigation button:disabled { opacity: .35; }
+.battle-report-modal.victory { border-color: #55743f; } .battle-report-modal.defeat { border-color: #8e3c31; }
+.battle-report-modal.victory h1 { color: #42623d; } .battle-report-modal.defeat h1 { color: #8e3c31; }
+.battle-report-dismiss { display: grid; width: 30px; height: 30px; place-items: center; border-width: 1px; border-radius: 7px; padding: 0; color: var(--muted); box-shadow: 1px 1px 0 var(--shadow); }
+.battle-report-dismiss svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.battle-report-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 12px 0 9px; }
+.battle-report-stats > span { display: grid; min-height: 54px; align-content: center; gap: 4px; border: 2px solid #9a713466; border-radius: 7px; background: #fff2cf; padding: 7px; text-align: center; }
+.battle-report-stats small { color: var(--muted); font-size: 9px; font-weight: 900; }
+.battle-report-stats strong { color: var(--red-dark); font-size: 14px; font-variant-numeric: tabular-nums; }
+.battle-report-stats .gained { border-color: #55743f88; background: #e6efd8; } .battle-report-stats .gained strong { color: #42623d; }
+.battle-report-stats .losses { border-color: #a44a3c88; background: #f7ddd3; } .battle-report-stats .losses strong { color: #9b392f; }
+.battle-report-specials { display: grid; gap: 6px; margin: 5px 0 10px; }
+.battle-report-special { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; border-left: 4px solid #b3783f; background: #f5e2b5; padding: 7px 9px; }
+.battle-report-special small { color: var(--muted); font-size: 9px; font-weight: 900; } .battle-report-special b { color: var(--red-dark); font-size: 11px; text-align: right; }
+.battle-report-special.captive { border-left-color: #8a5a75; } .battle-report-special.discovered { border-left-color: #b3783f; }
+.battle-report-general-picker { display: grid; gap: 7px; border-top: 1px solid #8a6d3d55; padding-top: 10px; }
+.battle-report-general-picker > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.battle-report-general-picker > header b { color: var(--red-dark); font-size: 12px; } .battle-report-general-picker > header small { color: var(--muted); font-size: 9px; }
+.battle-report-generals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; max-height: 160px; overflow: auto; }
+.battle-report-generals button { display: grid; gap: 3px; text-align: left; padding: 7px 9px; font-size: 11px; }
+.battle-report-generals button small { color: var(--muted); font-size: 8px; font-weight: 800; }
+.battle-report-generals > p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 10px; }
+.battle-report-modal > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 13px; }
 .market-modal { width: min(1100px, 96vw); max-height: 94vh; padding: 18px; background: #f1dfb2; }
 .market-modal-header { margin-bottom: 12px !important; }
 .market-modal-header h1 { color: #4c2f20; font-size: 27px; }
@@ -386,6 +425,7 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .market-listing footer button { padding: 6px 9px; font-size: 10px; }
 .market-empty { column-span: all; border: 2px dashed #aa8751; border-radius: 8px; background: #faedca; padding: 24px 15px; color: var(--muted); font-size: 11px; text-align: center; }
 .material-inventory { display: flex; flex-wrap: wrap; gap: 5px; }
+.material-inventory.empty { color: var(--muted); font-size: 9px; font-weight: 800; }
 .material-chip, .talent-chip { border: 1px solid currentColor; border-radius: 5px; padding: 3px 6px; font-size: 11px; background: #fff8e8; }
 .rarity-white { color: #66615a; }.rarity-green { color: #437538; }.rarity-blue { color: #2c6799; }.rarity-purple { color: #815094; }.rarity-gold { color: #966311; }.rarity-red, .rarity-red-ascend, .rarity-red-reroll { color: #bd3b31; }
 .panel > header, .paper-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
@@ -420,6 +460,9 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .deployed-generals.empty { color: var(--muted); font-size: 9px; }
 .deployed-card { display: flex; align-items: center; justify-content: space-between; border: 2px solid var(--green-dark); border-radius: 8px; background: #e9f0d8; padding: 6px; }
 .deployed-card span { display: grid; font-size: 9px; } .deployed-card button { padding: 3px 7px; font-size: 8px; }
+.deployed-card .deployed-power { display: flex; align-items: baseline; gap: 2px; color: var(--green-dark); font-variant-numeric: tabular-nums; }
+.deployed-card .defense-bonus { color: #c02782; font-weight: 1000; }
+.deployed-card .general-experience { color: #846649; font-size: 8px; }
 
 .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .action-grid label { display: grid; gap: 3px; color: var(--muted); font-size: 8px; font-weight: 900; }
@@ -452,6 +495,7 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .job b { font-size: 10px; }
 .job button { padding: 3px 6px; font-size: 8px; }
 .general-card small { color: var(--muted); font-size: 11px; font-weight: 700; }
+.general-card .general-experience { color: #846649; font-size: 9px; font-weight: 800; }
 .general-card b { font-size: 13px; }
 .general-card button { padding: 4px 7px; font-size: 11px; }
 .general-card .buttons { justify-content: flex-start; }
@@ -601,6 +645,8 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
   .choice-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 620px) {
+  .battle-report-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .battle-report-generals { grid-template-columns: 1fr; }
   .march-confirmation { width: 96vw; padding: 13px; }
   .march-confirmation-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .march-confirmation-generals > header { align-items: flex-start; flex-direction: column; gap: 3px; }

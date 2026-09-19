@@ -3587,6 +3587,7 @@ class AccountBackend {
     let migration = initialMigration;
     let card = current;
     let next = null;
+    let chainCompleted = false;
     try {
       for (let hop = 0; hop < 16; hop += 1) {
         const targetWorkId = String(migration?.workId || "");
@@ -3620,13 +3621,18 @@ class AccountBackend {
         });
         const onward = next?.migration;
         if (onward?.workId && String(onward.workId) !== String(next?.work?.id || "")) {
+          if (onward.requiresPublish || onward.cleanupPending) {
+            chainCompleted = true;
+            break;
+          }
           migration = onward;
           continue;
         }
         if (!next?.initialized) throw new Error("迁移目标尚未完成服务器校验");
+        chainCompleted = true;
         break;
       }
-      if (!next?.initialized) throw new Error("迁移链超过最大跳转次数");
+      if (!chainCompleted) throw new Error("迁移链超过最大跳转次数");
     } catch (error) {
       // Keep the old card as the durable entry point. Re-opening it restores
       // the signed tombstone state so a transient target failure is retryable.

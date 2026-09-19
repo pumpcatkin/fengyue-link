@@ -123,6 +123,78 @@ describe("online world migration regressions", () => {
     expect(saves).toBe(1);
   });
 
+  it("stays on an intermediate server while its owner cleanup is still pending", async () => {
+    const main = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    const body = methodBody(main, "async followOnlineWorldMigrationChain(", "async migrateOnlineWorldCard(");
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const followChain = new AsyncFunction(
+      "current",
+      "initialMigration",
+      "options",
+      "rebindGameCard",
+      "gameCardLibraryKey",
+      "validateGameCard",
+      "saveGameCardLibrary",
+      body
+    );
+    const card = { cardId: "grid-card", companion: { workId: "A" } };
+    const opened: string[] = [];
+    const cleared: string[] = [];
+    let saves = 0;
+    const onlineWorldService: any = {
+      card,
+      async open({ card: nextCard }: any) {
+        const workId = String(nextCard.companion.workId);
+        opened.push(workId);
+        this.card = nextCard;
+        return {
+          initialized: false,
+          work: { id: "B" },
+          migration: {
+            sourceWorkId: "B",
+            workId: "C",
+            targetControlId: "control-C",
+            requiresPublish: true,
+            cleanupPending: true
+          }
+        };
+      },
+      clearCacheForWork(workId: string) { cleared.push(workId); }
+    };
+    const backend: any = {
+      origin: "https://aigirlfriend.baby",
+      onlineWorldService,
+      onlineWorldCardFile: "fixture.json",
+      onlineWorldCards: new Map([["grid-card::A", card]])
+    };
+    const rebind = (source: any, workId: string) => ({
+      ...source,
+      companion: { ...source.companion, workId }
+    });
+    const key = (value: any) => `${value.cardId}::${value.companion.workId}`;
+
+    const result = await followChain.call(
+      backend,
+      card,
+      { sourceWorkId: "A", workId: "B", targetControlId: "control-B" },
+      { displayName: "服主" },
+      rebind,
+      key,
+      (value: any) => value,
+      () => { saves += 1; }
+    );
+
+    expect(result).toMatchObject({
+      initialized: false,
+      work: { id: "B" },
+      migration: { workId: "C", requiresPublish: true, cleanupPending: true }
+    });
+    expect(opened).toEqual(["B"]);
+    expect([...backend.onlineWorldCards.keys()]).toEqual(["grid-card::B"]);
+    expect(cleared).toEqual(["A"]);
+    expect(saves).toBe(1);
+  });
+
   it("keeps a validated target-bound card instead of downgrading it from an old JSON card", async () => {
     const main = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const body = methodBody(main, "async followOnlineWorldMigrationChain(", "async migrateOnlineWorldCard(");

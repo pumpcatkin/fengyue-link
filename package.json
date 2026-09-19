@@ -1,6 +1,6 @@
 {
   "name": "fengyue-link",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "description": "风月多人联机桌面工具",
   "author": "八爪毛米",
   "private": true,
@@ -78,6 +78,7 @@
     ],
     "nsis": {
       "guid": "63340c0b-8899-4ec0-9aa3-5a80da4ed183",
+      "include": "build/installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

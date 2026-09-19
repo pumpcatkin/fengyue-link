@@ -904,11 +904,17 @@ describe("Electron platform API regressions", () => {
     expect(packageJson.build.electronVersion).toBe("44.0.0");
     expect(packageJson.build.win.icon).toBe("build/cat-pumpkin-logo.ico");
     expect(packageJson.build.nsis.guid).toBe("63340c0b-8899-4ec0-9aa3-5a80da4ed183");
+    expect(packageJson.build.nsis.include).toBe("build/installer.nsh");
     expect(packageJson.build.nsis.oneClick).toBe(false);
     expect(packageJson.build.nsis.allowToChangeInstallationDirectory).toBe(true);
     expect(packageJson.build.nsis.deleteAppDataOnUninstall).toBe(false);
     expect(packageJson.build.nsis.createDesktopShortcut).toBe("always");
     expect(packageJson.build.nsis.uninstallDisplayName).toBe("风月联机工具");
+    const installerInclude = readFileSync(new URL("../build/installer.nsh", import.meta.url), "utf8");
+    expect(installerInclude).toContain('!macro customCheckAppRunning');
+    expect(installerInclude).toContain('${IfNot} ${FileExists} "$INSTDIR\\${APP_EXECUTABLE_FILENAME}"');
+    expect(installerInclude).toContain('${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}"');
+    expect(installerInclude).not.toContain("Path.StartsWith");
     expect(main).toContain('handleLocalIpc("app:get-version", () => app.getVersion())');
     expect(main).toContain('handleLocalIpc("app:get-release-channel", () => RELEASE_CHANNEL)');
     expect(main).toContain("app.setAppUserModelId(APPLICATION_ID)");

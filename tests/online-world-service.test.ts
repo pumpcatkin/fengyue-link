@@ -1425,6 +1425,77 @@ describe("online world platform service", () => {
     expect(state.work.authorAccountId).toBe(authorAccountId);
   });
 
+  it("opens a signed cached server and preserves its owner identity during a platform 503", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-offline-open-"));
+    const cacheFile = path.join(directory, "cache.json");
+    const card = createBundledGridCard();
+    const accountId = card.companion.authorAccountId;
+    const identity = generateOnlineWorldIdentity();
+    const diagnostics: any[] = [];
+    const seed = service({
+      cacheFile,
+      getAccount: () => ({ accountId, username: "服主" }),
+      getIdentity: async () => identity
+    });
+    seed.card = card;
+    seed.work = { id: card.companion.workId, name: card.companion.name, authorAccountId: accountId };
+    seed.control = signRecord({
+      schema: "fyow.control/3",
+      id: "cached-control",
+      gameId: card.gameId,
+      workId: card.companion.workId,
+      seasonId: "cached-season",
+      programHash: seed.currentProgramHash(),
+      authorityAccountId: accountId,
+      authoritySigningPublicKey: identity.signingPublicKey,
+      authorityEncryptionPublicKey: identity.encryptionPublicKey,
+      startedAt: 1_800_000_000_000
+    }, identity.signingPrivateKey);
+    seed.world = createWorld({
+      seed: "cached-world",
+      seasonId: "cached-season",
+      authorityAccountId: accountId,
+      startedAt: 1_800_000_000_000
+    });
+    seed.world.players[accountId] = {
+      accountId,
+      displayName: "服主",
+      position: { x: 2, y: 2 },
+      carriedGeneralIds: []
+    };
+    seed.world.privatePlayers[accountId] = { orientation: "any" };
+    seed.saveCache();
+    seed.close();
+
+    const offline = service({
+      cacheFile,
+      getAccount: () => ({ accountId, username: "服主" }),
+      getIdentity: async () => identity,
+      requestConsole: async () => { throw new Error("平台请求失败：503"); },
+      onDiagnostic: (detail: any) => diagnostics.push(detail)
+    });
+    try {
+      const state = await offline.open({ card, displayName: "服主", orientation: "any" });
+      expect(state).toMatchObject({
+        initialized: true,
+        isAuthor: true,
+        isServerOwner: true,
+        status: "degraded",
+        error: "平台请求失败：503",
+        work: { id: card.companion.workId, authorAccountId: accountId }
+      });
+      expect(await offline.isGameCardAuthor(card)).toBe(true);
+      expect(diagnostics.map(item => item.event)).toEqual(expect.arrayContaining([
+        "work-detail-cache-fallback",
+        "sync-failed",
+        "card-author-cache-fallback"
+      ]));
+    } finally {
+      offline.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("loads the verified program snapshot from the game card when the installed page omits its description", async () => {
     const card = createBundledGridCard();
     const instance = service({

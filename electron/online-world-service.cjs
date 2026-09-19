@@ -1073,6 +1073,23 @@ class OnlineWorldService {
     } catch { return null; }
   }
 
+  verifiedCachedServer(card, cached = null) {
+    if (!card?.companion?.workId || !card?.companion?.authorAccountId) return null;
+    const accountId = this.account().accountId;
+    const workId = String(card.companion.workId);
+    const authorityAccountId = String(card.companion.authorAccountId);
+    const candidate = cached || this.loadCache(workId);
+    const control = candidate?.control;
+    const world = candidate?.world;
+    if (!accountId || !candidate || this.cacheOwnerAccountId(candidate) !== accountId) return null;
+    if (!control || !world || world.gameId !== GRID_GAME_ID || control.gameId !== GRID_GAME_ID) return null;
+    if (String(control.workId || "") !== workId || String(control.authorityAccountId || "") !== authorityAccountId) return null;
+    if (String(control.seasonId || "") !== String(world.seasonId || "")) return null;
+    if (world.authorityAccountId && String(world.authorityAccountId) !== authorityAccountId) return null;
+    if (!control.authoritySigningPublicKey || !verifySignedRecord(control, control.authoritySigningPublicKey)) return null;
+    return candidate;
+  }
+
   clearCacheForWork(workId) {
     const targetWorkId = String(workId || "");
     const accountId = this.account().accountId;
@@ -1275,9 +1292,31 @@ class OnlineWorldService {
     }
     this.notify();
     await this.calibrateClock().catch(() => null);
-    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
     this.card = normalizedCard;
-    this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
+    const cached = this.loadCache(reference.workId);
+    const verifiedCachedServer = normalizedCard ? this.verifiedCachedServer(normalizedCard, cached) : null;
+    let workDetailError = null;
+    try {
+      const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
+      this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
+    } catch (error) {
+      if (!verifiedCachedServer || this.migrationProof) throw error;
+      workDetailError = error;
+      this.work = {
+        id: reference.workId,
+        name: String(normalizedCard.companion.name || normalizedCard.title || "在线游戏世界"),
+        description: String(normalizedCard.companion.configuration?.app?.description || ""),
+        authorAccountId: String(normalizedCard.companion.authorAccountId),
+        authorName: String(normalizedCard.companion.authorName || ""),
+        url: reference.url
+      };
+      this.diagnostic({
+        event: "work-detail-cache-fallback",
+        status: "degraded",
+        error: error?.message || String(error),
+        workId: reference.workId
+      });
+    }
     if (normalizedCard?.companion?.authorAccountId && this.work.authorAccountId !== normalizedCard.companion.authorAccountId) throw new Error("伴生作品当前作者与游戏卡绑定的服主账号不一致");
     if (this.migrationProof?.authorityAccountId && String(this.work.authorAccountId || "") !== String(this.migrationProof.authorityAccountId)) {
       throw new Error("迁移目标作品作者与源服务器不一致");
@@ -1285,7 +1324,6 @@ class OnlineWorldService {
     if (normalizedCard && this.work.name === "在线游戏世界") this.work.name = normalizedCard.companion.name;
     this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
     this.mapFactsCache = null;
-    const cached = this.loadCache(this.work.id);
     this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
     this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
     this.historyPageOrder = ["oldest-first", "newest-first", "mixed"].includes(cached?.historyPageOrder) ? cached.historyPageOrder : "unknown";
@@ -1382,7 +1420,13 @@ class OnlineWorldService {
       orientation: this.localPreferences.orientation,
       displayName: String(displayName || account.username || "玩家").slice(0, 40)
     };
-    await this.sync(true);
+    let syncError = workDetailError;
+    try {
+      await this.sync(true);
+    } catch (error) {
+      if (!verifiedCachedServer || this.migrationProof) throw error;
+      syncError = error;
+    }
     this.assertSyncActive();
     if (this.pendingMigration) {
       this.status = "migrating";
@@ -1393,7 +1437,8 @@ class OnlineWorldService {
     if (migrationLocalState) this.restoreMigrationLocalState(migrationLocalState);
     await this.ensureLocalPlayerContext();
     this.assertSyncActive();
-    this.status = this.control && this.world ? "ready" : "needs-initialization";
+    this.status = this.control && this.world ? (syncError ? "degraded" : "ready") : "needs-initialization";
+    this.error = syncError ? (syncError?.message || String(syncError)) : null;
     if (this.migrationProof?.sourceWorkId && previousWorkId && previousWorkId !== this.work.id) {
       this.clearCacheForWork(this.migrationProof.sourceWorkId);
     }
@@ -1405,8 +1450,20 @@ class OnlineWorldService {
   async isGameCardAuthor(card) {
     const accountId = this.account().accountId;
     if (!accountId || card?.companion?.authorAccountId !== accountId) return false;
-    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(card.companion.workId)}`, { timeout: 8000 });
-    return this.account().accountId === accountId && normalizeWorkDetail(payload, card.companion.workId).authorAccountId === accountId;
+    try {
+      const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(card.companion.workId)}`, { timeout: 8000 });
+      return this.account().accountId === accountId && normalizeWorkDetail(payload, card.companion.workId).authorAccountId === accountId;
+    } catch (error) {
+      const cached = this.verifiedCachedServer(card);
+      if (!cached || this.account().accountId !== accountId) return false;
+      this.diagnostic({
+        event: "card-author-cache-fallback",
+        status: "degraded",
+        error: error?.message || String(error),
+        workId: card.companion.workId
+      });
+      return true;
+    }
   }
 
   async exportGameCard(selectedCard = this.card) {

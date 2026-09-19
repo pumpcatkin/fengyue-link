@@ -226,6 +226,7 @@ describe("Electron platform API regressions", () => {
     const theme = readFileSync(new URL("../electron/desktop/theme.css", import.meta.url), "utf8");
     const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
     expect(html).toContain('<b>联机同乐</b>');
+    expect(html).toContain('<b>在线游戏世界</b><small>多人在线的非风月小游戏</small>');
     expect(html).toContain('id="auto-login"');
     expect(styles).toContain("font-size:34px;font-style:italic");
     expect(styles).toContain("translateX(calc(-22px - .16em))");

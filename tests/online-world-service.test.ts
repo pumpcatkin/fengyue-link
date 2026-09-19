@@ -2189,7 +2189,7 @@ describe("online world platform service", () => {
       pre_text: "prefix",
       post_text: "post",
       world_book: [],
-      app: { gender: 1, mod_permission: 4, is_available_not_public: true }
+      app: { name: "猎艳疆土[new]", gender: 1, mod_permission: 4, is_available_not_public: true }
     });
     expect(targetConfigBody).not.toHaveProperty("prpt");
     expect(instance.work.id).toBe("new");

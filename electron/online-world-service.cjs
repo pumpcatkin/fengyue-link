@@ -18,7 +18,7 @@ const {
 } = require("./online-world-protocol.cjs");
 const { sealJson, openSealedJson } = require("./online-world-crypto.cjs");
 const { parseProgram } = require("./online-world-runtime.cjs");
-const { builtInGridProgram, validateGameCard, createExportedGameCard, summarizeGameCard } = require("./online-world-card.cjs");
+const { GRID_GAME_TITLE, builtInGridProgram, validateGameCard, createExportedGameCard, summarizeGameCard } = require("./online-world-card.cjs");
 const {
   GRID_GAME_ID,
   GRID_SIZE,
@@ -4119,7 +4119,9 @@ class OnlineWorldService {
     if (!newWorkId) throw new Error("平台没有返回新作品编号");
     const newWorkUrl = `${this.getOrigin().replace(/\/$/, "")}/zh/explore/installed/${encodeURIComponent(newWorkId)}`;
     const migrationId = crypto.randomUUID();
-    const newWork = { ...oldWork, id: newWorkId, name: this.work.name, description, url: newWorkUrl, authorAccountId: this.account().accountId };
+    const targetInstanceId = newWorkId.replace(/[^0-9a-z]/gi, "").slice(0, 16);
+    const targetName = `${GRID_GAME_TITLE}[${targetInstanceId}]`;
+    const newWork = { ...oldWork, id: newWorkId, name: targetName, description, url: newWorkUrl, authorAccountId: this.account().accountId };
     const newControlUnsigned = {
       ...oldControl,
       id: crypto.randomUUID(),

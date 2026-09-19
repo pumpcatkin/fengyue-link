@@ -2125,6 +2125,9 @@ describe("online world platform service", () => {
   it("initializes the copied ledger before publishing a verified reset redirect", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    world.players.legacy = { accountId: "legacy", displayName: "旧玩家", gold: 999, fieldArmySoldiers: 88 };
+    world.playerEpochs.legacy = 0;
+    world.cells["1,1"] = { ownerAccountId: "legacy", soldiers: 50, generalIds: [] };
     const exportData = { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
     const comments: Array<{ endpoint: string; content: string }> = [];
     let oldSavedName = "";
@@ -2148,21 +2151,24 @@ describe("online world platform service", () => {
     instance.readAllCommentSources = vi.fn(async () => []);
     instance.syncNow = vi.fn(async () => instance.state());
     instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
-    instance.settleMigratedSource = vi.fn(async (draft: any) => { draft.sourceFinalizedAfterReset = true; return true; });
     instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
     const result = await instance.exportMigrationDraft();
     expect(result.importError).toBeUndefined();
     expect(result.redirectPublished).toBe(true);
     expect(createBody).toMatchObject({ mode: "chat", type: 1 });
     expect(instance.work.id).toBe("new");
-    const newRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/new/1").map((item, index) => ({ id: `n${index}`, content: item.content }))).records.map((item: any) => item.record.schema);
+    const assembledNewRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/new/1").map((item, index) => ({ id: `n${index}`, content: item.content }))).records;
+    const newRecords = assembledNewRecords.map((item: any) => item.record.schema);
     const oldRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/old/1").map((item, index) => ({ id: `o${index}`, content: item.content }))).records.map((item: any) => item.record.schema);
     expect(newRecords).toContain("fyow.control/3");
     expect(newRecords).toContain("fyow.snapshot/3");
     expect(oldRecords).toContain("fyow.reset/3");
+    const targetSnapshot = assembledNewRecords.find((item: any) => item.record.schema === "fyow.snapshot/3")?.record;
+    expect(targetSnapshot.state.players).toEqual({});
+    expect(targetSnapshot.state.cells["1,1"]).toBeUndefined();
   }, 15_000);
 
-  it("publishes the redirect even when the obsolete work cannot be renamed", async () => {
+  it("publishes the redirect without modifying the obsolete work configuration", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season" });
     const exportData = { name: "只读旧服", desc: "program", type: 2, prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
@@ -2186,7 +2192,6 @@ describe("online world platform service", () => {
     instance.readAllCommentSources = vi.fn(async () => []);
     instance.syncNow = vi.fn(async () => instance.state());
     instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
-    instance.settleMigratedSource = vi.fn(async (draft: any) => { draft.sourceFinalizedAfterReset = true; return true; });
     instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
 
     const result = await instance.exportMigrationDraft();

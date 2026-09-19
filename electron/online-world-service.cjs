@@ -867,47 +867,6 @@ class OnlineWorldService {
     };
   }
 
-  captureMigrationLocalState() {
-    const cached = !this.world && this.work?.id ? this.loadCache(this.work.id) : null;
-    return {
-      overlay: cloneJson(this.world ? this.captureLocalOverlay() : (cached?.localOverlay || null)),
-      localEvents: cloneJson((this.localEvents.length ? this.localEvents : (cached?.localEvents || [])).slice(-2000)),
-      localPreferences: cloneJson(cached?.localPreferences ? { ...cached.localPreferences, ...this.localPreferences } : this.localPreferences),
-      directInbox: cloneJson((this.directInbox.length ? this.directInbox : (cached?.directInbox || [])).slice(-100)),
-      directHistory: cloneJson((this.directHistory.length ? this.directHistory : (cached?.directHistory || [])).slice(-200)),
-      seenDirectMessageIds: [...(this.seenDirectMessageIds.size
-        ? this.seenDirectMessageIds
-        : new Set(cached?.seenDirectMessageIds || []))].slice(-500),
-      pendingModelEffects: cloneJson((this.pendingModelEffects.length
-        ? this.pendingModelEffects
-        : (cached?.pendingModelEffects || [])).slice(-50))
-    };
-  }
-
-  restoreMigrationLocalState(state) {
-    if (!state || typeof state !== "object") return false;
-    if (state.localPreferences && typeof state.localPreferences === "object") {
-      this.localPreferences = {
-        ...this.localPreferences,
-        ...cloneJson(state.localPreferences),
-        characterTags: Array.isArray(state.localPreferences.characterTags)
-          ? state.localPreferences.characterTags.map(String).slice(0, 80)
-          : this.localPreferences.characterTags
-      };
-    }
-    this.localEvents = Array.isArray(state.localEvents) ? cloneJson(state.localEvents.slice(-2000)) : [];
-    this.directInbox = Array.isArray(state.directInbox) ? cloneJson(state.directInbox.slice(-100)) : [];
-    this.directHistory = Array.isArray(state.directHistory) ? cloneJson(state.directHistory.slice(-200)) : [...this.directInbox];
-    this.seenDirectMessageIds = new Set(Array.isArray(state.seenDirectMessageIds)
-      ? state.seenDirectMessageIds.slice(-500).map(String)
-      : this.directHistory.map(item => String(item?.messageId || "")).filter(Boolean));
-    this.pendingModelEffects = Array.isArray(state.pendingModelEffects)
-      ? cloneJson(state.pendingModelEffects.slice(-50)) : [];
-    this.restoreLocalOverlay(state.overlay || null);
-    this.saveCache();
-    return true;
-  }
-
   captureLedgerRuntimeState() {
     return {
       publicDeltaCountSinceSnapshot: Number(this.publicDeltaCountSinceSnapshot || 0),
@@ -934,16 +893,6 @@ class OnlineWorldService {
     this.historyPageOrder = ["oldest-first", "newest-first", "mixed"].includes(state.historyPageOrder)
       ? state.historyPageOrder : "unknown";
     this.commentRootPages = new Map(Array.isArray(state.commentRootPages) ? state.commentRootPages.slice(-2000) : []);
-  }
-
-  migrationSourceWatermark() {
-    return sha256(Buffer.from(canonicalJson({
-      seasonId: String(this.control?.seasonId || this.world?.seasonId || ""),
-      revision: Number(this.world?.revision || 0),
-      publicHistoryOrder: ledgerOrder(this.publicHistoryOrder),
-      appliedMapDeltaIds: [...this.appliedMapDeltaIds].sort(),
-      appliedAuthorityIds: [...this.appliedAuthorityIds].sort()
-    })));
   }
 
   pruneForeignPrivateState() {
@@ -1263,7 +1212,7 @@ class OnlineWorldService {
     return this.now();
   }
 
-  async open({ card, workUrl, orientation, displayName, migrationProof = null, migrationLocalState = null } = {}) {
+  async open({ card, workUrl, orientation, displayName, migrationProof = null } = {}) {
     const previousWorkId = String(this.work?.id || "");
     await this.pause();
     this.syncPaused = false;
@@ -1434,7 +1383,6 @@ class OnlineWorldService {
       this.notify();
       return this.state();
     }
-    if (migrationLocalState) this.restoreMigrationLocalState(migrationLocalState);
     await this.ensureLocalPlayerContext();
     this.assertSyncActive();
     this.status = this.control && this.world ? (syncError ? "degraded" : "ready") : "needs-initialization";
@@ -3852,71 +3800,41 @@ class OnlineWorldService {
     }
   }
 
-  async compactMigratedSource(oldWork, oldControl, resetId, {
-    rounds = 4,
-    retryDelayMs = 300,
-    settleDelayMs = 250,
-    expectedSourceWatermark = ""
-  } = {}) {
+  async compactMigratedSource(oldWork, oldControl, resetId) {
     const activeWork = this.work;
     const activeControl = this.control;
     const aggregate = { attempted: 0, deleted: 0, failures: [], verified: false, remaining: [] };
     try {
       this.work = oldWork;
       this.control = oldControl;
-      const maxRounds = Math.max(2, Math.min(8, Math.trunc(Number(rounds) || 2)));
-      for (let round = 0; round < maxRounds; round += 1) {
-        let comments;
-        try {
-          comments = await this.readAllCommentSources({ includeAllBranches: true });
-        } catch (error) {
-          aggregate.verified = false;
-          aggregate.failures.push({ id: "history", error: String(error?.message || error) });
-          if (round + 1 < maxRounds && retryDelayMs > 0) await new Promise(resolve => setTimeout(resolve, retryDelayMs * (round + 1)));
-          continue;
-        }
-        const records = assembleCommentRecords(comments).records;
-        const reset = this.verifiedResets(records, oldControl)
-          .find(item => String(item.record.resetId || "") === String(resetId || ""));
-        const control = this.verifiedControls(records)
-          .find(item => String(item.record.id || "") === String(oldControl.id || ""));
-        if (!reset || !control) {
-          aggregate.verified = false;
-          aggregate.failures.push({ id: !reset ? "reset" : "control", error: "搬迁锚点尚未回读" });
-          if (round + 1 < maxRounds && retryDelayMs > 0) await new Promise(resolve => setTimeout(resolve, retryDelayMs * (round + 1)));
-          continue;
-        }
-        const preserveIds = new Set([...reset.sources, ...control.sources].map(source => commentId(source)).filter(Boolean));
-        const removable = comments.filter(comment => !preserveIds.has(commentId(comment)));
-        if (removable.length) {
-          if (expectedSourceWatermark) {
-            await this.syncNow(true, { ignoreMigrationReset: true });
-            const currentWatermark = this.migrationSourceWatermark();
-            if (currentWatermark !== String(expectedSourceWatermark)) {
-              aggregate.sourceChanged = true;
-              aggregate.failures.push({ id: "source-watermark", error: "源服务器在清理前出现新记录" });
-              return aggregate;
-            }
-          }
-          aggregate.verified = false;
-          const cleanup = await this.purgeWorkComments(removable, preserveIds, oldWork.id);
-          aggregate.attempted += cleanup.attempted;
-          aggregate.deleted += cleanup.deleted;
-          aggregate.failures.push(...cleanup.failures);
-          if (settleDelayMs > 0) await new Promise(resolve => setTimeout(resolve, settleDelayMs));
-          continue;
-        }
-        // Require two consecutive clean reads so pagination shifts and writes
-        // racing with the reset marker do not leave an unseen tail behind.
-        if (aggregate.verified) {
-          aggregate.remaining = [...preserveIds];
-          return aggregate;
-        }
-        aggregate.verified = true;
-        aggregate.remaining = [...preserveIds];
-        if (settleDelayMs > 0) await new Promise(resolve => setTimeout(resolve, settleDelayMs));
+      const comments = await this.readAllCommentSources({ includeAllBranches: true });
+      const records = assembleCommentRecords(comments).records;
+      const reset = this.verifiedResets(records, oldControl)
+        .find(item => String(item.record.resetId || "") === String(resetId || ""));
+      const control = this.verifiedControls(records)
+        .find(item => String(item.record.id || "") === String(oldControl.id || ""));
+      if (!reset || !control) {
+        aggregate.failures.push({ id: !reset ? "reset" : "control", error: "搬迁锚点尚未回读" });
+        return aggregate;
       }
-      aggregate.verified = false;
+      const preserveIds = new Set([...reset.sources, ...control.sources].map(source => commentId(source)).filter(Boolean));
+      const cleanup = await this.purgeWorkComments(
+        comments.filter(comment => !preserveIds.has(commentId(comment))),
+        preserveIds,
+        oldWork.id
+      );
+      aggregate.attempted = cleanup.attempted;
+      aggregate.deleted = cleanup.deleted;
+      aggregate.failures.push(...cleanup.failures);
+      const remaining = await this.readAllCommentSources({ includeAllBranches: true });
+      const remainingIds = [...new Set(remaining.map(comment => commentId(comment)).filter(Boolean))];
+      const unexpected = remainingIds.filter(id => !preserveIds.has(id));
+      aggregate.remaining = remainingIds;
+      aggregate.verified = aggregate.failures.length === 0 && unexpected.length === 0
+        && [...preserveIds].every(id => remainingIds.includes(id));
+      return aggregate;
+    } catch (error) {
+      aggregate.failures.push({ id: "history", error: String(error?.message || error) });
       return aggregate;
     } finally {
       this.work = activeWork;
@@ -3924,59 +3842,11 @@ class OnlineWorldService {
     }
   }
 
-  async settleMigratedSource(draft, newWork, newControl, oldWork, oldControl, {
-    rounds = 30,
-    settleDelayMs = 300,
-    quiescenceMs = POLL_INTERVAL_MS + 1000
-  } = {}) {
-    let stableReads = 0;
-    let stableSince = null;
-    const maxRounds = Math.max(2, Math.min(60, Math.trunc(Number(rounds) || 2)));
-    const requiredQuietMs = Math.max(0, Math.trunc(Number(quiescenceMs) || 0));
-    for (let round = 0; round < maxRounds; round += 1) {
-      this.work = oldWork;
-      this.control = oldControl;
-      this.restoreLedgerRuntimeState(draft.sourceLedgerRuntime);
-      await this.syncNow(true, { ignoreMigrationReset: true });
-      draft.sourceLedgerRuntime = this.captureLedgerRuntimeState();
-      const watermark = this.migrationSourceWatermark();
-      if (String(draft.targetSourceWatermark || "") !== watermark) {
-        stableReads = 0;
-        stableSince = null;
-        this.work = newWork;
-        this.control = newControl;
-        const snapshot = await this.publishSnapshot();
-        draft.targetSnapshot = cloneJson(snapshot);
-        draft.targetSnapshotId = String(snapshot?.snapshotId || "");
-        draft.targetLedgerInitialized = true;
-        draft.targetLedgerVerified = false;
-        draft.targetSourceWatermark = watermark;
-        draft.targetLedgerRuntime = this.captureLedgerRuntimeState();
-        this.saveMigrationDraftForSource(oldWork, oldControl);
-        await this.verifyMigrationTargetLedger(draft, newWork, newControl, oldWork, oldControl);
-        this.work = oldWork;
-        this.control = oldControl;
-        this.restoreLedgerRuntimeState(draft.sourceLedgerRuntime);
-      } else {
-        stableReads += 1;
-        if (stableSince == null) stableSince = this.monotonicNow();
-        if (stableReads >= 2 && this.monotonicNow() - stableSince >= requiredQuietMs) {
-          draft.sourceFinalizedAfterReset = true;
-          this.saveMigrationDraftForSource(oldWork, oldControl);
-          return true;
-        }
-      }
-      if (round + 1 < maxRounds && settleDelayMs > 0) {
-        await new Promise(resolve => setTimeout(resolve, settleDelayMs));
-      }
-    }
-    return false;
-  }
-
-  async completeMigrationDraft(draft, sourceHistory, oldWork, oldControl) {
+  async completeMigrationDraft(draft, oldWork, oldControl) {
     const identity = await this.getIdentity();
     if (identity.signingPublicKey !== oldControl.authoritySigningPublicKey) throw new Error("本机作者密钥与当前赛季权威密钥不一致");
     if (!draft.sourceLedgerRuntime) draft.sourceLedgerRuntime = this.captureLedgerRuntimeState();
+    const sourceWorld = this.world;
     const newWork = {
       ...oldWork,
       id: String(draft.newWorkId),
@@ -3985,6 +3855,29 @@ class OnlineWorldService {
       url: String(draft.newWorkUrl || ""),
       authorAccountId: this.account().accountId
     };
+    if (!draft.targetWorld) {
+      const startedAt = this.now();
+      const targetWorld = createWorld({
+        seasonId: oldControl.seasonId,
+        authorityAccountId: this.account().accountId,
+        startedAt
+      });
+      scatterTreasures(targetWorld, {}, startedAt);
+      draft.targetWorld = cloneJson(targetWorld);
+      const targetControlUnsigned = {
+        ...cloneJson(draft.targetControl),
+        seasonId: targetWorld.seasonId,
+        startedAt,
+        updatedAt: startedAt
+      };
+      delete targetControlUnsigned.signature;
+      draft.targetControl = signRecord(targetControlUnsigned, identity.signingPrivateKey);
+      draft.targetLedgerInitialized = false;
+      draft.targetLedgerVerified = false;
+      draft.targetControlPosted = false;
+      draft.targetSnapshot = null;
+      draft.targetSnapshotId = "";
+    }
     const newControl = cloneJson(draft.targetControl);
     if (!newControl?.id || String(newControl.workId || "") !== newWork.id) throw new Error("搬迁草稿中的目标控制记录无效");
 
@@ -4031,33 +3924,30 @@ class OnlineWorldService {
         return { ...this.pendingMigration };
       }
     }
-    if (!draft.oldWorkRenameAttempted && draft.configuration) {
-      draft.oldWorkRenameAttempted = true;
-      try {
-        const archivedName = `${oldWork.name}（已迁移 ${newWork.id.slice(-8)}）`.slice(0, 80);
-        const oldPayload = modelConfigSavePayload(draft.configuration, oldWork.id, archivedName, newWork.description);
-        await this.requestConsole(`/apps/${encodeURIComponent(oldWork.id)}/model-config`, {
-          method: "POST",
-          body: oldPayload,
-          timeout: 30000
-        });
-        const oldVerifiedPayload = await this.requestConsole(`/apps/${encodeURIComponent(oldWork.id)}/model-config/export`, { timeout: 30000 });
-        const oldVerified = exportedConfig(oldVerifiedPayload);
-        draft.oldWorkRenamed = String(oldVerified?.name ?? oldVerified?.nm ?? oldVerified?.ttl ?? oldVerified?.title
-          ?? oldVerified?.app_name ?? oldVerified?.app?.name ?? "") === archivedName;
-        if (!draft.oldWorkRenamed) throw new Error("旧作品改名后回读不一致");
-      } catch (error) {
-        draft.oldWorkRenamed = false;
-        draft.renameError = String(error?.message || error);
-      }
-      this.saveMigrationDraftForSource(oldWork, oldControl);
-    }
     let targetSnapshot = draft.targetLedgerInitialized ? { snapshotId: String(draft.targetSnapshotId || "") } : null;
-    const sourceWatermark = this.migrationSourceWatermark();
     try {
-      if (!draft.targetLedgerInitialized || String(draft.targetSourceWatermark || "") !== sourceWatermark) {
+      if (!draft.targetLedgerInitialized) {
         this.work = newWork;
         this.control = newControl;
+        this.world = normalizeWorldState(cloneJson(draft.targetWorld));
+        bindWorldAuthority(this.world, this.control);
+        this.publicMapOrder = { timestamp: 0, commentId: "" };
+        this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
+        this.publicHistoryOrder = { timestamp: 0, commentId: "" };
+        this.publicCellOrders = {};
+        this.publicGeneralOrders = {};
+        this.publicMarketOrders = {};
+        this.publicMarketSaleOrders = {};
+        this.marketSettledSales.clear();
+        this.publicParticipantOrders = {};
+        this.publicAuthorityOrders = {};
+        this.publicTreasureSources = {};
+        this.appliedMapDeltaIds.clear();
+        this.appliedAuthorityIds.clear();
+        this.knownCommentIds.clear();
+        this.historyTailPage = 1;
+        this.historyPageOrder = "unknown";
+        this.commentRootPages.clear();
         if (!draft.targetControlPosted) {
           await this.postRecord(newControl);
           draft.targetControlPosted = true;
@@ -4068,14 +3958,18 @@ class OnlineWorldService {
         draft.targetSnapshotId = targetSnapshot?.snapshotId || "";
         draft.targetLedgerInitialized = true;
         draft.targetLedgerVerified = false;
-        draft.targetSourceWatermark = sourceWatermark;
         draft.targetLedgerRuntime = this.captureLedgerRuntimeState();
         this.saveMigrationDraftForSource(oldWork, oldControl);
       }
-      await this.verifyMigrationTargetLedger(draft, newWork, newControl, oldWork, oldControl);
+      await this.verifyMigrationTargetLedger(draft, newWork, newControl, oldWork, oldControl, {
+        allowRepair: false,
+        attempts: 2,
+        retryDelayMs: 250
+      });
     } catch (error) {
       this.work = oldWork;
       this.control = oldControl;
+      this.world = sourceWorld;
       this.restoreLedgerRuntimeState(draft.sourceLedgerRuntime);
       this.pendingMigration = {
         workId: newWork.id,
@@ -4095,8 +3989,9 @@ class OnlineWorldService {
     }
     this.work = oldWork;
     this.control = oldControl;
+    this.world = sourceWorld;
     this.restoreLedgerRuntimeState(draft.sourceLedgerRuntime);
-    const directive = signRecord(createResetDirective({
+    const directive = draft.resetRecord || signRecord(createResetDirective({
       gameId: GRID_GAME_ID,
       seasonId: oldControl.seasonId,
       oldWorkId: oldWork.id,
@@ -4114,66 +4009,29 @@ class OnlineWorldService {
       resetId: draft.resetId,
       issuedAt: draft.resetIssuedAt || this.now()
     }), identity.signingPrivateKey);
-    try {
-      await this.postRecord(directive);
-      draft.resetPublished = true;
-      this.saveMigrationDraftForSource(oldWork, oldControl);
-    } catch (error) {
-      this.pendingMigration = {
-        ...this.migrationStateFromReset({ record: directive }),
-        configurationImported: Boolean(draft.configurationImported),
-        oldWorkRenamed: Boolean(draft.oldWorkRenamed),
-        newLedgerInitialized: true,
-        redirectPublished: false,
-        requiresPublish: true,
-        importError: String(error?.message || error)
-      };
-      this.migrationDraft.targetSnapshotId = targetSnapshot?.snapshotId || draft.targetSnapshotId || "";
-      this.saveCache();
-      this.notify();
-      return { ...this.pendingMigration };
-    }
-    let sourceSettled = false;
-    let settleError = null;
-    try {
-      draft.sourceFinalizedAfterReset = false;
-      sourceSettled = await this.settleMigratedSource(draft, newWork, newControl, oldWork, oldControl);
-      if (sourceSettled) {
-        await this.verifyMigrationTargetLedger(
-          draft,
-          newWork,
-          newControl,
-          oldWork,
-          oldControl,
-          { allowRepair: false }
-        );
+    if (!draft.resetPublished) {
+      try {
+        await this.postRecord(directive);
+        draft.resetRecord = cloneJson(directive);
+        draft.resetPublished = true;
+        this.saveMigrationDraftForSource(oldWork, oldControl);
+      } catch (error) {
+        this.pendingMigration = {
+          ...this.migrationStateFromReset({ record: directive }),
+          configurationImported: Boolean(draft.configurationImported),
+          oldWorkRenamed: Boolean(draft.oldWorkRenamed),
+          newLedgerInitialized: true,
+          redirectPublished: false,
+          requiresPublish: true,
+          importError: String(error?.message || error)
+        };
+        this.migrationDraft.targetSnapshotId = targetSnapshot?.snapshotId || draft.targetSnapshotId || "";
+        this.saveCache();
+        this.notify();
+        return { ...this.pendingMigration };
       }
-    } catch (error) {
-      settleError = String(error?.message || error);
-      sourceSettled = false;
     }
-    if (!sourceSettled) {
-      this.work = oldWork;
-      this.control = oldControl;
-      this.restoreLedgerRuntimeState(draft.sourceLedgerRuntime);
-      this.pendingMigration = {
-        ...this.migrationStateFromReset({ record: directive }),
-        configurationImported: Boolean(draft.configurationImported),
-        oldWorkRenamed: Boolean(draft.oldWorkRenamed),
-        newLedgerInitialized: true,
-        targetLedgerVerified: true,
-        redirectPublished: true,
-        requiresPublish: true,
-        cleanupPending: true,
-        cleanup: { attempted: 0, deleted: 0, failures: settleError ? [{ id: "source-settle", error: settleError }] : [] }
-      };
-      this.saveCache();
-      this.notify();
-      return { ...this.pendingMigration };
-    }
-    const cleanup = await this.compactMigratedSource(oldWork, oldControl, directive.resetId, {
-      expectedSourceWatermark: draft.targetSourceWatermark
-    });
+    const cleanup = await this.compactMigratedSource(oldWork, oldControl, directive.resetId);
     if (!cleanup.verified) {
       this.pendingMigration = {
         ...this.migrationStateFromReset({ record: directive }),
@@ -4194,6 +4052,8 @@ class OnlineWorldService {
     this.saveCache();
     this.work = newWork;
     this.control = newControl;
+    this.world = normalizeWorldState(cloneJson(draft.targetWorld));
+    bindWorldAuthority(this.world, this.control);
     this.restoreLedgerRuntimeState(draft.targetLedgerRuntime);
     this.mapFactsCache = null;
     this.pendingMigration = {
@@ -4233,97 +4093,13 @@ class OnlineWorldService {
 
   async exportMigrationDraftNow() {
     if (!this.isAuthority() || this.account().accountId !== this.work.authorAccountId) throw new Error("只有作品作者可以迁移游戏卡");
-    let oldWork = this.work;
-    let oldControl = this.control;
-    const sourceComments = await this.readAllCommentSources();
-    const sourceHistory = { comments: sourceComments, assembled: assembleCommentRecords(sourceComments) };
-    const existingReset = this.verifiedResets(sourceHistory.assembled.records, oldControl)[0];
+    const oldWork = this.work;
+    const oldControl = this.control;
+    if (!oldControl || !this.world || !this.isAuthority()) throw new Error("源服务器尚未完成权威校验");
     const draft = this.migrationDraft && String(this.migrationDraft.sourceWorkId || "") === String(oldWork.id)
       && String(this.migrationDraft.newWorkId || "")
       ? this.migrationDraft : null;
-    if (existingReset) {
-      const resetRecord = existingReset.record;
-      const resumableDraft = draft
-        && String(draft.newWorkId || "") === String(resetRecord.newWorkId || "")
-        && (!draft.resetId || String(draft.resetId) === String(resetRecord.resetId || ""))
-        ? draft : null;
-      const resumedNewWork = resumableDraft ? {
-        ...oldWork,
-        id: String(resumableDraft.newWorkId),
-        name: String(resumableDraft.targetName || oldWork.name),
-        description: String(resumableDraft.targetDescription || oldWork.description || ""),
-        url: String(resumableDraft.newWorkUrl || ""),
-        authorAccountId: this.account().accountId
-      } : null;
-      const resumedControl = resumableDraft ? cloneJson(resumableDraft.targetControl) : null;
-      if (!resumableDraft || !resumedControl?.id) {
-        this.pendingMigration = this.migrationStateFromReset(existingReset, {
-          redirectPublished: true,
-          requiresPublish: true,
-          cleanupPending: true,
-          importError: "本机缺少可验证的搬迁草稿，已保留旧服务器记录"
-        });
-        this.notify();
-        return { ...this.pendingMigration };
-      }
-      try {
-        await this.verifyMigrationTargetLedger(
-          resumableDraft,
-          resumedNewWork,
-          resumedControl,
-          oldWork,
-          oldControl,
-          { allowRepair: false }
-        );
-        resumableDraft.sourceFinalizedAfterReset = false;
-        const settled = await this.settleMigratedSource(
-          resumableDraft,
-          resumedNewWork,
-          resumedControl,
-          oldWork,
-          oldControl
-        );
-        if (!settled) throw new Error("源服务器在搬迁收尾期间仍有新记录");
-        await this.verifyMigrationTargetLedger(
-          resumableDraft,
-          resumedNewWork,
-          resumedControl,
-          oldWork,
-          oldControl,
-          { allowRepair: false }
-        );
-      } catch (error) {
-        this.pendingMigration = this.migrationStateFromReset(existingReset, {
-          redirectPublished: true,
-          requiresPublish: true,
-          cleanupPending: true,
-          importError: String(error?.message || error)
-        });
-        this.saveCache();
-        this.notify();
-        return { ...this.pendingMigration };
-      }
-      const cleanup = await this.compactMigratedSource(oldWork, oldControl, resetRecord.resetId, {
-        expectedSourceWatermark: resumableDraft.targetSourceWatermark
-      });
-      if (cleanup.verified && resumableDraft) {
-        this.migrationDraft = null;
-        this.saveCache();
-      }
-      this.pendingMigration = this.migrationStateFromReset(existingReset, {
-        redirectPublished: true,
-        requiresPublish: true,
-        cleanupPending: !cleanup.verified,
-        cleanup: { attempted: cleanup.attempted, deleted: cleanup.deleted, failures: cleanup.failures.slice(0, 20) }
-      });
-      this.notify();
-      return { ...this.pendingMigration };
-    }
-    await this.syncNow(true, { ignoreMigrationReset: true });
-    oldWork = this.work;
-    oldControl = this.control;
-    if (!oldControl || !this.world || !this.isAuthority()) throw new Error("源服务器最新账本尚未完成权威校验");
-    if (draft) return this.completeMigrationDraft(draft, sourceHistory, oldWork, oldControl);
+    if (draft) return this.completeMigrationDraft(draft, oldWork, oldControl);
     const exportedPayload = await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 });
     const exported = exportedConfig(exportedPayload);
     const exportJson = canonicalJson(exported);
@@ -4374,7 +4150,7 @@ class OnlineWorldService {
       resetIssuedAt: this.now()
     };
     this.saveCache();
-    return this.completeMigrationDraft(this.migrationDraft, sourceHistory, oldWork, oldControl);
+    return this.completeMigrationDraft(this.migrationDraft, oldWork, oldControl);
   }
 }
 

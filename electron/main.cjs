@@ -3579,9 +3579,6 @@ class AccountBackend {
 
   async followOnlineWorldMigrationChain(current, initialMigration, options = {}) {
     const sourceCard = current;
-    const migrationLocalState = options.migrationLocalState
-      || this.onlineWorldService.captureMigrationLocalState?.()
-      || null;
     const retiredWorkIds = new Set();
     const visited = new Set([String(current.companion?.workId || "")]);
     let migration = initialMigration;
@@ -3616,8 +3613,7 @@ class AccountBackend {
           card,
           displayName: options.displayName,
           orientation: options.orientation,
-          migrationProof: migration,
-          migrationLocalState
+          migrationProof: migration
         });
         const onward = next?.migration;
         if (onward?.workId && String(onward.workId) !== String(next?.work?.id || "")) {
@@ -3639,8 +3635,7 @@ class AccountBackend {
       await this.onlineWorldService.open({
         card: sourceCard,
         displayName: options.displayName,
-        orientation: options.orientation,
-        migrationLocalState
+        orientation: options.orientation
       }).catch(() => null);
       throw error;
     }

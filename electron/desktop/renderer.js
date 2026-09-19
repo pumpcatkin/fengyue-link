@@ -1372,7 +1372,7 @@ window.addEventListener("message",async event=>{
         replyResult({admin:true,state:next});toast("开服成功");return;
       }
       if(command.type==="migrate-server"){
-        if(!await confirmAction("将游戏迁移到新的作品地址？当前公共地图会保留，玩家将转入新地址。",{title:"搬迁服务器",acceptText:"开始搬迁"})){replyResult({cancelled:true});return}
+        if(!await confirmAction("将游戏迁移到新的作品地址并重新开服？旧地图与游戏进度会清空，所有玩家将自动转入新服务器。",{title:"搬迁服务器",acceptText:"搬迁并重启"})){replyResult({cancelled:true});return}
         const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
         replyResult({admin:true,migration:result});
         toast(result.cleanupPending?"新服务器已建立，旧记录仍在清理，请再次执行搬迁完成收尾":result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;

@@ -337,36 +337,6 @@ describe("online world migration regressions", () => {
     }
   });
 
-  it("does not create another target when the source history cannot be read", async () => {
-    const identity = generateOnlineWorldIdentity();
-    let targetCreates = 0;
-    const instance = new OnlineWorldService({
-      getAccount: () => ({ accountId: "author", username: "服主" }),
-      getIdentity: async () => identity,
-      getOrigin: () => "https://aigirlfriend.baby",
-      requestConsole: async (endpoint: string, options: any = {}) => {
-        if (endpoint === "/apps" && options.method === "POST") targetCreates += 1;
-        return { data: [] };
-      },
-      cacheFile: null,
-      onChange: () => {}
-    });
-    instance.work = { id: "old", name: "猎艳疆土", authorAccountId: "author" };
-    instance.control = {
-      id: "control", seasonId: "season", authorityAccountId: "author",
-      authoritySigningPublicKey: identity.signingPublicKey
-    };
-    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
-    instance.readAllCommentSources = vi.fn(async () => { throw new Error("fixture history unavailable"); });
-    try {
-      await expect(instance.exportMigrationDraft()).rejects.toThrow(/history unavailable/);
-      expect(targetCreates).toBe(0);
-      expect(instance.migrationDraft).toBeNull();
-    } finally {
-      instance.close();
-    }
-  });
-
   it("blocks an action that was waiting for sync when migration starts", async () => {
     const instance = new OnlineWorldService({
       getAccount: () => ({ accountId: "player", username: "玩家" }),
@@ -406,52 +376,6 @@ describe("online world migration regressions", () => {
       const comments = await instance.readAllCommentSources({ includeAllBranches: true });
       expect(comments.map((item: any) => item.id)).toEqual(["root", "reply"]);
       expect(instance.readCommentBranches).toHaveBeenCalledWith("root", expect.any(Number), expect.any(Object));
-    } finally {
-      instance.close();
-    }
-  });
-
-  it("re-publishes the target snapshot when the source watermark changes, then waits for quiescence", async () => {
-    const identity = generateOnlineWorldIdentity();
-    const instance = new OnlineWorldService({
-      getAccount: () => ({ accountId: "author", username: "服主" }),
-      getIdentity: async () => identity,
-      getOrigin: () => "https://aigirlfriend.baby",
-      requestConsole: async () => ({ data: [] }),
-      cacheFile: null,
-      onChange: () => {}
-    });
-    const oldWork = { id: "old", authorAccountId: "author" };
-    const newWork = { id: "new", authorAccountId: "author" };
-    const oldControl = { id: "old-control", seasonId: "season" };
-    const newControl = { id: "new-control", seasonId: "season" };
-    instance.work = oldWork;
-    instance.control = oldControl;
-    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
-    const draft: any = {
-      targetSourceWatermark: "stale",
-      sourceLedgerRuntime: instance.captureLedgerRuntimeState()
-    };
-    instance.syncNow = vi.fn(async () => instance.state());
-    instance.publishSnapshot = vi.fn(async () => ({ snapshotId: "fresh-snapshot" }));
-    instance.verifyMigrationTargetLedger = vi.fn(async () => ({ verified: true }));
-    instance.saveMigrationDraftForSource = vi.fn();
-    try {
-      await expect(instance.settleMigratedSource(
-        draft,
-        newWork,
-        newControl,
-        oldWork,
-        oldControl,
-        { rounds: 3, settleDelayMs: 0, quiescenceMs: 0 }
-      )).resolves.toBe(true);
-      expect(instance.publishSnapshot).toHaveBeenCalledTimes(1);
-      expect(instance.verifyMigrationTargetLedger).toHaveBeenCalledTimes(1);
-      expect(draft).toMatchObject({
-        targetSnapshotId: "fresh-snapshot",
-        targetLedgerInitialized: true,
-        sourceFinalizedAfterReset: true
-      });
     } finally {
       instance.close();
     }
@@ -598,68 +522,17 @@ describe("online world migration regressions", () => {
     }
   });
 
-  it("retains local private player state while changing the bound work", () => {
-    const instance = new OnlineWorldService({
-      getAccount: () => ({ accountId: "player" }),
-      requestConsole: async () => ({ ok: true }),
-      onChange: () => {}
-    });
-    const source = createWorld({ authorityAccountId: "author", seasonId: "season" });
-    source.players.player = {
-      accountId: "player",
-      displayName: "玩家",
-      gold: 321,
-      fieldArmySoldiers: 45,
-      carriedGeneralIds: ["general"],
-      position: { x: 3, y: 4 },
-      basePower: 300,
-      trainingLevel: 2,
-      power: 330
-    };
-    source.playerEpochs.player = 0;
-    source.privatePlayers.player = { materials: { cinnabar: 2 }, playerContext: { setting: "本地设定" } };
-    source.generals.general = { id: "general", name: "随将", holderAccountId: "player", status: "carried", power: 300 };
-    source.jobs.job = { id: "job", accountId: "player", type: "march" };
-    instance.world = source;
-    instance.localEvents = [{ id: "event", actorAccountId: "player" }];
-    instance.directHistory = [{ messageId: "letter", direction: "out" }];
-    instance.directInbox = [];
-    instance.seenDirectMessageIds.add("letter");
-    instance.localPreferences.playerContext = { setting: "本地设定" };
-    const carried = instance.captureMigrationLocalState();
-    instance.work = { id: "old", authorAccountId: "author" };
-    instance.world = null;
-    instance.loadCache = vi.fn(() => ({
-      localOverlay: carried.overlay,
-      localEvents: carried.localEvents,
-      localPreferences: carried.localPreferences,
-      directInbox: carried.directInbox,
-      directHistory: carried.directHistory,
-      seenDirectMessageIds: carried.seenDirectMessageIds,
-      pendingModelEffects: carried.pendingModelEffects
-    }));
-    const carriedFromTombstone = instance.captureMigrationLocalState();
-    expect(carriedFromTombstone.overlay.players.player.gold).toBe(321);
-
-    const target = createWorld({ authorityAccountId: "author", seasonId: "season" });
-    target.players.player = { accountId: "player", displayName: "玩家" };
-    target.playerEpochs.player = 0;
-    instance.world = target;
-    instance.localEvents = [];
-    instance.directHistory = [];
-    instance.seenDirectMessageIds.clear();
-    try {
-      expect(instance.restoreMigrationLocalState(carriedFromTombstone)).toBe(true);
-      expect(instance.world.players.player).toMatchObject({ gold: 321, fieldArmySoldiers: 45, position: { x: 3, y: 4 } });
-      expect(instance.world.privatePlayers.player.materials).toEqual({ cinnabar: 2 });
-      expect(instance.world.generals.general.name).toBe("随将");
-      expect(instance.world.jobs.job.type).toBe("march");
-      expect(instance.localEvents).toHaveLength(1);
-      expect(instance.directHistory[0].messageId).toBe("letter");
-      expect(instance.seenDirectMessageIds.has("letter")).toBe(true);
-    } finally {
-      instance.close();
-    }
+  it("starts the migrated server from a fresh world without carrying local player state", () => {
+    const service = fs.readFileSync(path.join(process.cwd(), "electron", "online-world-service.cjs"), "utf8");
+    const main = fs.readFileSync(path.join(process.cwd(), "electron", "main.cjs"), "utf8");
+    const complete = methodBody(service, "async completeMigrationDraft(", "async exportMigrationDraft(");
+    const follow = methodBody(main, "async followOnlineWorldMigrationChain(", "async migrateOnlineWorldCard(");
+    expect(complete).toContain("createWorld({");
+    expect(complete).toContain("draft.targetWorld");
+    expect(complete).not.toContain("settleMigratedSource");
+    expect(follow).not.toContain("migrationLocalState");
+    expect(service).not.toContain("captureMigrationLocalState");
+    expect(service).not.toContain("restoreMigrationLocalState");
   });
 
   it("resumes an interrupted migration draft without creating or publishing the target twice", async () => {
@@ -729,10 +602,6 @@ describe("online world migration regressions", () => {
         return { verified: true };
       });
       instance.syncNow = vi.fn(async () => instance.state());
-      instance.settleMigratedSource = vi.fn(async (draft: any) => {
-        draft.sourceFinalizedAfterReset = true;
-        return true;
-      });
       instance.compactMigratedSource = vi.fn(async () => ({
         attempted: 0, deleted: 0, failures: [], verified: true, remaining: []
       }));
@@ -886,10 +755,6 @@ describe("online world migration regressions", () => {
       return { verified: true };
     });
     instance.syncNow = vi.fn(async () => instance.state());
-    instance.settleMigratedSource = vi.fn(async (draft: any) => {
-      draft.sourceFinalizedAfterReset = true;
-      return true;
-    });
     instance.compactMigratedSource = vi.fn(async () => ({
       attempted: 0, deleted: 0, failures: [], verified: true, remaining: []
     }));

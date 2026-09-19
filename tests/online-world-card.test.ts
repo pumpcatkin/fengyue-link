@@ -114,6 +114,17 @@ describe("online world game cards", () => {
     expect(loaded.get(exported.cardId).packageSha256).toBe(exported.packageSha256);
   });
 
+  it("starts an external-only library empty and preserves cards imported later", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-external-card-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "cards.json");
+    expect(loadGameCardLibrary(file, null).size).toBe(0);
+
+    const imported = createBundledGridCard();
+    saveGameCardLibrary(file, new Map([[imported.cardId, imported]]));
+    expect(loadGameCardLibrary(file, null).get(imported.cardId)?.packageSha256).toBe(imported.packageSha256);
+  });
+
   it("normalizes the rotating aliases returned by the creation export endpoint", () => {
     const original = createBundledGridCard();
     const live = {

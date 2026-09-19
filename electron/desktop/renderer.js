@@ -709,15 +709,6 @@ function closeCardAuthorMenus(except = null){
 
 function selectOnlineWorldLibraryCard(card){
   selectedOnlineWorldCardId=card?.cardId||null;
-  const featured=document.querySelector("#online-world-featured");
-  const title=document.querySelector("#online-world-featured-title");
-  const mark=document.querySelector("#online-world-featured-mark");
-  const open=document.querySelector("#online-world-featured-open");
-  featured.dataset.cover=card?String(card.coverIndex):"";
-  featured.classList.toggle("empty",!card);
-  title.textContent=card?.title||"选择一个游戏";
-  mark.textContent=card?(ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游"):"游";
-  open.disabled=!card;
   document.querySelectorAll("[data-library-card-id]").forEach(element=>{
     const active=element.dataset.libraryCardId===selectedOnlineWorldCardId;
     element.classList.toggle("active",active);
@@ -1308,10 +1299,6 @@ document.querySelector("#online-world-import-card").addEventListener("click",()=
 document.querySelector("#online-world-search").addEventListener("input",event=>{
   onlineWorldSearchQuery=String(event.target.value||"").trim().toLocaleLowerCase();
   renderOnlineWorldCards();
-});
-document.querySelector("#online-world-featured-open").addEventListener("click",()=>{
-  const card=onlineWorldGalleryCards().find(item=>item.cardId===selectedOnlineWorldCardId);
-  if(card)showOnlineWorldDetails(card);
 });
 document.querySelector("#online-world-detail").addEventListener("click",event=>{if(event.target===event.currentTarget)closeOnlineWorldDetails()});
 document.addEventListener("click",event=>{if(!event.target.closest(".online-world-author-badge,.online-world-author-menu"))closeCardAuthorMenus()});

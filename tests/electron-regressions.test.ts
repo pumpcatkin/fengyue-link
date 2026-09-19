@@ -253,7 +253,9 @@ describe("Electron platform API regressions", () => {
     expect(html).toContain('id="online-world-library-grid"');
     expect(html).toContain('id="online-world-detail"');
     expect(html).toContain('id="online-world-profile"');
-    expect(html).toContain('id="online-world-detail-title">猎艳疆土');
+    expect(html).not.toContain("选择一个世界，和朋友继续冒险。");
+    expect(html).not.toContain('id="online-world-featured"');
+    expect(html).toContain('id="online-world-detail-title">游戏详情');
     expect(html).toContain('id="online-world-import-card"');
     expect(html).not.toContain('id="online-world-export-card"');
     expect(renderer).toContain("online-world-author-badge");
@@ -268,6 +270,9 @@ describe("Electron platform API regressions", () => {
     expect(preload).not.toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
     expect(preload).toContain('importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card")');
     expect(main).toContain('handleLocalIpc("online-world:list-cards"');
+    expect(main).toContain("loadGameCardLibrary(this.onlineWorldCardFile, null)");
+    expect(main).toContain("this.onlineWorldCards.delete(GRID_CARD_ID)");
+    expect(main).toContain("onlineWorldCardExternalizationPath(this.profileId)");
     expect(main).toContain('handleLocalIpc("online-world:import-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');
     expect(renderer).not.toContain("fyow:last-work-url");
@@ -846,7 +851,7 @@ describe("Electron platform API regressions", () => {
     expect(html).toContain('<small>关于</small>');
     expect(html).not.toContain('id="profile-label"');
     expect(html).toContain('id="online-world-library-list"');
-    expect(html).toContain('id="online-world-featured"');
+    expect(html).not.toContain('id="online-world-featured"');
     for (const key of ["homepage", "releasePost", "feedbackPost", "github"]) {
       expect(html).toContain(`data-author-link="${key}"`);
     }
@@ -867,7 +872,6 @@ describe("Electron platform API regressions", () => {
   it("keeps a self-contained, low-context authoring entry point for new multiplayer plugins", () => {
     const guide = readFileSync(new URL("../docs/plugin-authoring-guide.md", import.meta.url), "utf8");
     const handoff = readFileSync(new URL("../docs/project-handoff.md", import.meta.url), "utf8");
-    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
     expect(guide).toContain("runPlatformAutomationModel(appId, modelInput, label)");
     expect(guide).toContain("runConversationPluginStack()");
     expect(guide).toContain("normalizePluginSettings");
@@ -876,7 +880,7 @@ describe("Electron platform API regressions", () => {
     expect(guide).toContain("所有插件默认关闭");
     expect(guide).toContain("第二个正式插件加入前");
     expect(handoff).toContain("插件专项新对话只需先完整阅读 `docs/plugin-authoring-guide.md`");
-    expect(readme).toContain("docs/plugin-authoring-guide.md");
+    expect(existsSync(new URL("../README.md", import.meta.url))).toBe(false);
   });
 
   it("exposes the packaged app version and keeps the official installer identity stable", () => {

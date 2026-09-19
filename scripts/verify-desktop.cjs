@@ -104,7 +104,8 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`document.querySelector('.online-world-library-head h1').textContent`), "游戏库");
       assert.equal(await evaluate(`document.querySelectorAll('.online-world-card-tile').length`), 1);
       assert.equal(await evaluate(`document.querySelectorAll('.online-world-library-list-item').length`), 1);
-      assert.equal(await evaluate(`document.querySelector('#online-world-featured-title').textContent`), "猎艳疆土");
+      assert.equal(await evaluate(`document.querySelector('#online-world-featured')`), null);
+      assert.equal(await evaluate(`document.querySelector('#online-world-shelf-count').textContent`), "1 个游戏");
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-library-grid')).gridTemplateColumns.split(' ').length >= 4`), true);
       assert.equal(await evaluate(`document.querySelector('#online-world-detail').classList.contains('hidden')`), true);
       assert.equal(await evaluate(`document.querySelector('#online-world-export-card')`), null);

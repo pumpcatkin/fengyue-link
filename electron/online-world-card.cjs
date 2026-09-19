@@ -291,13 +291,14 @@ function summarizeGameCard(card) {
 }
 
 function loadGameCardLibrary(file, bundledCard = createBundledGridCard()) {
-  const cards = new Map([[bundledCard.cardId, bundledCard]]);
+  const cards = new Map();
+  if (bundledCard) cards.set(bundledCard.cardId, bundledCard);
   if (!file || !fs.existsSync(file)) return cards;
   const root = readJsonWithBackupSync(fs, file, item => item?.schema === CARD_LIBRARY_SCHEMA && Array.isArray(item.cards)).value;
   for (const value of root?.cards || []) {
     try {
       const card = validateGameCard(value);
-      if (card.cardId === bundledCard.cardId && Number(card.version || 0) < Number(bundledCard.version || 0)) continue;
+      if (bundledCard && card.cardId === bundledCard.cardId && Number(card.version || 0) < Number(bundledCard.version || 0)) continue;
       cards.set(card.cardId, card);
     } catch {}
   }

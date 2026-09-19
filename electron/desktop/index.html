@@ -61,7 +61,7 @@
     <section id="online-world-page" class="online-world-page hidden">
       <section id="online-world-setup" class="online-world-library">
         <header class="online-world-library-head">
-          <span><small>在线游戏世界</small><h1 id="online-world-title">游戏库</h1><p>选择一个世界，和朋友继续冒险。</p></span>
+          <span><small>在线游戏世界</small><h1 id="online-world-title">游戏库</h1></span>
           <div><button id="online-world-import-card" type="button">＋ 添加游戏</button><button id="online-world-back" type="button">返回主页</button></div>
         </header>
         <div class="online-world-library-shell">
@@ -71,10 +71,6 @@
             <div id="online-world-library-list" class="online-world-library-list" role="listbox" aria-label="我的游戏"></div>
           </aside>
           <main class="online-world-library-content">
-            <section id="online-world-featured" class="online-world-featured" aria-labelledby="online-world-featured-title">
-              <div class="online-world-featured-art" aria-hidden="true"><i id="online-world-featured-mark">游</i></div>
-              <div class="online-world-featured-copy"><small>精选游戏</small><h2 id="online-world-featured-title">选择一个游戏</h2><p>从左侧列表或下方游戏库中选择。</p><button id="online-world-featured-open" class="primary" type="button" disabled>开始游戏</button></div>
-            </section>
             <section class="online-world-shelf" aria-labelledby="online-world-shelf-title">
               <header><h2 id="online-world-shelf-title">全部游戏</h2><small id="online-world-shelf-count">0 个游戏</small></header>
               <div id="online-world-library-grid" class="online-world-library-grid" role="list" aria-label="已导入游戏卡"></div>
@@ -83,13 +79,13 @@
         </div>
         <div id="online-world-detail" class="online-world-detail hidden" role="dialog" aria-modal="true" aria-labelledby="online-world-detail-title">
           <form id="online-world-open-form" class="online-world-detail-card">
-            <h1 id="online-world-detail-title">猎艳疆土</h1>
+            <h1 id="online-world-detail-title">游戏详情</h1>
             <label>选择使用的角色设定<select id="online-world-profile" required></select></label>
             <button class="primary" id="online-world-open" type="submit">开始游戏</button>
           </form>
         </div>
       </section>
-      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" allow="autoplay" src="about:blank" title="猎艳疆土游戏前端"></iframe>
+      <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" allow="autoplay" src="about:blank" title="在线游戏世界前端"></iframe>
     </section>
     <div class="app-shell hidden" id="multiplayer-page">
       <aside class="sidebar">
@@ -319,7 +315,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.15.2</div>
+    <div id="app-version" aria-label="当前版本">v0.15.3</div>
     <div id="model-loading" class="model-loading hidden" role="status" aria-live="polite">
       <span class="model-loading-logo" aria-hidden="true">✦</span>
       <div><strong id="model-loading-title">正在生成</strong><small id="model-loading-detail"></small></div>

@@ -51,7 +51,7 @@ const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
-const { createBundledGridCard, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
+const { GRID_CARD_ID, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
 
@@ -229,6 +229,10 @@ function onlineWorldCachePath(profileId) {
 
 function onlineWorldCardLibraryPath(profileId) {
   return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.json`);
+}
+
+function onlineWorldCardExternalizationPath(profileId) {
+  return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.externalized-v1.json`);
 }
 
 function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
@@ -626,7 +630,12 @@ class AccountBackend {
     this.autoModelJobs = new Map();
     this.autoModelQueues = new Map();
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
-    this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, createBundledGridCard());
+    this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    const cardExternalizationMarker = onlineWorldCardExternalizationPath(this.profileId);
+    if (!fs.existsSync(cardExternalizationMarker)) {
+      if (this.onlineWorldCards.delete(GRID_CARD_ID)) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+      atomicWriteJsonSync(fs, cardExternalizationMarker, { version: 1, cardId: GRID_CARD_ID }, { pretty: true });
+    }
     this.onlineWorldService = new OnlineWorldService({
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),

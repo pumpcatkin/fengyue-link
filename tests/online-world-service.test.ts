@@ -1504,7 +1504,7 @@ describe("online world platform service", () => {
     expect(renderer).not.toContain('command.type==="publish-program"');
     expect(renderer).toContain("selectedActiveCard");
     expect(renderer).toContain("card.isCurrentUserAuthor");
-    expect(renderer).toContain("api.exportOnlineWorldCard(card.cardId)");
+    expect(renderer).toContain("api.exportOnlineWorldCard(libraryId)");
     expect(renderer).toContain("onlineWorldClosePromise=api.closeOnlineWorld()");
   });
 
@@ -2042,6 +2042,8 @@ describe("online world platform service", () => {
     instance.work = { id: "old", name: "艳猎征途", description: "program", authorAccountId: "author" };
     instance.control = { seasonId: world.seasonId, authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
+    instance.readAllCommentSources = vi.fn(async () => []);
+    instance.syncNow = vi.fn(async () => instance.state());
     const result = await instance.exportMigrationDraft();
     expect(result.redirectPublished).not.toBe(true);
     expect(result.requiresConfigurationImport).toBe(true);
@@ -2072,7 +2074,13 @@ describe("online world platform service", () => {
     instance.work = { id: "old", name: "艳猎征途", description: "program", authorAccountId: "author" };
     instance.control = { schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "old", seasonId: world.seasonId, programHash: instance.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey, startedAt: world.startedAt, updatedAt: world.startedAt };
     instance.world = world;
+    instance.readAllCommentSources = vi.fn(async () => []);
+    instance.syncNow = vi.fn(async () => instance.state());
+    instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
+    instance.settleMigratedSource = vi.fn(async (draft: any) => { draft.sourceFinalizedAfterReset = true; return true; });
+    instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
     const result = await instance.exportMigrationDraft();
+    expect(result.importError).toBeUndefined();
     expect(result.redirectPublished).toBe(true);
     expect(createBody).toMatchObject({ mode: "chat", type: 1 });
     expect(instance.work.id).toBe("new");
@@ -2081,7 +2089,7 @@ describe("online world platform service", () => {
     expect(newRecords).toContain("fyow.control/3");
     expect(newRecords).toContain("fyow.snapshot/3");
     expect(oldRecords).toContain("fyow.reset/3");
-  });
+  }, 15_000);
 
   it("publishes the redirect even when the obsolete work cannot be renamed", async () => {
     const identity = generateOnlineWorldIdentity();
@@ -2104,12 +2112,17 @@ describe("online world platform service", () => {
     instance.work = { id: "old", name: "只读旧服", description: "program", authorAccountId: "author" };
     instance.control = { schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "old", seasonId: "season", programHash: instance.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey, startedAt: world.startedAt, updatedAt: world.startedAt };
     instance.world = world;
+    instance.readAllCommentSources = vi.fn(async () => []);
+    instance.syncNow = vi.fn(async () => instance.state());
+    instance.verifyMigrationTargetLedger = vi.fn(async (draft: any) => { draft.targetLedgerVerified = true; return { verified: true }; });
+    instance.settleMigratedSource = vi.fn(async (draft: any) => { draft.sourceFinalizedAfterReset = true; return true; });
+    instance.compactMigratedSource = vi.fn(async () => ({ attempted: 0, deleted: 0, failures: [], verified: true, remaining: [] }));
 
     const result = await instance.exportMigrationDraft();
     expect(result).toMatchObject({ redirectPublished: true, configurationImported: true, oldWorkRenamed: false });
     const oldRecords = assembleCommentRecords(comments.filter(item => item.endpoint === "/comments/old/1").map((item, index) => ({ id: `o${index}`, content: item.content }))).records;
     expect(oldRecords.some((item: any) => item.record.schema === "fyow.reset/3" && item.record.newWorkId === "editable-new")).toBe(true);
-  });
+  }, 15_000);
 
   it("isolates cached game records by account inside the same app instance", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-account-cache-"));

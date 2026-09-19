@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
 const { createBundledGridCard, configurationDigest, normalizeConfiguration, rebindGameCard } = require("../electron/online-world-card.cjs");
-const { FYOW_SCHEMAS, canonicalJson, createResetDirective, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
+const { FYOW_SCHEMAS, canonicalJson, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { parseProgram } = require("../electron/online-world-runtime.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
@@ -780,6 +780,10 @@ async function main() {
       try {
         const opened = await service.open({ card, displayName: username, orientation: "any" });
         if (!opened.initialized || !opened.isAuthority) throw new Error("当前账号或设备不是来源服务器的服主");
+        service.migrationActive = true;
+        await Promise.allSettled([service.syncInFlight, service.intentInFlight, service.joinInFlight].filter(Boolean));
+        await service.syncNow(true, { ignoreMigrationReset: true });
+        if (!service.control || !service.world || !service.isAuthority()) throw new Error("来源服务器最新账本尚未完成权威校验");
         const identity = await service.getIdentity();
         const oldWork = service.work;
         const oldControl = service.control;
@@ -794,26 +798,59 @@ async function main() {
           url: `${ORIGIN}/zh/explore/installed/${encodeURIComponent(targetWorkId)}`,
           authorAccountId: accountId
         };
-        const newControlUnsigned = { ...oldControl, id: crypto.randomUUID(), workId: targetWorkId, programHash: bundledCard.program.digest, updatedAt: service.now() };
+        const migrationId = crypto.randomUUID();
+        const newControlUnsigned = {
+          ...oldControl,
+          id: crypto.randomUUID(),
+          workId: targetWorkId,
+          programHash: bundledCard.program.digest,
+          migrationId,
+          migrationSourceWorkId: oldWork.id,
+          updatedAt: service.now()
+        };
         delete newControlUnsigned.signature;
         const newControl = signRecord(newControlUnsigned, identity.signingPrivateKey);
-        service.work = newWork;
-        service.control = newControl;
-        await service.postRecord(newControl);
-        await service.publishSnapshot();
-        service.work = oldWork;
-        service.control = oldControl;
-        const reset = signRecord(createResetDirective({
-          gameId: oldControl.gameId,
-          seasonId: oldControl.seasonId,
-          oldWorkId: oldWork.id,
+        service.migrationDraft = {
+          migrationId,
+          sourceWorkId: oldWork.id,
+          sourceControlId: oldControl.id,
+          sourceSeasonId: oldControl.seasonId,
+          sourceProgramHash: oldControl.programHash,
+          sourceLedgerRuntime: service.captureLedgerRuntimeState(),
           newWorkId: targetWorkId,
           newWorkUrl: newWork.url,
+          targetName: newWork.name,
+          targetDescription: newWork.description,
           exportSha256,
-          issuedAt: service.now()
-        }), identity.signingPrivateKey);
-        await service.postRecord(reset);
-        process.stdout.write(`${JSON.stringify({ ok: true, fromWorkId: oldWork.id, workId: targetWorkId, url: newWork.url, controlId: newControl.id, resetId: reset.resetId, programDigest: bundledCard.program.digest }, null, 2)}\n`);
+          configurationImported: true,
+          oldWorkRenameAttempted: true,
+          oldWorkRenamed: false,
+          targetControl: newControl,
+          targetControlPosted: false,
+          targetSnapshot: null,
+          targetSnapshotId: "",
+          targetLedgerInitialized: false,
+          targetLedgerVerified: false,
+          targetSourceWatermark: "",
+          sourceFinalizedAfterReset: false,
+          resetPublished: false,
+          resetId: crypto.randomUUID(),
+          resetIssuedAt: service.now()
+        };
+        const migration = await service.completeMigrationDraft(service.migrationDraft, null, oldWork, oldControl);
+        const complete = migration?.redirectPublished === true
+          && migration?.targetLedgerVerified === true
+          && migration?.cleanupPending === false
+          && migration?.requiresPublish !== true
+          && migration?.requiresConfigurationImport !== true
+          && String(migration?.workId || "") === targetWorkId;
+        if (!complete) {
+          const detail = migration?.importError
+            || migration?.cleanup?.failures?.[0]?.error
+            || "目标账本、源服稳定水位或旧评论清理尚未完成";
+          throw new Error(`搬迁未完成：${detail}`);
+        }
+        process.stdout.write(`${JSON.stringify({ ok: true, fromWorkId: oldWork.id, workId: targetWorkId, url: newWork.url, controlId: newControl.id, resetId: migration.resetId, programDigest: bundledCard.program.digest, cleanup: migration.cleanup }, null, 2)}\n`);
       } finally {
         service.close();
       }

@@ -677,7 +677,8 @@ function renderOnlineWorldProfileChoices(){
   const select=document.querySelector("#online-world-profile");
   if(!select)return;
   const items=state?.characterProfiles?.items||[];
-  const selectedActiveCard=selectedOnlineWorldCardId===onlineWorldState?.card?.cardId;
+  const selectedActiveCard=selectedOnlineWorldCardId===onlineWorldState?.card?.libraryId
+    || (!onlineWorldState?.card?.libraryId && selectedOnlineWorldCardId===onlineWorldState?.card?.cardId);
   const previous=(selectedActiveCard?onlineWorldState?.localPreferences?.characterProfileId:null)||onlineWorldEnteredProfileId||select.value||state?.characterProfiles?.selectedId;
   select.replaceChildren();
   if(!items.length){
@@ -708,7 +709,7 @@ function closeCardAuthorMenus(except = null){
 }
 
 function selectOnlineWorldLibraryCard(card){
-  selectedOnlineWorldCardId=card?.cardId||null;
+  selectedOnlineWorldCardId=card?.libraryId||card?.cardId||null;
   document.querySelectorAll("[data-library-card-id]").forEach(element=>{
     const active=element.dataset.libraryCardId===selectedOnlineWorldCardId;
     element.classList.toggle("active",active);
@@ -725,17 +726,19 @@ function onlineWorldCardMatchesSearch(card){
 function renderOnlineWorldCards(library={}){
   library=library||{};
   onlineWorldCards=Array.isArray(library.cards)?library.cards:onlineWorldCards;
-  if(library.activeCardId&&onlineWorldCards.some(card=>card.cardId===library.activeCardId))selectedOnlineWorldCardId=library.activeCardId;
+  const activeLibraryId=library.activeLibraryId||library.activeCardId;
+  if(activeLibraryId&&onlineWorldCards.some(card=>(card.libraryId||card.cardId)===activeLibraryId))selectedOnlineWorldCardId=activeLibraryId;
   const cards=onlineWorldGalleryCards();
-  if(!cards.some(card=>card.cardId===selectedOnlineWorldCardId))selectedOnlineWorldCardId=cards[0]?.cardId||null;
+  if(!cards.some(card=>(card.libraryId||card.cardId)===selectedOnlineWorldCardId))selectedOnlineWorldCardId=cards[0]?.libraryId||cards[0]?.cardId||null;
   const grid=document.querySelector("#online-world-library-grid");
   const list=document.querySelector("#online-world-library-list");
   grid.replaceChildren();list.replaceChildren();
   const visibleCards=cards.filter(onlineWorldCardMatchesSearch);
   for(const card of visibleCards){
     const listButton=document.createElement("button");
-    listButton.type="button";listButton.className="online-world-library-list-item";listButton.dataset.libraryCardId=card.cardId;listButton.dataset.cover=String(card.coverIndex);
-    listButton.setAttribute("role","option");listButton.setAttribute("aria-selected",String(card.cardId===selectedOnlineWorldCardId));
+    const libraryId=card.libraryId||card.cardId;
+    listButton.type="button";listButton.className="online-world-library-list-item";listButton.dataset.libraryCardId=libraryId;listButton.dataset.cover=String(card.coverIndex);
+    listButton.setAttribute("role","option");listButton.setAttribute("aria-selected",String(libraryId===selectedOnlineWorldCardId));
     const listMark=document.createElement("i");listMark.textContent=ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游";
     const listCopy=document.createElement("span");const listTitle=document.createElement("b");listTitle.textContent=card.title;
     const listState=document.createElement("small");listState.textContent=card.isCurrentUserAuthor?"我的作品":"已添加";
@@ -744,7 +747,7 @@ function renderOnlineWorldCards(library={}){
 
     const item=document.createElement("article");item.className="online-world-card";item.setAttribute("role","listitem");
     const button=document.createElement("button");
-    button.type="button";button.className="online-world-card-tile";button.dataset.cardId=card.cardId;button.dataset.libraryCardId=card.cardId;button.dataset.cover=String(card.coverIndex);button.setAttribute("aria-label",`查看《${card.title}》`);
+    button.type="button";button.className="online-world-card-tile";button.dataset.cardId=card.cardId;button.dataset.libraryCardId=libraryId;button.dataset.cover=String(card.coverIndex);button.setAttribute("aria-label",`查看《${card.title}》`);
     const cover=document.createElement("span");cover.className="online-world-cover";
     const mark=document.createElement("i");mark.className="online-world-cover-mark";mark.textContent=ONLINE_WORLD_COVER_MARKS[card.coverIndex]||"游";
     const series=document.createElement("small");series.textContent="ONLINE GAME WORLD";
@@ -760,7 +763,7 @@ function renderOnlineWorldCards(library={}){
       const exportButton=document.createElement("button");exportButton.type="button";exportButton.textContent="导出游戏卡";exportButton.setAttribute("role","menuitem");
       exportButton.addEventListener("click",()=>invoke(async()=>{
         exportButton.disabled=true;
-        try{const result=await api.exportOnlineWorldCard(card.cardId);if(!result.canceled)toast(`《${card.title}》已导出`)}
+        try{const result=await api.exportOnlineWorldCard(libraryId);if(!result.canceled)toast(`《${card.title}》已导出`)}
         finally{exportButton.disabled=false;closeCardAuthorMenus();badge.focus()}
       }).catch(()=>{}));
       menu.append(heading,exportButton);
@@ -779,7 +782,7 @@ function renderOnlineWorldCards(library={}){
   document.querySelector("#online-world-count").textContent=String(cards.length);
   document.querySelector("#online-world-shelf-count").textContent=onlineWorldSearchQuery?`${visibleCards.length} / ${cards.length} 个游戏`:`${cards.length} 个游戏`;
   document.querySelector("#online-world-title").textContent="游戏库";
-  selectOnlineWorldLibraryCard(cards.find(card=>card.cardId===selectedOnlineWorldCardId)||cards[0]||null);
+  selectOnlineWorldLibraryCard(cards.find(card=>(card.libraryId||card.cardId)===selectedOnlineWorldCardId)||cards[0]||null);
 }
 
 function unloadOnlineWorldProgram(){
@@ -814,6 +817,7 @@ function followOnlineWorldMigration(next){
     if(onlineWorldMigrationRetryTimer){clearTimeout(onlineWorldMigrationRetryTimer);onlineWorldMigrationRetryTimer=null}
     return;
   }
+  if(migration.requiresPublish||migration.cleanupPending){onlineWorldMigrationTarget=null;return}
   if(onlineWorldInLibrary){onlineWorldMigrationTarget=null;return}
   if(onlineWorldMigrationTarget===migration.workId)return;
   const wait=Math.max(0,onlineWorldMigrationRetryAt-Date.now());
@@ -1310,7 +1314,7 @@ document.querySelector("#online-world-back").addEventListener("click",async()=>{
 });
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();
-  const card=onlineWorldGalleryCards().find(item=>item.cardId===selectedOnlineWorldCardId);
+  const card=onlineWorldGalleryCards().find(item=>(item.libraryId||item.cardId)===selectedOnlineWorldCardId);
   const profile=selectedOnlineWorldProfile();
   if(!card||!profile){toast("请先选择游戏卡和角色设定");return}
   if(card.demo){toast("这张展示游戏卡尚未附带可运行程序");return}
@@ -1319,9 +1323,10 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
   renderOnlineWorldProfileChoices();
   try{
     await onlineWorldClosePromise;
-    const next=await api.openOnlineWorld({cardId:card.cardId,characterProfileId:profile.id,displayName:profile.displayName||state?.account?.username||"玩家",orientation:"any"});
+    const next=await api.openOnlineWorld({libraryId:card.libraryId||card.cardId,characterProfileId:profile.id,displayName:profile.displayName||state?.account?.username||"玩家",orientation:"any"});
     closeOnlineWorldDetails();
-    onlineWorldInLibrary=!next?.initialized&&!next?.isServerOwner;renderOnlineWorld(next);
+    const migrating=Boolean(next?.migration?.workId&&next.migration.workId!==next?.work?.id);
+    onlineWorldInLibrary=!next?.initialized&&!next?.isServerOwner&&!migrating;renderOnlineWorld(next);
     if(onlineWorldInLibrary){await returnToOnlineWorldLibrary();toast("游戏尚未开服，请稍后再来")}
   }catch(error){onlineWorldEnteredProfileId=null;await returnToOnlineWorldLibrary();toast(friendlyError(error))}
   finally{button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
@@ -1370,7 +1375,7 @@ window.addEventListener("message",async event=>{
         if(!await confirmAction("将游戏迁移到新的作品地址？当前公共地图会保留，玩家将转入新地址。",{title:"搬迁服务器",acceptText:"开始搬迁"})){replyResult({cancelled:true});return}
         const result=await api.migrateOnlineWorld();await api.copyText(result.url);renderOnlineWorld(await api.getOnlineWorldState());
         replyResult({admin:true,migration:result});
-        toast(result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
+        toast(result.cleanupPending?"新服务器已建立，旧记录仍在清理，请再次执行搬迁完成收尾":result.redirectPublished?"迁移完成，新作品地址已复制":"迁移草稿已建立，地址已复制");return;
       }
       if(command.type==="scatter-treasures"){
         const count=Number(command.count??240),redAscend=Number(command.redAscend??0),redReroll=Number(command.redReroll??0);

@@ -264,6 +264,7 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain('event.source!==onlineWorldFrame.contentWindow');
     expect(renderer).toContain("onlineWorldMigrationRetryAt=Date.now()+delay");
     expect(renderer).toContain("followOnlineWorldMigration(onlineWorldState)");
+    expect(renderer).toContain("!next?.initialized&&!next?.isServerOwner&&!migrating");
     expect(renderer).toContain("游戏卡迁移地址暂时不可用，将自动重试");
     expect(renderer).not.toContain('ONLINE_WORLD_SHOWCASE_TITLES');
     expect(renderer).toContain('className="online-world-card-tile"');
@@ -272,7 +273,7 @@ describe("Electron platform API regressions", () => {
     expect(preload).toContain('importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card")');
     expect(main).toContain('handleLocalIpc("online-world:list-cards"');
     expect(main).toContain("loadGameCardLibrary(this.onlineWorldCardFile, null)");
-    expect(main).toContain("this.onlineWorldCards.delete(GRID_CARD_ID)");
+    expect(main).toContain("Map.prototype.delete.call(this.onlineWorldCards, GRID_CARD_ID)");
     expect(main).toContain("onlineWorldCardExternalizationPath(this.profileId)");
     expect(main).toContain('handleLocalIpc("online-world:import-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');

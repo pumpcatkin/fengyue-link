@@ -274,9 +274,21 @@ function rebindGameCard(card, workId, origin = null) {
   });
 }
 
-function summarizeGameCard(card) {
+function gameCardLibraryKey(cardOrCardId, workId = null) {
+  const cardId = typeof cardOrCardId === "object" && cardOrCardId !== null
+    ? String(cardOrCardId.cardId || "")
+    : String(cardOrCardId || "");
+  const boundWorkId = typeof cardOrCardId === "object" && cardOrCardId !== null
+    ? String(cardOrCardId.companion?.workId || "")
+    : String(workId || "");
+  if (!cardId || !boundWorkId) throw new Error("游戏卡缺少本地索引绑定");
+  return `${cardId}::${boundWorkId}`;
+}
+
+function summarizeGameCard(card, libraryId = null) {
   return {
     cardId: card.cardId,
+    libraryId: String(libraryId || gameCardLibraryKey(card)),
     gameId: card.gameId,
     title: card.title,
     version: card.version,
@@ -290,23 +302,54 @@ function summarizeGameCard(card) {
   };
 }
 
+class GameCardLibrary extends Map {
+  get(key) {
+    const direct = super.get(key);
+    if (direct) return direct;
+    const requested = String(key || "");
+    if (!requested || requested.includes("::")) return undefined;
+    const matches = [...super.values()].filter(card => String(card?.cardId || "") === requested);
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  has(key) {
+    if (super.has(key)) return true;
+    const requested = String(key || "");
+    return Boolean(requested && !requested.includes("::") && [...super.values()].filter(card => String(card?.cardId || "") === requested).length === 1);
+  }
+
+  delete(key) {
+    if (super.delete(key)) return true;
+    const requested = String(key || "");
+    if (!requested || requested.includes("::")) return false;
+    const matches = [...super.entries()].filter(([, card]) => String(card?.cardId || "") === requested);
+    return matches.length === 1 ? super.delete(matches[0][0]) : false;
+  }
+}
+
 function loadGameCardLibrary(file, bundledCard = createBundledGridCard()) {
-  const cards = new Map();
-  if (bundledCard) cards.set(bundledCard.cardId, bundledCard);
+  const cards = new GameCardLibrary();
+  if (bundledCard) cards.set(gameCardLibraryKey(bundledCard), bundledCard);
   if (!file || !fs.existsSync(file)) return cards;
   const root = readJsonWithBackupSync(fs, file, item => item?.schema === CARD_LIBRARY_SCHEMA && Array.isArray(item.cards)).value;
   for (const value of root?.cards || []) {
     try {
       const card = validateGameCard(value);
-      if (bundledCard && card.cardId === bundledCard.cardId && Number(card.version || 0) < Number(bundledCard.version || 0)) continue;
-      cards.set(card.cardId, card);
+      if (bundledCard && card.cardId === bundledCard.cardId
+        && card.companion.workId === bundledCard.companion.workId
+        && Number(card.version || 0) < Number(bundledCard.version || 0)) continue;
+      cards.set(gameCardLibraryKey(card), card);
     } catch {}
   }
   return cards;
 }
 
 function saveGameCardLibrary(file, cards) {
-  atomicWriteJsonSync(fs, file, { schema: CARD_LIBRARY_SCHEMA, cards: [...cards.values()] }, { pretty: true });
+  const values = new Map();
+  for (const card of cards?.values?.() || []) {
+    try { values.set(gameCardLibraryKey(card), validateGameCard(card)); } catch {}
+  }
+  atomicWriteJsonSync(fs, file, { schema: CARD_LIBRARY_SCHEMA, cards: [...values.values()] }, { pretty: true });
 }
 
 module.exports = {
@@ -327,6 +370,7 @@ module.exports = {
   validateGameCard,
   createExportedGameCard,
   rebindGameCard,
+  gameCardLibraryKey,
   summarizeGameCard,
   loadGameCardLibrary,
   saveGameCardLibrary

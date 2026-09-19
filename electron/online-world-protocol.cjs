@@ -282,17 +282,42 @@ function verifySignedRecord(record, publicKey) {
   } catch { return false; }
 }
 
-function createResetDirective({ gameId, seasonId, oldWorkId, newWorkId, newWorkUrl, exportSha256, issuedAt = Date.now(), resetId = crypto.randomUUID() }) {
+function createResetDirective({
+  gameId,
+  seasonId,
+  oldWorkId,
+  newWorkId,
+  newWorkUrl,
+  exportSha256,
+  issuedAt = Date.now(),
+  resetId = crypto.randomUUID(),
+  migrationId = resetId,
+  authorityAccountId = "",
+  authoritySigningPublicKey = "",
+  sourceControlId = "",
+  sourceProgramHash = "",
+  targetProgramHash = "",
+  targetControlId = "",
+  targetSnapshotId = ""
+}) {
   return {
     schema: FYOW_SCHEMAS.reset,
     resetId,
+    migrationId: String(migrationId || resetId),
     gameId: String(gameId),
     seasonId: String(seasonId),
     oldWorkId: String(oldWorkId),
     newWorkId: String(newWorkId),
     newWorkUrl: String(newWorkUrl),
     exportSha256: String(exportSha256),
-    issuedAt: Number(issuedAt)
+    issuedAt: Number(issuedAt),
+    ...(authorityAccountId ? { authorityAccountId: String(authorityAccountId) } : {}),
+    ...(authoritySigningPublicKey ? { authoritySigningPublicKey: String(authoritySigningPublicKey) } : {}),
+    ...(sourceControlId ? { sourceControlId: String(sourceControlId) } : {}),
+    ...(sourceProgramHash ? { sourceProgramHash: String(sourceProgramHash) } : {}),
+    ...(targetProgramHash ? { targetProgramHash: String(targetProgramHash) } : {}),
+    ...(targetControlId ? { targetControlId: String(targetControlId) } : {}),
+    ...(targetSnapshotId ? { targetSnapshotId: String(targetSnapshotId) } : {})
   };
 }
 

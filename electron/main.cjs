@@ -51,7 +51,7 @@ const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
-const { GRID_CARD_ID, validateGameCard, summarizeGameCard, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
+const { GRID_CARD_ID, GRID_COMPANION_WORK_ID, validateGameCard, summarizeGameCard, gameCardLibraryKey, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
 
@@ -633,7 +633,20 @@ class AccountBackend {
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
     const cardExternalizationMarker = onlineWorldCardExternalizationPath(this.profileId);
     if (!fs.existsSync(cardExternalizationMarker)) {
-      if (this.onlineWorldCards.delete(GRID_CARD_ID)) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+      // 0.15.3 shipped the official card inside the app. Remove only that
+      // legacy bundled binding; imported cards for other servers share the
+      // same cardId and must remain in the library.
+      // Bypass the compatibility lookup by cardId here: a lone migrated
+      // card with the same cardId must not be mistaken for the old bundled
+      // entry.
+      let removedBundledCard = Map.prototype.delete.call(this.onlineWorldCards, GRID_CARD_ID);
+      for (const [libraryId, card] of this.onlineWorldCards) {
+        if (card?.cardId === GRID_CARD_ID && card?.companion?.workId === GRID_COMPANION_WORK_ID) {
+          this.onlineWorldCards.delete(libraryId);
+          removedBundledCard = true;
+        }
+      }
+      if (removedBundledCard) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
       atomicWriteJsonSync(fs, cardExternalizationMarker, { version: 1, cardId: GRID_CARD_ID }, { pretty: true });
     }
     this.onlineWorldService = new OnlineWorldService({
@@ -3481,31 +3494,39 @@ class AccountBackend {
   }
 
   async listOnlineWorldCards() {
-    const entries = [...this.onlineWorldCards.values()];
-    const cards = entries.map(card => ({ ...summarizeGameCard(card), isCurrentUserAuthor: false }));
+    const entries = [...this.onlineWorldCards.entries()];
+    const cards = entries.map(([libraryId, card]) => ({ ...summarizeGameCard(card, libraryId), isCurrentUserAuthor: false }));
     let index = 0;
     await Promise.all(Array.from({ length: Math.min(3, cards.length) }, async () => {
       for (;;) {
         const current = index++;
         if (current >= cards.length) return;
-        cards[current].isCurrentUserAuthor = await this.onlineWorldService.isGameCardAuthor(entries[current]).catch(() => false);
+        cards[current].isCurrentUserAuthor = await this.onlineWorldService.isGameCardAuthor(entries[current][1]).catch(() => false);
       }
     }));
     return {
       cards,
-      activeCardId: this.onlineWorldService?.card?.cardId || null
+      activeCardId: this.onlineWorldService?.card?.cardId || null,
+      activeLibraryId: this.onlineWorldService?.card ? gameCardLibraryKey(this.onlineWorldService.card) : null
     };
   }
 
-  onlineWorldCard(cardId) {
+  onlineWorldCard(cardId, workId = null) {
     const requested = String(cardId || "");
-    const card = this.onlineWorldCards.get(requested) || (requested ? null : this.onlineWorldCards.values().next().value);
+    const composite = requested && workId ? `${requested}::${String(workId)}` : requested;
+    let card = this.onlineWorldCards.get(composite);
+    if (!card && requested) {
+      // Accept the old cardId-only IPC payload while it is unambiguous.
+      const matches = [...this.onlineWorldCards.values()].filter(item => item.cardId === requested);
+      if (matches.length === 1) card = matches[0];
+    }
+    if (!card && !requested) card = this.onlineWorldCards.values().next().value;
     if (!card) throw new Error("这张游戏卡尚未导入");
     return card;
   }
 
   async openOnlineWorldCard(options = {}) {
-    const card = this.onlineWorldCard(options.cardId);
+    const card = this.onlineWorldCard(options.libraryId || options.cardId, options.libraryId ? null : options.workId);
     return this.onlineWorldService.open({
       card,
       displayName: options.displayName,
@@ -3524,15 +3545,18 @@ class AccountBackend {
     const size = fs.statSync(file).size;
     if (size > 8 * 1024 * 1024) throw new Error("游戏卡文件超过 8 MiB 上限");
     const card = validateGameCard(JSON.parse(fs.readFileSync(file, "utf8")));
-    this.onlineWorldCards.set(card.cardId, card);
+    this.onlineWorldCards.set(gameCardLibraryKey(card), card);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     return { canceled: false, imported: summarizeGameCard(card), ...await this.listOnlineWorldCards() };
   }
 
-  async exportOnlineWorldCard(cardId) {
-    if (!cardId) throw new Error("请从作者标识中选择要导出的游戏卡");
-    const card = await this.onlineWorldService.exportGameCard(this.onlineWorldCard(cardId));
-    this.onlineWorldCards.set(card.cardId, card);
+  async exportOnlineWorldCard(libraryId) {
+    if (!libraryId) throw new Error("请从作者标识中选择要导出的游戏卡");
+    const current = this.onlineWorldCard(libraryId);
+    const card = await this.onlineWorldService.exportGameCard(current);
+    const previousLibraryId = gameCardLibraryKey(current);
+    this.onlineWorldCards.delete(previousLibraryId);
+    this.onlineWorldCards.set(gameCardLibraryKey(card), card);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     const safeName = String(card.title || "online-world").replace(/[<>:\"/\\|?*\x00-\x1f]/g, "-").slice(0, 60) || "online-world";
     const selected = await dialog.showSaveDialog(this.window, {
@@ -3546,22 +3570,91 @@ class AccountBackend {
   }
 
   async followOnlineWorldMigration(options = {}) {
-    const migration = this.onlineWorldService?.pendingMigration;
     const current = this.onlineWorldService?.card;
-    if (!current || !migration?.workId || migration.workId === this.onlineWorldService?.work?.id) return this.onlineWorldService.state();
-    const card = rebindGameCard(current, migration.workId, this.origin);
-    this.onlineWorldCards.set(card.cardId, card);
+    const migration = this.onlineWorldService?.pendingMigration;
+    if (!current || !migration?.workId || migration.requiresPublish || migration.cleanupPending
+      || migration.workId === this.onlineWorldService?.work?.id) return this.onlineWorldService.state();
+    return this.followOnlineWorldMigrationChain(current, migration, options);
+  }
+
+  async followOnlineWorldMigrationChain(current, initialMigration, options = {}) {
+    const sourceCard = current;
+    const migrationLocalState = options.migrationLocalState
+      || this.onlineWorldService.captureMigrationLocalState?.()
+      || null;
+    const retiredWorkIds = new Set();
+    const visited = new Set([String(current.companion?.workId || "")]);
+    let migration = initialMigration;
+    let card = current;
+    let next = null;
+    try {
+      for (let hop = 0; hop < 16; hop += 1) {
+        const targetWorkId = String(migration?.workId || "");
+        if (!targetWorkId) throw new Error("迁移指针缺少目标作品编号");
+        if (visited.has(targetWorkId)) throw new Error("迁移指针形成循环");
+        visited.add(targetWorkId);
+        if (migration.sourceWorkId) retiredWorkIds.add(String(migration.sourceWorkId));
+        const reboundCard = rebindGameCard(card, targetWorkId, this.origin);
+        const targetLibraryId = gameCardLibraryKey(reboundCard);
+        const storedTargetCard = this.onlineWorldCards.get(targetLibraryId);
+        card = reboundCard;
+        if (storedTargetCard) {
+          try {
+            const validatedTargetCard = validateGameCard(storedTargetCard);
+            const sameBinding = validatedTargetCard.cardId === reboundCard.cardId
+              && validatedTargetCard.gameId === reboundCard.gameId
+              && validatedTargetCard.companion.workId === targetWorkId
+              && validatedTargetCard.companion.authorAccountId === reboundCard.companion.authorAccountId
+              && validatedTargetCard.companion.origin === reboundCard.companion.origin;
+            if (sameBinding && Number(validatedTargetCard.version || 0) >= Number(reboundCard.version || 0)) {
+              card = validatedTargetCard;
+            }
+          } catch {}
+        }
+        next = await this.onlineWorldService.open({
+          card,
+          displayName: options.displayName,
+          orientation: options.orientation,
+          migrationProof: migration,
+          migrationLocalState
+        });
+        const onward = next?.migration;
+        if (onward?.workId && String(onward.workId) !== String(next?.work?.id || "")) {
+          migration = onward;
+          continue;
+        }
+        if (!next?.initialized) throw new Error("迁移目标尚未完成服务器校验");
+        break;
+      }
+      if (!next?.initialized) throw new Error("迁移链超过最大跳转次数");
+    } catch (error) {
+      // Keep the old card as the durable entry point. Re-opening it restores
+      // the signed tombstone state so a transient target failure is retryable.
+      await this.onlineWorldService.open({
+        card: sourceCard,
+        displayName: options.displayName,
+        orientation: options.orientation,
+        migrationLocalState
+      }).catch(() => null);
+      throw error;
+    }
+    const migratedCard = this.onlineWorldService.card || card;
+    this.onlineWorldCards.delete(gameCardLibraryKey(sourceCard));
+    this.onlineWorldCards.set(gameCardLibraryKey(migratedCard), migratedCard);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
-    return this.onlineWorldService.open({ card, displayName: options.displayName, orientation: options.orientation });
+    for (const workId of retiredWorkIds) this.onlineWorldService.clearCacheForWork(workId);
+    return next;
   }
 
   async migrateOnlineWorldCard() {
     const result = await this.onlineWorldService.exportMigrationDraft();
-    if (result?.redirectPublished && this.onlineWorldService.card && result.workId) {
-      const card = rebindGameCard(this.onlineWorldService.card, result.workId, this.origin);
-      this.onlineWorldService.card = card;
-      this.onlineWorldCards.set(card.cardId, card);
-      saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    if (result?.redirectPublished && !result?.cleanupPending && this.onlineWorldService.card && result.workId) {
+      const current = this.onlineWorldService.card;
+      const next = await this.followOnlineWorldMigrationChain(current, result, {
+        displayName: this.account.username || "服主",
+        orientation: "any"
+      });
+      return { ...result, state: next };
     }
     return result;
   }

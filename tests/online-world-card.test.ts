@@ -15,6 +15,8 @@ const {
   createExportedGameCard,
   validateGameCard,
   rebindGameCard,
+  gameCardLibraryKey,
+  summarizeGameCard,
   loadGameCardLibrary,
   saveGameCardLibrary
 } = require("../electron/online-world-card.cjs");
@@ -150,5 +152,21 @@ describe("online world game cards", () => {
     expect(rebound.companion.workId).toBe("new-work-12345678");
     expect(rebound.companion.installedUrl).toContain("/installed/new-work-12345678");
     expect(rebound.companion.configuration.app.id).toBe("new-work-12345678");
+  });
+
+  it("keeps same-card servers isolated in the local library", () => {
+    const first = rebindGameCard(createBundledGridCard(), "first-work-12345678");
+    const second = rebindGameCard(createBundledGridCard(), "second-work-12345678");
+    const directory = mkdtempSync(join(tmpdir(), "fyow-multi-server-card-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "cards.json");
+    saveGameCardLibrary(file, new Map([[gameCardLibraryKey(first), first], [gameCardLibraryKey(second), second]]));
+    const loaded = loadGameCardLibrary(file, null);
+    expect(loaded.size).toBe(2);
+    expect(loaded.get(gameCardLibraryKey(first))?.companion.workId).toBe("first-work-12345678");
+    expect(loaded.get(gameCardLibraryKey(second))?.companion.workId).toBe("second-work-12345678");
+    expect(loaded.get(first.cardId)).toBeUndefined();
+    expect(summarizeGameCard(first).libraryId).toBe(gameCardLibraryKey(first));
+    expect(summarizeGameCard(second).libraryId).toBe(gameCardLibraryKey(second));
   });
 });

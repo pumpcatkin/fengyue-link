@@ -70,6 +70,8 @@ function showStartupOfficialNotice(){
   officialNoticeMessage.textContent="每次启动都会对照当前版本号与发布版本号。";
   setOfficialNoticePoints(["当前版本","发布版本","每次启动"]);
   officialNoticeOpen.classList.remove("primary");
+  officialNoticeOpen.disabled=false;
+  officialNoticeOpen.textContent="检查并自动更新";
   officialNoticeAction.classList.add("primary");
   officialNoticeAction.disabled=false;
   officialNoticeAction.textContent="进入工具";
@@ -79,8 +81,8 @@ function showStartupOfficialNotice(){
 
 function showReleaseVerificationFailure(security,update={}){
   if(settingsOverlayMode)return;
-  const updateRequired=security?.status==="update-required";
-  const automaticUpdate=updateRequired&&["checking","downloading","verifying","installing","ready"].includes(update?.status);
+  const automaticUpdate=["downloading","verifying","installing","ready"].includes(update?.status);
+  const updateRequired=security?.status==="update-required"||automaticUpdate;
   officialNoticeCard.dataset.mode=updateRequired?"update-required":"blocked";
   officialNoticeEyebrow.textContent="版本号对照";
   officialNoticeVersion.textContent=automaticUpdate?"正在更新":updateRequired?"发现新版本":"未完成";
@@ -90,8 +92,11 @@ function showReleaseVerificationFailure(security,update={}){
   officialNoticeMessage.textContent=automaticUpdate
     ? update.message||security.message||"正在获取发布版本。"
     : security?.message||"版本号对照未完成。";
-  setOfficialNoticePoints([`当前 ${security?.currentVersion?`v${security.currentVersion}`:"版本未知"}`,`发布 ${security?.latestVersion?`v${security.latestVersion}`:"版本未知"}`]);
+  const latestVersion=update?.latestVersion||security?.latestVersion;
+  setOfficialNoticePoints([`当前 ${security?.currentVersion?`v${security.currentVersion}`:"版本未知"}`,`发布 ${latestVersion?`v${latestVersion}`:"版本未知"}`]);
   officialNoticeOpen.classList.toggle("primary",!automaticUpdate);
+  officialNoticeOpen.disabled=automaticUpdate;
+  officialNoticeOpen.textContent=automaticUpdate?"自动更新中…":update?.status==="error"?"重试自动更新":"检查并自动更新";
   officialNoticeAction.classList.toggle("primary",automaticUpdate);
   officialNoticeAction.disabled=automaticUpdate;
   officialNoticeAction.textContent=automaticUpdate?(update.status==="ready"?"关闭工具后自动安装":"自动更新中…"):"退出工具";
@@ -101,14 +106,16 @@ function showReleaseVerificationFailure(security,update={}){
 
 function renderReleaseVerificationResult(next){
   const security=next?.releaseSecurity||{};
+  const update=next?.appUpdate||{};
+  const automaticUpdate=["downloading","verifying","installing","ready"].includes(update.status);
   // Packaged builds only become verified after the signed runtime check;
   // development launches are already verified by definition. In both cases,
   // release the login surface as soon as the backend confirms that state.
-  if(security.verified){
+  if(security.verified&&!(!next?.loggedIn&&automaticUpdate)){
     officialNoticeOverlay.classList.add("hidden");
     return;
   }
-  if(["blocked","unavailable","update-required"].includes(security.status))showReleaseVerificationFailure(security,next?.appUpdate||{});
+  if(automaticUpdate||["blocked","unavailable","update-required"].includes(security.status))showReleaseVerificationFailure(security,update);
 }
 
 function initialUiTheme(){
@@ -1529,7 +1536,14 @@ async function submitCredentials({automatic=autoLoginInput.checked}={}){
 loginForm.addEventListener("submit",event=>{event.preventDefault();invoke(()=>submitCredentials()).catch(()=>{})});
 autoLoginInput.addEventListener("change",()=>{if(autoLoginInput.checked)rememberInput.checked=true;if(state)render(state)});
 rememberInput.addEventListener("change",()=>{if(!rememberInput.checked)autoLoginInput.checked=false;if(state)render(state)});
-officialNoticeOpen.addEventListener("click",()=>invoke(()=>api.openOfficialReleasePage()).catch(()=>{}));
+officialNoticeOpen.addEventListener("click",()=>invoke(async()=>{
+  officialNoticeOpen.disabled=true;
+  officialNoticeOpen.textContent="正在检查…";
+  const update=await api.checkForUpdates();
+  if(update?.status==="current")toast("当前已是最新官方版本");
+  else if(update?.status==="error")toast(update.message||"自动更新暂未完成，请检查网络后重试");
+  return update;
+}).catch(()=>{}));
 officialNoticeAction.addEventListener("click",()=>{
   if(officialNoticeCard.dataset.mode==="announcement"){officialNoticeOverlay.classList.add("hidden");return}
   void api.quitApp();

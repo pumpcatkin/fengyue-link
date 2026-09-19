@@ -13,6 +13,9 @@ const OFFICIAL_RELEASE_PAGE = `https://github.com/${OFFICIAL_REPOSITORY}/release
 const LATEST_RELEASE_API = `https://api.github.com/repos/${OFFICIAL_REPOSITORY}/releases/latest`;
 const RELEASE_MANIFEST_ASSET = "release-manifest.json";
 const RELEASE_SIGNATURE_ASSET = "release-manifest.sig";
+const RUNTIME_PROOF_DIRECTORY = "release-proof";
+const RUNTIME_PROOF_MANIFEST_ASSET = "runtime-manifest.json";
+const RUNTIME_PROOF_SIGNATURE_ASSET = "runtime-manifest.sig";
 const LATEST_MANIFEST_URL = `${OFFICIAL_RELEASE_PAGE}/download/${RELEASE_MANIFEST_ASSET}`;
 const LATEST_SIGNATURE_URL = `${OFFICIAL_RELEASE_PAGE}/download/${RELEASE_SIGNATURE_ASSET}`;
 const RELEASE_MANIFEST_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
@@ -292,6 +295,7 @@ class ReleaseSecurityGate {
     this.resourcesPath = String(options.resourcesPath || "");
     this.executablePath = String(options.executablePath || "");
     this.userDataPath = String(options.userDataPath || "");
+    this.runtimeProofPublicKey = options.runtimeProofPublicKey || RELEASE_MANIFEST_PUBLIC_KEY;
     const requestedTimeout = Number(options.networkTimeoutMs);
     this.networkTimeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
       ? Math.min(Math.max(Math.trunc(requestedTimeout), 250), NETWORK_TIMEOUT_MS)
@@ -368,11 +372,69 @@ class ReleaseSecurityGate {
   }
 
   async initializeStartupVerification() {
-    if (!this.inFlight) this.inFlight = this.verifyOnline().finally(() => { this.inFlight = null; });
+    if (!this.inFlight) this.inFlight = this.verifyBundledRuntime().finally(() => { this.inFlight = null; });
     try {
       return await this.inFlight;
     } catch {
       return this.state();
+    }
+  }
+
+  runtimeProofPaths() {
+    const directory = path.join(this.resourcesPath, RUNTIME_PROOF_DIRECTORY);
+    return {
+      manifest: path.join(directory, RUNTIME_PROOF_MANIFEST_ASSET),
+      signature: path.join(directory, RUNTIME_PROOF_SIGNATURE_ASSET)
+    };
+  }
+
+  readBundledRuntimeProof() {
+    const files = this.runtimeProofPaths();
+    for (const [label, file, maxBytes] of [
+      [RUNTIME_PROOF_MANIFEST_ASSET, files.manifest, MAX_MANIFEST_BYTES],
+      [RUNTIME_PROOF_SIGNATURE_ASSET, files.signature, MAX_SIGNATURE_BYTES]
+    ]) {
+      if (!physicalFs.existsSync(file) || !physicalFs.statSync(file).isFile()) {
+        throw new ReleaseSecurityError("missing-runtime-proof", `安装目录缺少 ${label}`);
+      }
+      const size = physicalFs.statSync(file).size;
+      if (size <= 0 || size > maxBytes) {
+        throw new ReleaseSecurityError("invalid-runtime-proof", `${label} 大小无效`);
+      }
+    }
+    const manifestBytes = physicalFs.readFileSync(files.manifest);
+    const signatureBytes = physicalFs.readFileSync(files.signature);
+    verifyManifestSignature(manifestBytes, signatureBytes, this.runtimeProofPublicKey);
+    let rawManifest;
+    try { rawManifest = JSON.parse(manifestBytes.toString("utf8")); }
+    catch { throw new ReleaseSecurityError("invalid-manifest", "内置运行证明无法解析"); }
+    return validateManifestForRuntime(rawManifest);
+  }
+
+  async verifyBundledRuntime() {
+    if (!this.isPackaged) return this.state();
+    this.setState("checking", false, "正在对照版本号…");
+    try {
+      const manifest = this.readBundledRuntimeProof();
+      if (manifest.version !== parseVersion(this.appVersion)?.raw) {
+        throw new ReleaseSecurityError("runtime-version-mismatch", "内置运行证明与程序版本不一致");
+      }
+      const artifacts = await this.readCurrentArtifacts();
+      if (artifacts.appAsar.size !== manifest.files.appAsar.size || artifacts.appAsar.sha256 !== manifest.files.appAsar.sha256
+          || artifacts.executable.size !== manifest.files.executable.size || artifacts.executable.sha256 !== manifest.files.executable.sha256) {
+        throw new ReleaseSecurityError("artifact-mismatch", "本地程序文件与官方签名版本不一致，可能已损坏或被修改");
+      }
+      this.currentArtifact = artifacts;
+      return this.setState("verified", true, `版本号对照完成：v${this.appVersion}`, {
+        latestVersion: manifest.version,
+        checkedAt: new Date().toISOString(),
+        source: "bundled-signed-runtime-proof",
+        releasePage: manifest.releasePage,
+        verifiedFileCount: RUNTIME_INTEGRITY_FILE_COUNT
+      });
+    } catch (error) {
+      this.setFailure(error);
+      throw error;
     }
   }
 
@@ -499,7 +561,7 @@ class ReleaseSecurityGate {
       : new ReleaseSecurityError("verification-failed", "官方版本安全验证失败");
     const status = issue.code === "update-required"
       ? "update-required"
-      : ["artifact-mismatch", "signature-mismatch", "unregistered-version"].includes(issue.code)
+      : ["artifact-mismatch", "signature-mismatch", "unregistered-version", "runtime-version-mismatch", "missing-runtime-proof", "invalid-runtime-proof"].includes(issue.code)
         ? "blocked"
         : "unavailable";
     const temporaryNetworkIssue = ["network-timeout", "network-error"].includes(issue.code)
@@ -572,6 +634,9 @@ module.exports = {
   LATEST_SIGNATURE_URL,
   RELEASE_MANIFEST_ASSET,
   RELEASE_SIGNATURE_ASSET,
+  RUNTIME_PROOF_DIRECTORY,
+  RUNTIME_PROOF_MANIFEST_ASSET,
+  RUNTIME_PROOF_SIGNATURE_ASSET,
   MAX_INSTALLER_BYTES,
   RELEASE_MANIFEST_PUBLIC_KEY,
   RELEASE_KEY_FINGERPRINT,

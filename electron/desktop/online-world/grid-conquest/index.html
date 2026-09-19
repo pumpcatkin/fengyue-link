@@ -62,25 +62,31 @@
         </div>
         <div class="map-workspace">
         <div class="map-card">
-          <section id="map-region-actions" class="map-region-actions hidden" aria-label="选中区域的行动">
-            <header><span><b>区域行动</b><small id="current-march-army">行军队伍 0 人</small></span><small id="map-actions-coordinate">—</small></header>
-            <div id="territory-actions" class="territory-actions hidden">
-              <span class="mining-control"><button id="start-mining" type="button">开采资源</button><small id="mining-cooldown" class="mining-cooldown" aria-live="polite"></small></span>
-              <label>练兵数量<span class="train-amount-heading"><output id="train-amount-value" for="train-amount">0</output><small> / <span id="train-amount-max">0</span></small></span><input id="train-amount" type="range" min="0" max="0" value="0"><small class="train-cost">消耗 <b id="train-cost">0</b> 金币</small></label>
-              <button id="train" type="button">开始练兵</button>
-            </div>
-            <div class="map-march-actions">
-              <button id="march" class="primary" type="button">向这里行军</button>
-            </div>
-          </section>
-          <section id="map-army-transfer" class="map-army-transfer hidden" aria-label="驻军调度" aria-hidden="true">
-            <header><span><b>驻军调度</b><small>正数征召 · 负数部署</small></span><strong id="territory-army-count">0 / 0</strong></header>
-            <label class="army-transfer-field"><span>调兵数量 <small>+征召 / −部署</small></span><input id="army-transfer-amount" type="number" step="1" value="0" aria-describedby="army-transfer-range army-transfer-confirm-hint"></label>
-            <small id="army-transfer-range" class="army-transfer-range">可部署 0 · 可征召 0</small>
-            <div class="army-transfer-steps" aria-label="快捷调整调兵数量"><button type="button" data-army-delta="-50">−50</button><button type="button" data-army-delta="-10">−10</button><button type="button" data-army-delta="10">+10</button><button type="button" data-army-delta="50">+50</button></div>
-            <div class="army-transfer-presets"><button id="army-transfer-deploy-max" type="button">最大部署</button><button id="army-transfer-gather-all" type="button">全部征召</button></div>
-            <div class="army-transfer-confirm-row"><small id="army-transfer-confirm-hint" class="army-transfer-confirm-hint hidden">按 Enter 确认</small><button id="army-transfer-confirm" class="army-transfer-confirm" type="button" disabled>确认调兵</button></div>
-          </section>
+          <div id="map-region-actions-shell" class="map-corner-shell map-corner-shell-left hidden">
+            <section id="map-region-actions" class="map-region-actions" aria-label="选中区域的行动">
+              <header><span><b>区域行动</b><small id="current-march-army">行军队伍 0 人</small></span><small id="map-actions-coordinate">—</small></header>
+              <div id="territory-actions" class="territory-actions hidden">
+                <span class="mining-control"><button id="start-mining" type="button">开采资源</button><small id="mining-cooldown" class="mining-cooldown" aria-live="polite"></small></span>
+                <label>练兵数量<span class="train-amount-heading"><output id="train-amount-value" for="train-amount">0</output><small> / <span id="train-amount-max">0</span></small></span><input id="train-amount" type="range" min="0" max="0" value="0"><small class="train-cost">消耗 <b id="train-cost">0</b> 金币</small></label>
+                <button id="train" type="button">开始练兵</button>
+              </div>
+              <div class="map-march-actions">
+                <button id="march" class="primary" type="button">向这里行军</button>
+              </div>
+            </section>
+            <button id="map-region-actions-toggle" class="map-corner-toggle" type="button" aria-controls="map-region-actions" aria-expanded="true" aria-label="收起区域行动" title="收起区域行动"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15.5 15.5-7-7M8.5 14V8.5H14"/></svg></button>
+          </div>
+          <div id="map-army-transfer-shell" class="map-corner-shell map-corner-shell-right hidden">
+            <section id="map-army-transfer" class="map-army-transfer" aria-label="驻军调度" aria-hidden="true">
+              <header><span><b>驻军调度</b><small>正数征召 · 负数部署</small></span><strong id="territory-army-count">0 / 0</strong></header>
+              <label class="army-transfer-field"><span>调兵数量 <small>+征召 / −部署</small></span><input id="army-transfer-amount" type="number" step="1" value="0" aria-describedby="army-transfer-range army-transfer-confirm-hint"></label>
+              <small id="army-transfer-range" class="army-transfer-range">可部署 0 · 可征召 0</small>
+              <div class="army-transfer-steps" aria-label="快捷调整调兵数量"><button type="button" data-army-delta="-50">−50</button><button type="button" data-army-delta="-10">−10</button><button type="button" data-army-delta="10">+10</button><button type="button" data-army-delta="50">+50</button></div>
+              <div class="army-transfer-presets"><button id="army-transfer-deploy-max" type="button">最大部署</button><button id="army-transfer-gather-all" type="button">全部征召</button></div>
+              <div class="army-transfer-confirm-row"><small id="army-transfer-confirm-hint" class="army-transfer-confirm-hint hidden">按 Enter 确认</small><button id="army-transfer-confirm" class="army-transfer-confirm" type="button" disabled>确认调兵</button></div>
+            </section>
+            <button id="map-army-transfer-toggle" class="map-corner-toggle" type="button" aria-controls="map-army-transfer" aria-expanded="true" aria-label="收起驻军调度" title="收起驻军调度"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8.5 15.5 7-7M10 8.5h5.5V14"/></svg></button>
+          </div>
           <div id="map-viewport" class="map-viewport">
             <canvas id="map" width="2048" height="2048" aria-label="64乘64大陆地图"></canvas>
             <div id="map-task-tooltip" class="map-task-tooltip hidden" role="status"></div>

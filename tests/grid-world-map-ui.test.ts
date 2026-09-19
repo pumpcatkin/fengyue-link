@@ -61,7 +61,10 @@ describe("grid world map task overlays", () => {
 
   it("places region actions at the map origin and reveals territory controls only for owned cells", () => {
     const mapCard = html.slice(html.indexOf('<div class="map-card">'), html.indexOf('<section id="selected-area"'));
+    expect(mapCard).toContain('id="map-region-actions-shell"');
     expect(mapCard).toContain('id="map-region-actions"');
+    expect(mapCard).toContain('id="map-region-actions-toggle"');
+    expect(mapCard).toContain('aria-controls="map-region-actions"');
     expect(mapCard).toContain('id="territory-actions"');
     expect(mapCard).toContain('id="start-mining"');
     expect(mapCard).toContain('id="train-amount" type="range" min="0"');
@@ -73,10 +76,16 @@ describe("grid world map task overlays", () => {
     expect(mapCard).toContain("开采资源");
     expect(mapCard).not.toContain('id="train-max"');
     expect(html).not.toContain('class="panel orders-panel"');
-    expect(css).toMatch(/\.map-region-actions\s*\{[\s\S]*?position:\s*absolute;\s*left:\s*0;\s*top:\s*0;/);
+    expect(css).toMatch(/\.map-corner-shell\s*\{[^}]*position:\s*absolute;\s*top:\s*0;/);
+    expect(css).toMatch(/\.map-corner-shell-left\s*\{[^}]*left:\s*0;/);
+    expect(css).toMatch(/\.map-region-actions\s*\{[^}]*width:\s*100%;/);
+    expect(css).toMatch(/\.map-corner-shell\.is-collapsed \.map-region-actions\s*\{[^}]*clip-path:\s*inset\(0 100% 0 0\)/);
+    expect(css).toMatch(/\.map-corner-toggle\s*\{[^}]*position:\s*absolute;[^}]*transition:\s*top/);
     expect(css).toMatch(/\.mining-cooldown\s*\{[^}]*height:\s*10px;[^}]*overflow:\s*hidden;[^}]*white-space:\s*nowrap/);
     expect(css).toMatch(/\.train-cost\s*\{[^}]*height:\s*10px;[^}]*white-space:\s*nowrap/);
     expect(source).toContain('document.querySelector("#territory-actions").classList.toggle("hidden", !player || !mine)');
+    expect(source).toContain('actionsShell.classList.toggle("hidden", !actionsVisible)');
+    expect(source).toContain('setMapCornerCollapsed("region", !regionActionsCollapsed)');
     expect(source).toContain('document.querySelector("#train-cost").textContent = formatNumber(trainingGoldCost(value, cell, remaining))');
     expect(source).toContain('trainingGoldCost(trainAmount.value, cell, remainingGarrison) > Number(player?.gold || 0)');
   });
@@ -86,7 +95,10 @@ describe("grid world map task overlays", () => {
     const confirmation = html.slice(html.indexOf('<section id="march-confirmation"'), html.indexOf('<section id="zero-army-march-confirmation"'));
     expect(html).not.toContain('id="march-party-panel"');
     expect((html.match(/id="map-army-transfer"/g) || []).length).toBe(1);
+    expect(mapCard).toContain('id="map-army-transfer-shell"');
     expect(mapCard).toContain('id="map-army-transfer"');
+    expect(mapCard).toContain('id="map-army-transfer-toggle"');
+    expect(mapCard).toContain('aria-controls="map-army-transfer"');
     expect(mapCard).toContain('id="army-transfer-amount"');
     expect(mapCard).toContain('data-army-delta="-50"');
     expect(mapCard).toContain('data-army-delta="-10"');
@@ -97,21 +109,30 @@ describe("grid world map task overlays", () => {
     expect(mapCard).toContain('id="army-transfer-confirm"');
     expect(confirmation).toContain('id="march-army-transfer-slot"');
     expect(mapCard).not.toContain("data-army-action");
-    expect(css).toMatch(/\.map-army-transfer\s*\{[\s\S]*?position:\s*absolute;\s*right:\s*0;\s*top:\s*0;/);
+    expect(css).toMatch(/\.map-corner-shell-right\s*\{[^}]*right:\s*0;/);
+    expect(css).toMatch(/\.map-army-transfer\s*\{[^}]*width:\s*100%;/);
+    expect(css).toMatch(/\.map-corner-shell\.is-collapsed \.map-army-transfer\s*\{[^}]*clip-path:\s*inset\(0 0 0 100%\)/);
     expect(source).toContain('const cell = position ? dynamicCell(position.x, position.y) : null');
     expect(source).toContain('const visible = Boolean(position && cell?.ownerAccountId === ownAccountId() && !activeMarch)');
     expect(source).toContain('function placeArmyTransferPanel(inMarchModal)');
-    expect(source).toContain('placeArmyTransferPanel(Boolean(visible && marchConfirmationTarget))');
+    expect(source).toContain('const inMarchModal = Boolean(visible && marchConfirmationTarget)');
+    expect(source).toContain('placeArmyTransferPanel(inMarchModal)');
     expect(source).toContain('if (panel.parentElement !== slot) slot.append(panel)');
-    expect(source).toContain('if (panel.parentElement !== mapViewport.parentElement) mapViewport.parentElement.insertBefore(panel, mapViewport)');
+    expect(source).toContain('if (panel.parentElement !== shell) shell.prepend(panel)');
     expect(source).toContain('panel.classList.toggle("hidden", !visible)');
-    expect(source).toContain('panel.setAttribute("aria-hidden", String(!visible))');
+    expect(source).toContain('panel.setAttribute("aria-hidden", String(!visible || (!inMarchModal && armyTransferCollapsed)))');
+    expect(source).toContain('setMapCornerCollapsed("army", !armyTransferCollapsed)');
     expect(source).toContain('const type = armyTransferDraft > 0 ? "gather-march" : "deploy-soldiers"');
     expect(source).toContain('sendIntent({ type, amount })');
     expect(source).toContain('{ clamp: false, write: false }');
     expect(source).toContain('return Math.max(0, Math.trunc(Number(ownPlayer()?.fieldArmySoldiers) || 0))');
     expect(source).not.toContain('document.querySelectorAll("[data-army-action]")');
     expect(source).not.toContain("marchDraftSoldiers");
+  });
+
+  it("keeps extra draggable space beyond every map edge", () => {
+    expect(css).toMatch(/\.map-viewport\s*\{[\s\S]*?--map-edge-drag:\s*clamp\(84px, 10cqi, 136px\);[\s\S]*?padding:\s*var\(--map-edge-drag\)/);
+    expect(css).toContain(".map-viewport { --map-edge-drag: 72px; }");
   });
 
   it("keeps player location and drag-volume controls in the persistent chrome", () => {

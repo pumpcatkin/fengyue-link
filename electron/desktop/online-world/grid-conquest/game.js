@@ -49,6 +49,8 @@ let marchConfirmationTarget = null;
 let marchSubmitting = false;
 let armyTransferDraft = 0;
 let armyTransferContext = "";
+let regionActionsCollapsed = false;
+let armyTransferCollapsed = false;
 let companionHoverTimer = null;
 let draggedGeneralId = null;
 let pendingGeneralAction = null;
@@ -1032,28 +1034,53 @@ function renderArmyTransferControls(player, cell, cap, enabled) {
   document.querySelectorAll("[data-army-delta]").forEach(button => { button.disabled = input.disabled; });
   setArmyTransferDraft(armyTransferDraft);
 }
+function setMapCornerCollapsed(kind, collapsed) {
+  const region = kind === "region";
+  const shell = document.querySelector(region ? "#map-region-actions-shell" : "#map-army-transfer-shell");
+  const panel = document.querySelector(region ? "#map-region-actions" : "#map-army-transfer");
+  const toggle = document.querySelector(region ? "#map-region-actions-toggle" : "#map-army-transfer-toggle");
+  const next = Boolean(collapsed);
+  if (region) regionActionsCollapsed = next;
+  else armyTransferCollapsed = next;
+  shell.classList.toggle("is-collapsed", next);
+  toggle.setAttribute("aria-expanded", String(!next));
+  const action = next ? "展开" : "收起";
+  const label = region ? "区域行动" : "驻军调度";
+  toggle.setAttribute("aria-label", `${action}${label}`);
+  toggle.title = `${action}${label}`;
+  const inMarchModal = panel.parentElement?.id === "march-army-transfer-slot";
+  if (!inMarchModal) {
+    panel.inert = next;
+    panel.setAttribute("aria-hidden", String(next || shell.classList.contains("hidden")));
+  }
+}
 function placeArmyTransferPanel(inMarchModal) {
   const panel = document.querySelector("#map-army-transfer");
   const slot = document.querySelector("#march-army-transfer-slot");
-  const mapViewport = document.querySelector("#map-viewport");
+  const shell = document.querySelector("#map-army-transfer-shell");
   if (inMarchModal) {
     if (panel.parentElement !== slot) slot.append(panel);
     slot.classList.remove("hidden");
     slot.setAttribute("aria-hidden", "false");
+    shell.classList.add("hidden");
     return;
   }
-  if (panel.parentElement !== mapViewport.parentElement) mapViewport.parentElement.insertBefore(panel, mapViewport);
+  if (panel.parentElement !== shell) shell.prepend(panel);
   slot.classList.add("hidden");
   slot.setAttribute("aria-hidden", "true");
 }
 function renderMapArmyTransfer(player, activeMarch = false) {
   const panel = document.querySelector("#map-army-transfer");
+  const shell = document.querySelector("#map-army-transfer-shell");
   const position = player?.position;
   const cell = position ? dynamicCell(position.x, position.y) : null;
   const visible = Boolean(position && cell?.ownerAccountId === ownAccountId() && !activeMarch);
-  placeArmyTransferPanel(Boolean(visible && marchConfirmationTarget));
+  const inMarchModal = Boolean(visible && marchConfirmationTarget);
+  placeArmyTransferPanel(inMarchModal);
+  shell.classList.toggle("hidden", !visible || inMarchModal);
   panel.classList.toggle("hidden", !visible);
-  panel.setAttribute("aria-hidden", String(!visible));
+  panel.inert = !visible || (!inMarchModal && armyTransferCollapsed);
+  panel.setAttribute("aria-hidden", String(!visible || (!inMarchModal && armyTransferCollapsed)));
   if (!visible) {
     armyTransferContext = "";
     armyTransferDraft = 0;
@@ -1603,7 +1630,11 @@ function renderCell() {
     : 0;
   const miningCoolingDown = miningCooldownUntil > hostTime();
   const actions = document.querySelector("#map-region-actions");
-  actions.classList.toggle("hidden", !player || !selected);
+  const actionsShell = document.querySelector("#map-region-actions-shell");
+  const actionsVisible = Boolean(player && selected);
+  actionsShell.classList.toggle("hidden", !actionsVisible);
+  actions.inert = !actionsVisible || regionActionsCollapsed;
+  actions.setAttribute("aria-hidden", String(!actionsVisible || regionActionsCollapsed));
   document.querySelector("#territory-actions").classList.toggle("hidden", !player || !mine);
   document.querySelector("#map-actions-coordinate").textContent = selected ? `${selected.x}, ${selected.y}` : "—";
   const miningButton = document.querySelector("#start-mining");
@@ -2381,6 +2412,8 @@ window.addEventListener("resize", () => { updateMapScale(true); updateCompanionL
 
 document.querySelector("#return-library").addEventListener("click", () => host("library"));
 document.querySelector("#toggle-social").addEventListener("click", event => setSocialOpen(event.currentTarget.getAttribute("aria-expanded") !== "true"));
+document.querySelector("#map-region-actions-toggle").addEventListener("click", () => setMapCornerCollapsed("region", !regionActionsCollapsed));
+document.querySelector("#map-army-transfer-toggle").addEventListener("click", () => setMapCornerCollapsed("army", !armyTransferCollapsed));
 document.querySelector("#toggle-selected-area").addEventListener("click", event => {
   const toggle = event.currentTarget;
   resizeGamePanels(() => {

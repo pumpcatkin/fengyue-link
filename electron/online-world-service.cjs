@@ -787,6 +787,62 @@ class OnlineWorldService {
     return Boolean(this.control && this.account().accountId && this.account().accountId === this.control.authorityAccountId);
   }
 
+  directSession(control = this.control, work = this.work) {
+    if (!control || !work?.id) return null;
+    const seasonId = String(control.seasonId || "");
+    const controlId = String(control.id || "");
+    if (!seasonId) return null;
+    return {
+      gameId: GRID_GAME_ID,
+      workId: String(work.id),
+      seasonId,
+      controlId,
+      startedAt: Math.max(0, Number(control.startedAt || 0))
+    };
+  }
+
+  sameDirectSession(left, right) {
+    return Boolean(left && right
+      && String(left.gameId || GRID_GAME_ID) === String(right.gameId || GRID_GAME_ID)
+      && String(left.workId || "") === String(right.workId || "")
+      && String(left.seasonId || "") === String(right.seasonId || ""));
+  }
+
+  directItemMatchesSession(item, session = this.directSession()) {
+    if (!item || !session) return false;
+    if (item.gameId && String(item.gameId) !== session.gameId) return false;
+    if (item.workId && String(item.workId) !== session.workId) return false;
+    if (item.seasonId && String(item.seasonId) !== session.seasonId) return false;
+    if (item.workId && item.seasonId) return true;
+    const createdAt = Number(item.createdAt || 0);
+    return createdAt > 0 && createdAt >= Math.max(0, session.startedAt - 5 * 60 * 1000);
+  }
+
+  clearDirectSession() {
+    this.directInbox = [];
+    this.directHistory = [];
+    this.seenDirectMessageIds.clear();
+  }
+
+  restoreDirectCache(cached) {
+    const session = this.directSession();
+    if (!session) {
+      this.clearDirectSession();
+      return;
+    }
+    const inbox = (Array.isArray(cached?.directInbox) ? cached.directInbox : [])
+      .filter(item => this.directItemMatchesSession(item, session)).slice(-100);
+    const historySource = Array.isArray(cached?.directHistory) ? cached.directHistory : inbox;
+    const history = historySource.filter(item => this.directItemMatchesSession(item, session)).slice(-200);
+    this.directInbox = inbox;
+    this.directHistory = history;
+    const visibleIds = new Set([...inbox, ...history].map(item => String(item?.messageId || "")).filter(Boolean));
+    const savedIds = this.sameDirectSession(cached?.directSession, session) && Array.isArray(cached?.seenDirectMessageIds)
+      ? cached.seenDirectMessageIds.map(String)
+      : [];
+    this.seenDirectMessageIds = new Set([...savedIds, ...visibleIds].slice(-500));
+  }
+
   summary() {
     return {
       status: this.status,
@@ -1135,6 +1191,9 @@ class OnlineWorldService {
     } catch {}
     root.accounts[accountId] ||= { worlds: {} };
     root.accounts[accountId].worlds ||= {};
+    const directSession = this.directSession();
+    const directInbox = this.directInbox.filter(item => this.directItemMatchesSession(item, directSession)).slice(-100);
+    const directHistory = this.directHistory.filter(item => this.directItemMatchesSession(item, directSession)).slice(-200);
     root.accounts[accountId].worlds[this.work.id] = {
       cacheAccountId: accountId,
       control: this.control,
@@ -1156,8 +1215,9 @@ class OnlineWorldService {
       publicParticipantOrders: this.publicParticipantOrders,
       publicAuthorityOrders: this.publicAuthorityOrders,
       publicTreasureSources: this.publicTreasureSources,
-      directInbox: this.directInbox.slice(-100),
-      directHistory: this.directHistory.slice(-200),
+      directSession,
+      directInbox,
+      directHistory,
       worldChat: this.currentWorldChat(),
       worldChatCursor: cloneJson(this.worldChatCursor),
       localPreferences: cloneJson(this.localPreferences),
@@ -1249,6 +1309,7 @@ class OnlineWorldService {
     this.localEvents = [];
     this.directInbox = [];
     this.directHistory = [];
+    this.seenDirectMessageIds.clear();
     this.worldChat = [];
     this.mapFactsCache = null;
     this.notify();
@@ -1421,9 +1482,7 @@ class OnlineWorldService {
       this.world = normalizeWorldState(cached.world);
       bindWorldAuthority(this.world, this.control);
       this.restoreLocalOverlay(cached.localOverlay || null);
-      this.directInbox = Array.isArray(cached.directInbox) ? cached.directInbox.slice(-100) : [];
-      this.directHistory = Array.isArray(cached.directHistory) ? cached.directHistory.slice(-200) : [...this.directInbox];
-      this.seenDirectMessageIds = new Set(Array.isArray(cached.seenDirectMessageIds) ? cached.seenDirectMessageIds : this.directInbox.map(item => item.messageId));
+      this.restoreDirectCache(cached);
     } else {
       this.control = null;
       this.world = null;
@@ -1528,6 +1587,7 @@ class OnlineWorldService {
       updatedAt: world.startedAt
     }, identity.signingPrivateKey);
     this.world = world;
+    this.clearDirectSession();
     this.publicMapOrder = { timestamp: 0, commentId: "" };
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
@@ -2578,6 +2638,7 @@ class OnlineWorldService {
 
   async syncNow(fullScan = false, { ignoreMigrationReset = false } = {}) {
     const previousControlId = String(this.control?.id || "");
+    const previousDirectSession = this.directSession();
     this.syncing = true;
     this.error = null;
     this.notify();
@@ -2601,7 +2662,10 @@ class OnlineWorldService {
       const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
       this.assertSyncActive();
       const controls = this.verifiedControls(history.assembled.records);
-      if (controls[0]) this.control = controls[0].record;
+      if (controls[0]) {
+        this.control = controls[0].record;
+        if (previousDirectSession && !this.sameDirectSession(previousDirectSession, this.directSession())) this.clearDirectSession();
+      }
       // The reset is self-verifying so an old game card can follow it without
       // loading the obsolete work's full ledger first.
       if (!this.control && !ignoreMigrationReset) {
@@ -3714,15 +3778,17 @@ class OnlineWorldService {
     this.consumeDirectSendBudget();
     const identity = await this.getIdentity();
     const messageId = crypto.randomUUID();
+    const controlId = String(this.control.id || "");
     const context = `${this.work.id}/${this.control.seasonId}/${messageId}`;
-    const direct = signRecord({ schema: FYOW_SCHEMAS.direct, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, fromAccountId: sender.accountId, toAccountId: recipient, type: messageType, box: sealJson(normalizedPayload, target.deviceEncryptionPublicKey, context), createdAt: this.now() }, identity.signingPrivateKey);
-    const wake = signRecord({ schema: FYOW_SCHEMAS.directWake, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, fromAccountId: sender.accountId, toAccountId: recipient, createdAt: this.now() }, identity.signingPrivateKey);
+    const direct = signRecord({ schema: FYOW_SCHEMAS.direct, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, ...(controlId ? { controlId } : {}), fromAccountId: sender.accountId, toAccountId: recipient, type: messageType, box: sealJson(normalizedPayload, target.deviceEncryptionPublicKey, context), createdAt: this.now() }, identity.signingPrivateKey);
+    const wake = signRecord({ schema: FYOW_SCHEMAS.directWake, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, ...(controlId ? { controlId } : {}), fromAccountId: sender.accountId, toAccountId: recipient, createdAt: this.now() }, identity.signingPrivateKey);
     await this.postRecord(wake, { parentId: target.commentRootId, toAccountId: String(toAccountId) });
     const chat = await this.ensurePrivateChat(toAccountId);
     const chunks = encodeCommentRecord(direct);
     for (const content of chunks) await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: chat.id, content }, timeout: 20000 }));
     const sentItem = {
-      messageId, direction: "out", toAccountId: recipient, type: messageType,
+      messageId, direction: "out", gameId: GRID_GAME_ID, workId: this.work.id,
+      seasonId: this.control.seasonId, controlId, toAccountId: recipient, type: messageType,
       payload: cloneJson(normalizedPayload), createdAt: direct.createdAt, sentAt: this.now()
     };
     this.directHistory.push(sentItem);
@@ -3741,7 +3807,7 @@ class OnlineWorldService {
     const assembledWakes = assembleCommentRecords(branches);
     const wakes = assembledWakes.records
       .map(item => item.record)
-      .filter(record => record?.schema === FYOW_SCHEMAS.directWake && record.workId === this.work.id && record.seasonId === this.control.seasonId && record.toAccountId === accountId)
+      .filter(record => record?.schema === FYOW_SCHEMAS.directWake && record.toAccountId === accountId && this.directItemMatchesSession(record))
       .filter(record => !this.world.bans?.[record.fromAccountId]?.banned)
       .filter(record => {
         const senderKey = this.world.players?.[record.fromAccountId]?.deviceSigningPublicKey;
@@ -3763,13 +3829,25 @@ class OnlineWorldService {
       const directs = assembleCommentRecords(extractContentItems(messages)).records
         .map(item => item.record)
         .filter(record => record?.schema === FYOW_SCHEMAS.direct && record.messageId === wake.messageId && record.fromAccountId === wake.fromAccountId && record.toAccountId === accountId)
+        .filter(record => this.directItemMatchesSession(record))
         .filter(record => verifySignedRecord(record, this.world.players[wake.fromAccountId].deviceSigningPublicKey));
       const direct = directs[0];
       if (!direct) continue;
       try {
         const context = `${this.work.id}/${this.control.seasonId}/${direct.messageId}`;
-        const payload = openSealedJson(direct.box, identity.encryptionPrivateKey, context);
-        const item = { messageId: direct.messageId, direction: "in", fromAccountId: direct.fromAccountId, type: direct.type, payload, createdAt: direct.createdAt, receivedAt: this.now() };
+        let payload;
+        try {
+          payload = openSealedJson(direct.box, identity.encryptionPrivateKey, context);
+        } catch (error) {
+          if (!direct.controlId) throw error;
+          payload = openSealedJson(direct.box, identity.encryptionPrivateKey, `${this.work.id}/${this.control.seasonId}/${direct.controlId}/${direct.messageId}`);
+        }
+        const item = {
+          messageId: direct.messageId, direction: "in", gameId: GRID_GAME_ID,
+          workId: this.work.id, seasonId: this.control.seasonId, controlId: String(direct.controlId || this.control.id || ""),
+          fromAccountId: direct.fromAccountId, type: direct.type, payload,
+          createdAt: direct.createdAt, receivedAt: this.now()
+        };
         this.directInbox.push(item);
         if (this.directInbox.length > 100) this.directInbox.splice(0, this.directInbox.length - 100);
         this.directHistory.push(item);

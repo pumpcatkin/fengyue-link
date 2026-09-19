@@ -18,6 +18,7 @@ class OfficialUpdateService {
     this.onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : () => {};
     this.installDelayMs = Math.max(0, Number(options.installDelayMs ?? 800));
     this.started = false;
+    this.checkPromise = null;
     this.installing = false;
     this.installTimer = null;
     this.downloadedFile = null;
@@ -72,13 +73,36 @@ class OfficialUpdateService {
     this.updater.autoInstallOnAppQuit = false;
     this.updater.allowPrerelease = false;
     this.bind();
-    this.setState("checking", "正在检查官方更新…");
-    try {
-      await this.updater.checkForUpdates();
-    } catch (error) {
-      this.onError(error);
+    return this.checkNow();
+  }
+
+  async checkNow() {
+    if (!this.isPackaged) return this.state();
+    if (!this.started) {
+      this.started = true;
+      this.updater.autoDownload = true;
+      this.updater.autoInstallOnAppQuit = false;
+      this.updater.allowPrerelease = false;
+      this.bind();
     }
-    return this.state();
+    if (this.installing) return this.state();
+    if (this.downloadedFile) {
+      if (this.canInstallNow()) this.scheduleInstall(this.updateState.latestVersion || this.currentVersion);
+      return this.state();
+    }
+    if (this.checkPromise) return this.checkPromise;
+    this.setState("checking", "正在检查官方更新…");
+    this.checkPromise = (async () => {
+      try {
+        await this.updater.checkForUpdates();
+      } catch (error) {
+        this.onError(error);
+      } finally {
+        this.checkPromise = null;
+      }
+      return this.state();
+    })();
+    return this.checkPromise;
   }
 
   onUpdateAvailable(info) {
@@ -109,7 +133,7 @@ class OfficialUpdateService {
   onError(error) {
     if (this.installing) return;
     const detail = String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 300);
-    this.setState("error", `自动更新失败：${detail}。请从唯一官方发布页手动下载安装。`, {
+    this.setState("error", `自动更新暂未完成：${detail}。请检查网络后重试。`, {
       latestVersion: this.updateState.latestVersion,
       error: detail
     });

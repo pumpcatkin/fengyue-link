@@ -1871,7 +1871,7 @@ describe("online world platform service", () => {
     world.players.receiver = { accountId: "receiver", displayName: "乙", position: { x: 2, y: 2 }, deviceSigningPublicKey: receiverIdentity.signingPublicKey, deviceEncryptionPublicKey: receiverIdentity.encryptionPublicKey, commentRootId: "receiver-root" };
     world.players.sender.carriedGeneralIds = ["g1"];
     world.generals.g1 = { id: "g1", name: "青禾", holderAccountId: "sender", loyalToAccountId: "receiver", capturedFromAccountId: "receiver", status: "carried", masterHistory: [{ accountId: "receiver", fromYear: 1, toYear: 2 }] };
-    const control = { seasonId: world.seasonId, authorityAccountId: "authority" };
+    const control = { id: "control-current", seasonId: world.seasonId, startedAt: world.startedAt, authorityAccountId: "authority" };
     const sender = service({
       getAccount: () => ({ accountId: "sender", username: "甲" }),
       getIdentity: async () => senderIdentity,
@@ -1895,6 +1895,7 @@ describe("online world platform service", () => {
     const sent = await sender.sendDirect("receiver", "general-letter", { generalId: "g1", text: "请转告旧主，我仍记得故国。" }, { fromGeneralDialogue: true });
     expect(sent.chunks).toBeGreaterThan(0);
     expect(directMessages.every(item => item.content.length <= 1000)).toBe(true);
+    expect(sender.directHistory[0]).toMatchObject({ workId: "work", seasonId: world.seasonId, controlId: "control-current" });
 
     const receiver = service({
       getAccount: () => ({ accountId: "receiver", username: "乙" }),
@@ -1945,7 +1946,7 @@ describe("online world platform service", () => {
     const world = createWorld({ authorityAccountId: "authority", seasonId: "shared-season" });
     const instance = service({ getAccount: () => ({ accountId: "authority", username: "服主" }), requestConsole: async () => { throw new Error("foreign map change stays local"); } });
     instance.work = { id: "current-work", authorAccountId: "authority" };
-    instance.control = { seasonId: world.seasonId, authorityAccountId: "authority" };
+    instance.control = { id: "control-current", seasonId: world.seasonId, startedAt: world.startedAt, authorityAccountId: "authority" };
     instance.world = world;
     const base = { schema: "fyow.map-delta/1", mapDeltaId: "foreign", seasonId: world.seasonId, actorAccountId: "player", participant: { displayName: "串局玩家" }, changes: { cells: { "1,1": { ownerAccountId: "player", soldiers: 1, generalIds: [] } }, generals: {} }, deviceSigningPublicKey: playerIdentity.signingPublicKey, deviceEncryptionPublicKey: playerIdentity.encryptionPublicKey };
     const foreignWork = signRecord({ ...base, workId: "another-work", gameId: "cc.aiero.fyow.grid-conquest" }, playerIdentity.signingPrivateKey);
@@ -2256,6 +2257,44 @@ describe("online world platform service", () => {
       expect(second.loadCache("work")?.cacheAccountId).toBe("player-b");
       const persisted = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
       expect(Object.keys(persisted.accounts).sort()).toEqual(["player-a", "player-b"]);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("binds cached letters to one game season without dropping them on a program-control update", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-letter-session-"));
+    const cacheFile = path.join(directory, "cache.json");
+    try {
+      const startedAt = 1_000_000;
+      const currentControl = { id: "control-current", seasonId: "season-reused", startedAt, authorityAccountId: "author" };
+      const first = service({ cacheFile, getAccount: () => ({ accountId: "player" }) });
+      first.work = { id: "work", authorAccountId: "author" };
+      first.control = currentControl;
+      first.world = createWorld({ seasonId: "season-reused", startedAt, authorityAccountId: "author" });
+      first.directInbox = [
+        { messageId: "old", createdAt: 1_000 },
+        { messageId: "current-tagged", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season-reused", controlId: "control-current", createdAt: 1_001_000 }
+      ];
+      first.directHistory = [
+        ...first.directInbox,
+        { messageId: "current-legacy", createdAt: 1_002_000 },
+        { messageId: "updated-control", workId: "work", seasonId: "season-reused", controlId: "control-new", createdAt: 1_003_000 },
+        { messageId: "foreign-season", workId: "work", seasonId: "season-old", controlId: "control-old", createdAt: 1_004_000 }
+      ];
+      first.seenDirectMessageIds = new Set(["old", "current-tagged", "current-legacy", "updated-control", "foreign-season"]);
+      first.saveCache();
+
+      const cached = first.loadCache("work");
+      expect(cached.directSession).toMatchObject({ workId: "work", seasonId: "season-reused", controlId: "control-current", startedAt });
+      expect(cached.directInbox.map((item: any) => item.messageId)).toEqual(["current-tagged"]);
+      expect(cached.directHistory.map((item: any) => item.messageId)).toEqual(["current-tagged", "current-legacy", "updated-control"]);
+      const second = service({ cacheFile, getAccount: () => ({ accountId: "player" }) });
+      second.work = first.work;
+      second.control = currentControl;
+      second.world = createWorld({ seasonId: "season-reused", startedAt, authorityAccountId: "author" });
+      second.restoreDirectCache(cached);
+      expect(second.directHistory.map((item: any) => item.messageId)).toEqual(["current-tagged", "current-legacy", "updated-control"]);
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }

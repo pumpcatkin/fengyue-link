@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -209,23 +209,62 @@ describe("official release security", () => {
     expect(validateManifestForRuntime(withoutInstaller).version).toBe("0.12.0");
   });
 
-  it("performs a fresh signed-manifest request on every packaged startup", async () => {
+  it("verifies a clean packaged runtime without requiring GitHub access", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "fengyue-release-attempt-"));
     temporaryDirectories.push(directory);
+    const resourcesPath = path.join(directory, "resources");
+    const proofPath = path.join(resourcesPath, "release-proof");
+    const executablePath = path.join(directory, "风月联机工具.exe");
+    const appAsarPath = path.join(resourcesPath, "app.asar");
+    mkdirSync(proofPath, { recursive: true });
+    writeFileSync(executablePath, "signed executable fixture", "utf8");
+    writeFileSync(appAsarPath, "signed app fixture", "utf8");
+    const { privateKey, publicKey } = crypto.generateKeyPairSync("ed25519");
+    const manifest = signedManifestShape();
+    manifest.version = "0.12.3";
+    manifest.tag = "v0.12.3";
+    manifest.releasePage = exactReleasePage(manifest.tag);
+    manifest.files.appAsar = {
+      path: "resources/app.asar",
+      size: Buffer.byteLength("signed app fixture"),
+      sha256: sha256File(appAsarPath)
+    };
+    manifest.files.executable = {
+      name: "风月联机工具.exe",
+      size: Buffer.byteLength("signed executable fixture"),
+      sha256: sha256File(executablePath)
+    };
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8");
+    writeFileSync(path.join(proofPath, "runtime-manifest.json"), manifestBytes);
+    writeFileSync(
+      path.join(proofPath, "runtime-manifest.sig"),
+      `${crypto.sign(null, manifestBytes, privateKey).toString("base64")}\n`,
+      "utf8"
+    );
     const options = {
       appVersion: "0.12.3",
       isPackaged: true,
-      resourcesPath: directory,
-      executablePath: path.join(directory, "风月联机工具.exe"),
-      userDataPath: directory
+      resourcesPath,
+      executablePath,
+      userDataPath: directory,
+      runtimeProofPublicKey: publicKey.export({ type: "spki", format: "pem" })
     };
     let requested = false;
     const reader = new ReleaseSecurityGate({
       ...options,
-      net: { fetch: async () => { requested = true; throw new Error("expected online verification"); } }
+      net: { fetch: async () => { requested = true; throw new Error("unexpected online verification"); } }
     });
     const state = await reader.initialize();
-    expect(state).toMatchObject({ status: "unavailable", verified: false, errorCode: "network-error" });
-    expect(requested).toBe(true);
+    expect(state).toMatchObject({
+      status: "verified",
+      verified: true,
+      source: "bundled-signed-runtime-proof",
+      verifiedFileCount: 2
+    });
+    expect(requested).toBe(false);
+
+    writeFileSync(appAsarPath, "tampered app fixture", "utf8");
+    const tampered = await new ReleaseSecurityGate({ ...options, net: reader.net }).initialize();
+    expect(tampered).toMatchObject({ status: "blocked", verified: false, errorCode: "artifact-mismatch" });
   });
 });

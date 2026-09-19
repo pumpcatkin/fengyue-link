@@ -73,6 +73,14 @@ describe("official installer auto-update", () => {
     expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
   });
 
+  it("lets the pre-login UI retry the same automatic updater without opening a browser", async () => {
+    const { service, fakeUpdater } = updateFixture();
+    await service.start();
+    await service.checkNow();
+    expect(fakeUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(service.state().status).toBe("checking");
+  });
+
   it("verifies the signed installer hash before silently installing and restarting", async () => {
     const { service, fakeUpdater, releaseSecurity, file } = updateFixture();
     await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
@@ -89,6 +97,8 @@ describe("official installer auto-update", () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(service.state().status).toBe("error");
     expect(service.state().message).toContain("完整性验证");
+    expect(service.state().message).toContain("检查网络后重试");
+    expect(service.state().message).not.toContain("手动下载安装");
     expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
     expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
   });

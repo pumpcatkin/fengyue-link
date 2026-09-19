@@ -9441,6 +9441,7 @@ handleLocalIpc("backend:confirm-action", async (_event, options = {}) => {
 handleLocalIpc("app:get-version", () => app.getVersion());
 handleLocalIpc("app:get-release-channel", () => RELEASE_CHANNEL);
 handleLocalIpc("app:open-official-release-page", () => shell.openExternal(OFFICIAL_RELEASE_PAGE));
+handleLocalIpc("app:check-for-updates", () => updateService.checkNow());
 handleLocalIpc("app:get-author-info", () => publicAuthorInfo());
 handleLocalIpc("app:open-author-link", (_event, key) => shell.openExternal(configuredAuthorUrl(key)));
 handleLocalIpc("app:quit", () => app.quit());

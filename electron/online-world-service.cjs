@@ -1192,6 +1192,27 @@ class OnlineWorldService {
     return this.state();
   }
 
+  async forgetOpenedCard() {
+    await this.pause();
+    this.card = null;
+    this.work = null;
+    this.program = builtInGridProgram();
+    this.control = null;
+    this.world = null;
+    this.error = null;
+    this.pendingMigration = null;
+    this.migrationProof = null;
+    this.migrationDraft = null;
+    this.pendingJoinPreview = null;
+    this.localEvents = [];
+    this.directInbox = [];
+    this.directHistory = [];
+    this.worldChat = [];
+    this.mapFactsCache = null;
+    this.notify();
+    return this.state();
+  }
+
   assertSyncActive() {
     if (this.syncPaused) throw new Error("游戏已暂停");
   }
@@ -4100,11 +4121,17 @@ class OnlineWorldService {
       && String(this.migrationDraft.newWorkId || "")
       ? this.migrationDraft : null;
     if (draft) return this.completeMigrationDraft(draft, oldWork, oldControl);
-    const exportedPayload = await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 });
-    const exported = exportedConfig(exportedPayload);
+    const embeddedConfiguration = this.card?.companion?.workId === oldWork.id
+      && this.card?.program?.digest === this.currentProgramHash()
+      && this.card?.companion?.configuration
+      ? cloneJson(this.card.companion.configuration)
+      : null;
+    const exported = embeddedConfiguration || exportedConfig(
+      await this.requestConsole(`/apps/${encodeURIComponent(this.work.id)}/model-config/export`, { timeout: 30000 })
+    );
     const exportJson = canonicalJson(exported);
     const exportHash = sha256(Buffer.from(exportJson));
-    const description = String(exported.desc || exported.descr || exported.dsc || exported.intro || exported.description || this.work.description || "");
+    const description = String(exported.desc || exported.descr || exported.dsc || exported.intro || exported.description || exported.app?.description || this.work.description || "");
     const identity = await this.getIdentity();
     if (identity.signingPublicKey !== oldControl.authoritySigningPublicKey) throw new Error("本机作者密钥与当前赛季权威密钥不一致");
     const created = await this.requestConsole("/apps", { method: "POST", body: { name: this.work.name, description, icon: "", icon_background: "", mode: "chat", type: 1 }, timeout: 30000 });

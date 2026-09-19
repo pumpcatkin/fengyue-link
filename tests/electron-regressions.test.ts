@@ -271,12 +271,16 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain("URL.createObjectURL(new Blob([next.programHtml]");
     expect(preload).not.toContain('activateOnlineWorldProgram: () => ipcRenderer.invoke("online-world:activate-program")');
     expect(preload).toContain('importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card")');
+    expect(preload).toContain('removeOnlineWorldCard: libraryId => ipcRenderer.invoke("online-world:remove-card", libraryId)');
     expect(main).toContain('handleLocalIpc("online-world:list-cards"');
     expect(main).toContain("loadGameCardLibrary(this.onlineWorldCardFile, null)");
-    expect(main).toContain("Map.prototype.delete.call(this.onlineWorldCards, GRID_CARD_ID)");
-    expect(main).toContain("onlineWorldCardExternalizationPath(this.profileId)");
+    expect(main).not.toContain("onlineWorldCardExternalizationPath");
     expect(main).toContain('handleLocalIpc("online-world:import-card"');
+    expect(main).toContain('handleLocalIpc("online-world:remove-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');
+    expect(renderer).toContain('className="online-world-card-remove"');
+    expect(main).toContain("state?.migration?.requiresPublish && state.isServerOwner && this.onlineWorldService.migrationDraft");
+    expect(main).toContain("this.migrateOnlineWorldCard().catch");
     expect(renderer).not.toContain("fyow:last-work-url");
     expect(main).toContain('handleLocalIpc("online-world:submit-intent"');
     expect(main).not.toContain('handleLocalIpc("online-world:activate-program"');

@@ -2122,6 +2122,33 @@ describe("online world platform service", () => {
     expect(postedComments).toHaveLength(0);
   });
 
+  it("starts migration from the signed card snapshot without exporting the old work first", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "author" });
+    const endpoints: string[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "author", username: "服主" }),
+      getIdentity: async () => identity,
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        endpoints.push(endpoint);
+        if (endpoint === "/apps" && options.method === "POST") return { data: { app: { id: "new-work-123" } } };
+        if (endpoint === "/apps/new-work-123/model-config" && options.method === "POST") throw new Error("fixture import stopped");
+        throw new Error(`unexpected migration endpoint ${endpoint}`);
+      }
+    });
+    instance.card = rebindGameCard(createBundledGridCard(), "old-work-123");
+    instance.work = { id: "old-work-123", name: "猎艳疆土", description: "program", authorAccountId: "author" };
+    instance.control = { seasonId: world.seasonId, authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
+    instance.world = world;
+    instance.readAllCommentSources = vi.fn(async () => []);
+    instance.syncNow = vi.fn(async () => instance.state());
+
+    const result = await instance.exportMigrationDraft();
+    expect(result).toMatchObject({ workId: "new-work-123", requiresConfigurationImport: true });
+    expect(endpoints).not.toContain("/apps/old-work-123/model-config/export");
+    expect(endpoints[0]).toBe("/apps");
+  });
+
   it("initializes the copied ledger before publishing a verified reset redirect", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season" });

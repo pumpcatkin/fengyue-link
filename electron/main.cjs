@@ -51,7 +51,7 @@ const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates } = require("./login-failover.cjs");
 const { OnlineWorldService } = require("./online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("./online-world-crypto.cjs");
-const { GRID_CARD_ID, GRID_COMPANION_WORK_ID, validateGameCard, summarizeGameCard, gameCardLibraryKey, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
+const { validateGameCard, summarizeGameCard, gameCardLibraryKey, loadGameCardLibrary, saveGameCardLibrary, rebindGameCard } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
 
@@ -229,10 +229,6 @@ function onlineWorldCachePath(profileId) {
 
 function onlineWorldCardLibraryPath(profileId) {
   return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.json`);
-}
-
-function onlineWorldCardExternalizationPath(profileId) {
-  return path.join(app.getPath("userData"), "online-world", "cards", `${safeProfileId(profileId)}.externalized-v1.json`);
 }
 
 function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
@@ -631,24 +627,6 @@ class AccountBackend {
     this.autoModelQueues = new Map();
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
-    const cardExternalizationMarker = onlineWorldCardExternalizationPath(this.profileId);
-    if (!fs.existsSync(cardExternalizationMarker)) {
-      // 0.15.3 shipped the official card inside the app. Remove only that
-      // legacy bundled binding; imported cards for other servers share the
-      // same cardId and must remain in the library.
-      // Bypass the compatibility lookup by cardId here: a lone migrated
-      // card with the same cardId must not be mistaken for the old bundled
-      // entry.
-      let removedBundledCard = Map.prototype.delete.call(this.onlineWorldCards, GRID_CARD_ID);
-      for (const [libraryId, card] of this.onlineWorldCards) {
-        if (card?.cardId === GRID_CARD_ID && card?.companion?.workId === GRID_COMPANION_WORK_ID) {
-          this.onlineWorldCards.delete(libraryId);
-          removedBundledCard = true;
-        }
-      }
-      if (removedBundledCard) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
-      atomicWriteJsonSync(fs, cardExternalizationMarker, { version: 1, cardId: GRID_CARD_ID }, { pretty: true });
-    }
     this.onlineWorldService = new OnlineWorldService({
       requestConsole: (pathname, options) => this.platformChatApi(pathname, options),
       requestGo: (pathname, options) => this.platformGoApi(pathname, options),
@@ -3495,14 +3473,10 @@ class AccountBackend {
 
   async listOnlineWorldCards() {
     const entries = [...this.onlineWorldCards.entries()];
-    const cards = entries.map(([libraryId, card]) => ({ ...summarizeGameCard(card, libraryId), isCurrentUserAuthor: false }));
-    let index = 0;
-    await Promise.all(Array.from({ length: Math.min(3, cards.length) }, async () => {
-      for (;;) {
-        const current = index++;
-        if (current >= cards.length) return;
-        cards[current].isCurrentUserAuthor = await this.onlineWorldService.isGameCardAuthor(entries[current][1]).catch(() => false);
-      }
+    const accountId = String(this.account.accountId || "");
+    const cards = entries.map(([libraryId, card]) => ({
+      ...summarizeGameCard(card, libraryId),
+      isCurrentUserAuthor: Boolean(accountId && card?.companion?.authorAccountId === accountId)
     }));
     return {
       cards,
@@ -3545,9 +3519,29 @@ class AccountBackend {
     const size = fs.statSync(file).size;
     if (size > 8 * 1024 * 1024) throw new Error("游戏卡文件超过 8 MiB 上限");
     const card = validateGameCard(JSON.parse(fs.readFileSync(file, "utf8")));
-    this.onlineWorldCards.set(gameCardLibraryKey(card), card);
+    const libraryId = gameCardLibraryKey(card);
+    this.onlineWorldCards.set(libraryId, card);
     saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
-    return { canceled: false, imported: summarizeGameCard(card), ...await this.listOnlineWorldCards() };
+    const persisted = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    if (!Map.prototype.has.call(persisted, libraryId)) throw new Error("游戏卡保存后回读失败");
+    this.onlineWorldCards = persisted;
+    return { canceled: false, imported: summarizeGameCard(card, libraryId), ...await this.listOnlineWorldCards() };
+  }
+
+  async removeOnlineWorldCard(libraryId) {
+    const requested = String(libraryId || "");
+    if (!requested) throw new Error("请选择要移除的游戏卡");
+    const card = this.onlineWorldCard(requested);
+    const key = gameCardLibraryKey(card);
+    if (this.onlineWorldService?.card && gameCardLibraryKey(this.onlineWorldService.card) === key) {
+      await this.onlineWorldService.forgetOpenedCard();
+    }
+    if (!Map.prototype.delete.call(this.onlineWorldCards, key)) throw new Error("游戏卡已经不在本机游戏库中");
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    const persisted = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    if (Map.prototype.has.call(persisted, key)) throw new Error("游戏卡移除后回读失败");
+    this.onlineWorldCards = persisted;
+    return { removed: summarizeGameCard(card, key), ...await this.listOnlineWorldCards() };
   }
 
   async exportOnlineWorldCard(libraryId) {
@@ -9438,6 +9432,7 @@ handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
 handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
+handleLocalIpc("online-world:remove-card", (_event, libraryId) => backend.removeOnlineWorldCard(libraryId));
 handleLocalIpc("online-world:export-card", (_event, cardId) => backend.exportOnlineWorldCard(cardId));
 handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorldCard(options || {}));
 handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));

@@ -755,21 +755,35 @@ function renderOnlineWorldCards(library={}){
     const action=document.createElement("span");action.className="online-world-cover-action";action.textContent="开始游戏";
     cover.append(mark,series,title,action);button.append(cover);
     button.addEventListener("click",()=>{closeCardAuthorMenus();selectOnlineWorldLibraryCard(card);showOnlineWorldDetails(card)});item.append(button);
-    if(card.isCurrentUserAuthor){
+    {
       const badge=document.createElement("button");badge.type="button";badge.className="online-world-author-badge";
-      badge.textContent="作者";badge.setAttribute("aria-label",`《${card.title}》作者操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
-      const menu=document.createElement("div");menu.className="online-world-author-menu hidden";menu.setAttribute("role","menu");menu.setAttribute("aria-label",`《${card.title}》作者操作`);
-      const heading=document.createElement("strong");heading.textContent=card.title;
+      badge.textContent=card.isCurrentUserAuthor?"作者":"⋯";badge.setAttribute("aria-label",`《${card.title}》游戏卡操作`);badge.setAttribute("aria-expanded","false");badge.setAttribute("aria-haspopup","menu");
+      const menu=document.createElement("div");menu.className="online-world-author-menu hidden";menu.setAttribute("role","menu");menu.setAttribute("aria-label",`《${card.title}》游戏卡操作`);
+      const heading=document.createElement("strong");heading.textContent=card.title;menu.append(heading);
+      let firstAction=null;
+      if(card.isCurrentUserAuthor){
       const exportButton=document.createElement("button");exportButton.type="button";exportButton.textContent="导出游戏卡";exportButton.setAttribute("role","menuitem");
       exportButton.addEventListener("click",()=>invoke(async()=>{
         exportButton.disabled=true;
         try{const result=await api.exportOnlineWorldCard(libraryId);if(!result.canceled)toast(`《${card.title}》已导出`)}
         finally{exportButton.disabled=false;closeCardAuthorMenus();badge.focus()}
       }).catch(()=>{}));
-      menu.append(heading,exportButton);
+        menu.append(exportButton);firstAction=exportButton;
+      }
+      const removeButton=document.createElement("button");removeButton.type="button";removeButton.className="online-world-card-remove";removeButton.textContent="移除游戏卡";removeButton.setAttribute("role","menuitem");
+      removeButton.addEventListener("click",async()=>{
+        closeCardAuthorMenus();
+        if(!await confirmAction(`从本机游戏库移除《${card.title}》？`,{title:"移除游戏卡",acceptText:"移除"})){badge.focus();return}
+        invoke(async()=>{
+          removeButton.disabled=true;
+          try{const result=await api.removeOnlineWorldCard(libraryId);closeOnlineWorldDetails();renderOnlineWorldCards(result);toast(`已移除《${card.title}》`)}
+          finally{removeButton.disabled=false}
+        }).catch(()=>{});
+      });
+      menu.append(removeButton);firstAction||=removeButton;
       badge.addEventListener("click",()=>{
         const open=menu.classList.contains("hidden");closeCardAuthorMenus(open?menu:null);
-        menu.classList.toggle("hidden",!open);badge.setAttribute("aria-expanded",String(open));if(open)exportButton.focus();
+        menu.classList.toggle("hidden",!open);badge.setAttribute("aria-expanded",String(open));if(open)firstAction.focus();
       });
       menu.addEventListener("keydown",event=>{if(event.key==="Escape"){event.stopPropagation();closeCardAuthorMenus();badge.focus()}});
       item.append(badge,menu);

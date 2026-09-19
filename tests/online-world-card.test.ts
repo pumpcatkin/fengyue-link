@@ -123,8 +123,14 @@ describe("online world game cards", () => {
     expect(loadGameCardLibrary(file, null).size).toBe(0);
 
     const imported = createBundledGridCard();
-    saveGameCardLibrary(file, new Map([[imported.cardId, imported]]));
-    expect(loadGameCardLibrary(file, null).get(imported.cardId)?.packageSha256).toBe(imported.packageSha256);
+    const libraryId = gameCardLibraryKey(imported);
+    saveGameCardLibrary(file, new Map([[libraryId, imported]]));
+    const afterRestart = loadGameCardLibrary(file, null);
+    expect(afterRestart.get(libraryId)?.packageSha256).toBe(imported.packageSha256);
+
+    Map.prototype.delete.call(afterRestart, libraryId);
+    saveGameCardLibrary(file, afterRestart);
+    expect(loadGameCardLibrary(file, null).has(libraryId)).toBe(false);
   });
 
   it("normalizes the rotating aliases returned by the creation export endpoint", () => {

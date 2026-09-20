@@ -57,6 +57,17 @@ if (process.type === "renderer") {
     if (name === "getOnlineWorldState") return onlineWorldFixture || { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "openOnlineWorld") return onlineWorldFixture;
     if (name === "closeOnlineWorld") return { ...onlineWorldFixture, status: "closed", syncing: false };
+    if (name === "updateOnlineWorldPreferences") {
+      onlineWorldFixture = {
+        ...onlineWorldFixture,
+        localPreferences: {
+          ...(onlineWorldFixture?.localPreferences || {}),
+          orientation: args[0]?.orientation || "any",
+          characterTags: args[0]?.characterTags || []
+        }
+      };
+      return onlineWorldFixture;
+    }
     if (name === "exportOnlineWorldCard") return { canceled: true };
     if (name === "setOrigin") return state;
     if (name === "confirmAction") return true;
@@ -187,6 +198,34 @@ if (process.type === "renderer") {
         return [first,second,third];
       })()`);
       assert.deepEqual(soundClickQa, ['100','0','10'], 'sound knob click should add ten percent and wrap after 100');
+      const preferencesClickQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#edit-preferences').click();
+        document.querySelector('#preference-tag-options button').click();
+        document.querySelector('input[name="preference-orientation"][value="women"]').click();
+        const button = document.querySelector('#save-preferences');
+        button.click();
+        return {
+          type: button.type,
+          disabled: button.disabled,
+          text: button.textContent,
+          status: document.querySelector('#preferences-save-status').textContent,
+          modalVisible: !document.querySelector('#preferences-modal').classList.contains('hidden')
+        };
+      })()`);
+      assert.deepEqual(preferencesClickQa, { type: 'button', disabled: true, text: '保存中…', status: '正在保存…', modalVisible: true });
+      await settle();
+      const preferenceCall = calls.filter(call => call.name === 'updateOnlineWorldPreferences').at(-1);
+      assert(preferenceCall, 'preference save button did not dispatch to the desktop host');
+      assert.equal(preferenceCall.args[0]?.orientation, 'women');
+      assert.equal(preferenceCall.args[0]?.characterTags?.length, 1);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#preferences-modal').classList.contains('hidden')`), true, 'preference modal did not close after a successful save');
+      if (process.env.FYMP_QA_PREFERENCES_ONLY === "1") {
+        assert.deepEqual(errors, []);
+        console.log("Preference save integration QA passed");
+        window.destroy();
+        app.exit(0);
+        return;
+      }
       const ordinaryButtonSoundQa = await embeddedGameFrame.executeJavaScript(`(() => {
         setSoundVolume(60,{persist:false});
         const original=audioTone; const tones=[];

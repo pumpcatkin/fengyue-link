@@ -36,3 +36,9 @@
   fyow_check_app_done:
   ${nsProcess::Unload}
 !macroend
+
+!macro customInstall
+  ${If} ${isUpdated}
+    StrCpy $launchLink "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  ${EndIf}
+!macroend

@@ -99,9 +99,9 @@ function renderUpdateSettings(security={},update={}){
   settingsUpdateAction.disabled=busy||deferredReady||update.status==="development";
   settingsUpdateAction.classList.toggle("primary",["available","ready"].includes(update.status));
   settingsUpdateAction.textContent=update.status==="available"
-    ? "更新并重启"
+    ? "重启并安装"
     : update.status==="ready"
-      ? deferredReady?"退出后安装":"安装并重启"
+      ? deferredReady?"退出后安装":"重启并安装"
       : update.status==="downloading"
         ? `下载 ${Math.round(Number(update.percent)||0)}%`
         : update.status==="verifying"
@@ -144,9 +144,9 @@ function showReleaseVerificationStatus(security,update={}){
   officialNoticeOpen.classList.toggle("primary",available||status==="ready");
   officialNoticeOpen.disabled=securityBlocked||deferredReady||["checking","downloading","verifying","installing"].includes(status);
   officialNoticeOpen.textContent=available
-    ? "更新并重启"
+    ? "重启并安装"
     : status==="ready"
-      ? deferredReady?"退出后安装":"安装并重启"
+      ? deferredReady?"退出后安装":"重启并安装"
       : ["downloading","verifying","installing"].includes(status)
         ? "更新处理中…"
         : status==="checking"

@@ -49,6 +49,7 @@ function updateFixture(canInstallNow = () => true) {
     releaseSecurity,
     isPackaged: true,
     currentVersion: "0.12.6",
+    installDirectory: path.join(directory, "current app"),
     feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
     canInstallNow,
     installDelayMs: 0
@@ -76,6 +77,9 @@ describe("official installer optional update", () => {
     expect(fakeUpdater.autoDownload).toBe(false);
     expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
     expect(fakeUpdater.allowPrerelease).toBe(false);
+    expect(fakeUpdater.autoRunAppAfterInstall).toBe(true);
+    expect(fakeUpdater.disableWebInstaller).toBe(true);
+    expect(fakeUpdater.installDirectory).toBe(service.installDirectory);
     expect(fakeUpdater.setFeedURL).toHaveBeenCalledWith({ provider: "github", owner: "pumpcatkin", repo: "fengyue-link" });
     expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
     expect(fakeUpdater.downloadUpdate).not.toHaveBeenCalled();
@@ -193,16 +197,95 @@ describe("official installer optional update", () => {
   });
 
   it("keeps a verified installer retryable when starting the installer throws", async () => {
-    const { service, fakeUpdater, file } = updateFixture();
-    fakeUpdater.quitAndInstall.mockImplementation(() => { throw new Error("installer launch failed"); });
+    const { service, fakeUpdater, releaseSecurity, file } = updateFixture();
+    fakeUpdater.quitAndInstall.mockImplementationOnce(() => { throw new Error("installer launch failed"); });
     await service.start();
     fakeUpdater.emit("update-available", { version: "0.12.7" });
     fakeUpdater.downloadUpdate.mockResolvedValue([file]);
     const result = await service.requestUpdate();
     expect(result).toMatchObject({ status: "ready", installDeferred: false });
     expect(result.message).toContain("安装程序未能启动");
+    expect(result.message).toContain("重启并安装");
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
+    expect((await service.requestUpdate()).status).toBe("installing");
+    expect(releaseSecurity.fetchSignedUpdate).toHaveBeenCalledTimes(2);
+    expect(fakeUpdater.downloadUpdate).toHaveBeenCalledOnce();
+    expect(fakeUpdater.quitAndInstall).toHaveBeenCalledTimes(2);
   });
 
+  it("rechecks the cached installer before retrying a failed launch", async () => {
+    const { service, fakeUpdater, file } = updateFixture();
+    fakeUpdater.quitAndInstall.mockImplementationOnce(() => { throw new Error("launch failed"); });
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    fakeUpdater.downloadUpdate.mockResolvedValue([file]);
+    await service.requestUpdate();
+    writeFileSync(file, "modified after verification", "utf8");
+    const result = await service.requestUpdate();
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("完整性验证");
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
+    expect(fakeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+  });
+
+  it("uses one download and one installer launch for repeated clicks", async () => {
+    const { service, fakeUpdater, file } = updateFixture();
+    let finishDownload!: (files: string[]) => void;
+    fakeUpdater.downloadUpdate.mockImplementation(() => new Promise(resolve => { finishDownload = resolve; }));
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    const first = service.requestUpdate();
+    const second = service.requestUpdate();
+    expect(first).toBe(second);
+    finishDownload([file]);
+    await Promise.all([first, second]);
+    expect(fakeUpdater.downloadUpdate).toHaveBeenCalledOnce();
+    expect(fakeUpdater.quitAndInstall).toHaveBeenCalledOnce();
+  });
+
+  it("fails explicitly when a completed download does not contain an installer", async () => {
+    const { service, fakeUpdater } = updateFixture();
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    const result = await service.requestUpdate();
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("没有返回安装包");
+    expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("passes the current directory and restart flags to the real NSIS installer adapter", async () => {
+    const { NsisUpdater } = require("electron-updater/out/NsisUpdater");
+    const { service, file } = updateFixture();
+    const nsis = new NsisUpdater(null, { version: "0.12.6", isPackaged: true });
+    nsis.logger = null;
+    nsis.spawnLog = vi.fn(async () => true);
+    nsis.downloadedUpdateHelper = { file, downloadedFileInfo: { isAdminRightsRequired: false } };
+    service.updater = nsis;
+    service.configureUpdater();
+    expect(nsis.install(true, true)).toBe(true);
+    expect(nsis.spawnLog).toHaveBeenCalledWith(file, ["--updated", "/S", "--force-run", `/D=${service.installDirectory}`]);
+    expect(nsis.autoRunAppAfterInstall).toBe(true);
+  });
+
+  it("unlocks the real NSIS adapter after an asynchronous installer launch failure", async () => {
+    const { NsisUpdater } = require("electron-updater/out/NsisUpdater");
+    const { service, file } = updateFixture();
+    const nsis = new NsisUpdater(null, { version: "0.12.6", isPackaged: true });
+    nsis.logger = null;
+    nsis.spawnLog = vi.fn().mockRejectedValueOnce(new Error("launch failed")).mockResolvedValue(true);
+    nsis.downloadedUpdateHelper = { file, downloadedFileInfo: { isAdminRightsRequired: false } };
+    nsis.quitAndInstall = (silent: boolean, restart: boolean) => nsis.install(silent, restart);
+    service.updater = nsis;
+    service.configureUpdater();
+    service.bind();
+    service.started = true;
+    service.downloadedFile = file;
+    service.scheduleInstall("0.12.7");
+    await vi.waitFor(() => expect(service.state().status).toBe("ready"));
+    expect(nsis.quitAndInstallCalled).toBe(false);
+    expect((await service.requestUpdate()).status).toBe("installing");
+    expect(nsis.spawnLog).toHaveBeenCalledTimes(2);
+  });
   it("does not restart version checks while an approved download is in progress", async () => {
     const { service, fakeUpdater } = updateFixture();
     let finishDownload!: () => void;

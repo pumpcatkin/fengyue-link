@@ -9757,6 +9757,7 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
     feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
+    installDirectory: process.platform === "win32" ? path.dirname(process.execPath) : null,
     // The player has explicitly chosen "update and restart". Install as soon as
     // the downloaded installer passes the signed release-manifest checks.
     canInstallNow: () => true,

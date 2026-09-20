@@ -5,6 +5,7 @@ const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.
 const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
 const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
 const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+const installer = readFileSync(new URL("../build/installer.nsh", import.meta.url), "utf8");
 
 describe("optional desktop updates", () => {
   it("keeps GitHub version status and its action available in settings", () => {
@@ -16,7 +17,9 @@ describe("optional desktop updates", () => {
     expect(renderer).toContain('document.querySelector("#settings-update-status")');
     expect(renderer).toContain('document.querySelector("#settings-update-action")');
     expect(renderer).toContain("renderUpdateSettings(security,update)");
-    expect(renderer).toContain('? "更新并重启"');
+    expect(renderer.match(/\? "重启并安装"/g)).toHaveLength(2);
+    expect(renderer.match(/\?"退出后安装":"重启并安装"/g)).toHaveLength(2);
+    expect(renderer).not.toContain('"更新并重启"');
     expect(renderer).toContain('officialNoticeTitle.textContent="正在获取最新版本信息"');
     expect(renderer).toContain(': "正在获取最新版本信息"');
   });
@@ -27,6 +30,7 @@ describe("optional desktop updates", () => {
     expect(main).toContain('handleLocalIpc("app:check-for-updates", () => updateService.checkNow())');
     expect(main).toContain('handleLocalIpc("app:request-update", () => updateService.requestUpdate())');
     expect(main).toContain("canInstallNow: () => true");
+    expect(main).toContain('installDirectory: process.platform === "win32" ? path.dirname(process.execPath) : null');
     expect(renderer).toContain('const update=["available","ready"].includes(currentStatus)');
     expect(renderer).toContain("? await api.requestAppUpdate()");
     expect(renderer).toContain(": await api.checkForUpdates()");
@@ -37,5 +41,11 @@ describe("optional desktop updates", () => {
     expect(renderer).toContain('if(officialNoticeCard.dataset.mode==="blocked"){void api.quitApp();return}');
     expect(renderer).toContain("releaseNoticeDismissed=true");
     expect(renderer).toContain('officialNoticeOverlay.classList.add("hidden")');
+  });
+
+  it("restarts the installed executable instead of a possibly stale shortcut", () => {
+    const hook = installer.slice(installer.indexOf("!macro customInstall"));
+    expect(hook).toContain("${If} ${isUpdated}");
+    expect(hook).toContain('StrCpy $launchLink "$INSTDIR\\${APP_EXECUTABLE_FILENAME}"');
   });
 });

@@ -830,14 +830,28 @@ if (process.type === "renderer") {
       assert(navigationCalls.some(call => call.name === "leaveRoom"));
       assert(navigationCalls.some(call => call.name === "hidePlatform"));
       assert.equal(await evaluate(`!document.querySelector('#home-page').classList.contains('hidden')`), true);
-      state = { ...state, releaseSecurity: { status: "update-required", verified: false, message: "发现官方新版本 v9.9.9", currentVersion: version, latestVersion: "9.9.9" } };
+      state = { ...state, appUpdate: { status: "available", currentVersion: version, latestVersion: "9.9.9" }, releaseSecurity: { status: "update-required", verified: false, message: "发现官方新版本 v9.9.9", currentVersion: version, latestVersion: "9.9.9" } };
       await evaluate(`releaseNoticeDismissed=false`);
       window.webContents.send("qa:onState", state);
       await settle();
       assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "发现新的官方版本");
       assert.equal(await evaluate(`document.querySelector('#official-notice-action').textContent`), "暂不更新");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-open').textContent`), "重启并安装");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-open').disabled`), false);
+      assert.equal(await evaluate(`document.querySelector('#settings-update-action').textContent`), "重启并安装");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
       fs.writeFileSync(path.join(outputDir, "official-update-required.png"), (await window.webContents.capturePage()).toPNG());
+      const updateCalls = calls.filter(call => call.name === "requestAppUpdate").length;
+      await evaluate(`document.querySelector('#official-notice-open').click()`);
+      await settle();
+      assert.equal(calls.filter(call => call.name === "requestAppUpdate").length, updateCalls + 1);
+      state = { ...state, appUpdate: { status: "ready", currentVersion: version, latestVersion: "9.9.9", installDeferred: false }, releaseSecurity: { status: "verified", verified: true, currentVersion: version } };
+      window.webContents.send("qa:onState", state);
+      await settle();
+      assert.equal(await evaluate(`document.querySelector('#official-notice-open').textContent`), "重启并安装");
+      await evaluate(`document.querySelector('#official-notice-open').click()`);
+      await settle();
+      assert.equal(calls.filter(call => call.name === "requestAppUpdate").length, updateCalls + 2);
       assert.deepEqual(errors, []);
 
       // Exercise the real Electron response interceptor against a local fixture.

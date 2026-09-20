@@ -15,6 +15,7 @@ class OfficialUpdateService {
     this.feedOptions = options.feedOptions || null;
     this.isPackaged = Boolean(options.isPackaged);
     this.currentVersion = String(options.currentVersion || "");
+    this.installDirectory = options.installDirectory ? path.resolve(options.installDirectory) : null;
     this.canInstallNow = typeof options.canInstallNow === "function" ? options.canInstallNow : () => true;
     this.onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : () => {};
     this.installDelayMs = Math.max(0, Number(options.installDelayMs ?? 0));
@@ -26,6 +27,7 @@ class OfficialUpdateService {
     this.updateApproved = false;
     this.downloadPromise = null;
     this.verificationPromise = null;
+    this.requestPromise = null;
     this.updateState = this.makeState(this.isPackaged ? "idle" : "development", this.isPackaged
       ? "启动后会自动检查官方更新"
       : "开发模式不运行安装包更新");
@@ -81,7 +83,10 @@ class OfficialUpdateService {
     }
     this.updater.autoDownload = false;
     this.updater.autoInstallOnAppQuit = false;
+    this.updater.autoRunAppAfterInstall = true;
+    this.updater.disableWebInstaller = true;
     this.updater.allowPrerelease = false;
+    if (this.installDirectory) this.updater.installDirectory = this.installDirectory;
   }
 
   async start() {
@@ -166,13 +171,22 @@ class OfficialUpdateService {
     });
   }
 
-  async requestUpdate() {
+  requestUpdate() {
+    if (this.requestPromise) return this.requestPromise;
+    this.requestPromise = this.performUpdateRequest().finally(() => { this.requestPromise = null; });
+    return this.requestPromise;
+  }
+
+  async performUpdateRequest() {
     if (!this.isPackaged) return this.state();
     if (!this.started) await this.start();
     if (this.installing) return this.state();
     if (this.downloadedFile) {
       this.updateApproved = true;
-      if (this.canInstallNow()) this.scheduleInstall(this.updateState.latestVersion || this.currentVersion);
+      await this.verifyAndInstall({
+        version: this.updateState.latestVersion,
+        downloadedFile: this.downloadedFile
+      });
       return this.state();
     }
     if (this.updateState.status !== "available") {
@@ -195,7 +209,8 @@ class OfficialUpdateService {
         const installerFile = Array.isArray(downloadedFiles)
           ? downloadedFiles.find(file => /\.exe$/i.test(String(file || ""))) || downloadedFiles[0]
           : null;
-        if (installerFile) await this.verifyAndInstall({ version, downloadedFile: installerFile });
+        if (!installerFile) throw new ReleaseSecurityError("missing-update-installer", "更新下载没有返回安装包，请重试");
+        await this.verifyAndInstall({ version, downloadedFile: installerFile });
       }
     } catch (error) {
       this.onError(error);
@@ -233,7 +248,10 @@ class OfficialUpdateService {
     this.installTimer = null;
     const detail = String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 300);
     if (wasInstalling && this.downloadedFile) {
-      this.setState("ready", `安装程序未能启动：${detail}。请点击“安装并重启”重试。`, {
+      // electron-updater retains this guard after an asynchronous NSIS launch error.
+      if (this.updater.quitAndInstallCalled === true) this.updater.quitAndInstallCalled = false;
+      this.updater.autoInstallOnAppQuit = false;
+      this.setState("ready", `安装程序未能启动：${detail}。请点击“重启并安装”重试。`, {
         latestVersion: this.updateState.latestVersion,
         percent: 100,
         installDeferred: false,
@@ -305,6 +323,7 @@ class OfficialUpdateService {
 
   scheduleInstall(version) {
     if (this.installing || this.installTimer) return;
+    if (this.installDirectory) this.updater.installDirectory = this.installDirectory;
     this.setState("installing", `v${version} 已验证，正在自动安装并重启…`, {
       latestVersion: version,
       percent: 100

@@ -44,6 +44,27 @@ describe("grid cultivation and integrated talents", () => {
     expect(middle.powerGain).toBeGreaterThan(low.powerGain);
   });
 
+  it.each([0, 1, 2, 3, 4])("uses the same five-to-one-hundred-percent range for player stage %i", count => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const player = state.players.a;
+    player.cultivationCount = count;
+    player.gold = 2_000_000;
+    const range = game.CULTIVATION_RANGES[count];
+    const minimum = range.goldMin * game.PLAYER_CULTIVATION_GOLD_MULTIPLIER;
+    const maximum = range.goldMax * game.PLAYER_CULTIVATION_GOLD_MULTIPLIER;
+    const investments: [number, number][] = [[minimum, 5], [(minimum + maximum) / 2, 52.5], [maximum, 100]];
+    for (const [goldInvestment, expectedPercent] of investments) {
+      const result = game.applyIntent(state, { type: "cultivate-player", goldInvestment, idempotencyKey: `player-range-${count}-${goldInvestment}` }, { actorAccountId: "a", now });
+      expect(result.result.basePowerGainPercent).toBe(expectedPercent);
+      expect(result.result.randomFactor).toBeGreaterThanOrEqual(0.5);
+      expect(result.result.randomFactor).toBeLessThanOrEqual(1.5);
+      expect(result.result.cost).toBe(goldInvestment);
+      expect(result.state.players.a.gold).toBe(2_000_000 - goldInvestment);
+      expect(result.state.players.a.power).toBeGreaterThan(player.power);
+    }
+  });
+
   it.each(["waiting", "market", "deployed", "captured"])("rejects a %s general even when experience and budget are sufficient", status => {
     const state = grant(joined(), 1_000_000, "not-carried");
     state.players.a.gold = 100_000;

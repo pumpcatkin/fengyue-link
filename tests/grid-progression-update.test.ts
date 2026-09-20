@@ -107,7 +107,7 @@ describe("grid progression update rules", () => {
     expect(game.marchCost(1, 11, 2)).toBe(7);
   });
 
-  it("requires general experience, but lets the player cultivate with 2.5x gold and 10% lower gain", () => {
+  it("requires general experience, but lets the player cultivate with 2.5x gold and the same gain range", () => {
     let state = grant(joined(), "cultivator");
     const general = state.generals.cultivator;
     const player = state.players.a;
@@ -127,7 +127,7 @@ describe("grid progression update rules", () => {
     expect(generalQuote.experienceReady).toBe(true);
     expect(playerQuote.goldMin).toBe(Math.ceil(game.CULTIVATION_RANGES[0].goldMin * 2.5));
     expect(playerQuote.goldMax).toBe(Math.ceil(game.CULTIVATION_RANGES[0].goldMax * 2.5));
-    expect(playerQuote.basePowerGainPercent).toBeCloseTo(generalQuote.basePowerGainPercent * 0.9, 2);
+    expect(playerQuote.basePowerGainPercent).toBe(generalQuote.basePowerGainPercent);
     expect(playerQuote.materialCount).toBe(0);
   });
 

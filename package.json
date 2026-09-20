@@ -56,6 +56,12 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/app-update.yml",
+        "to": "app-update.yml"
+      }
+    ],
     "win": {
       "icon": "build/cat-pumpkin-logo.ico",
       "target": [

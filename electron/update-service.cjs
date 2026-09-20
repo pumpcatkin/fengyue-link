@@ -12,6 +12,7 @@ class OfficialUpdateService {
   constructor(options) {
     this.updater = options.updater;
     this.releaseSecurity = options.releaseSecurity;
+    this.feedOptions = options.feedOptions || null;
     this.isPackaged = Boolean(options.isPackaged);
     this.currentVersion = String(options.currentVersion || "");
     this.canInstallNow = typeof options.canInstallNow === "function" ? options.canInstallNow : () => true;
@@ -67,12 +68,19 @@ class OfficialUpdateService {
     this.updater.on("error", this.listeners.error);
   }
 
-  async start() {
-    if (!this.isPackaged || this.started) return this.state();
-    this.started = true;
+  configureUpdater() {
+    if (this.feedOptions && typeof this.updater.setFeedURL === "function") {
+      this.updater.setFeedURL(this.feedOptions);
+    }
     this.updater.autoDownload = false;
     this.updater.autoInstallOnAppQuit = false;
     this.updater.allowPrerelease = false;
+  }
+
+  async start() {
+    if (!this.isPackaged || this.started) return this.state();
+    this.started = true;
+    this.configureUpdater();
     this.bind();
     return this.checkNow();
   }
@@ -81,9 +89,7 @@ class OfficialUpdateService {
     if (!this.isPackaged) return this.state();
     if (!this.started) {
       this.started = true;
-      this.updater.autoDownload = false;
-      this.updater.autoInstallOnAppQuit = false;
-      this.updater.allowPrerelease = false;
+      this.configureUpdater();
       this.bind();
     }
     if (this.installing) return this.state();

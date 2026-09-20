@@ -9518,6 +9518,7 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
   updateService = new OfficialUpdateService({
     updater: autoUpdater,
     releaseSecurity,
+    feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
     canInstallNow: () => Boolean(backend && !backend.loggedIn && !backend.loginInProgress && !backend.room),

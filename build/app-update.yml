@@ -1,0 +1,4 @@
+provider: github
+owner: pumpcatkin
+repo: fengyue-link
+updaterCacheDirName: fengyue-link-updater

@@ -19,6 +19,7 @@ function updater() {
   value.checkForUpdates = vi.fn(async () => null);
   value.downloadUpdate = vi.fn(async () => []);
   value.quitAndInstall = vi.fn();
+  value.setFeedURL = vi.fn();
   return value;
 }
 
@@ -45,6 +46,7 @@ function updateFixture(canInstallNow = () => true) {
     releaseSecurity,
     isPackaged: true,
     currentVersion: "0.12.6",
+    feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
     canInstallNow,
     installDelayMs: 0
   });
@@ -71,6 +73,7 @@ describe("official installer optional update", () => {
     expect(fakeUpdater.autoDownload).toBe(false);
     expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
     expect(fakeUpdater.allowPrerelease).toBe(false);
+    expect(fakeUpdater.setFeedURL).toHaveBeenCalledWith({ provider: "github", owner: "pumpcatkin", repo: "fengyue-link" });
     expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
     expect(fakeUpdater.downloadUpdate).not.toHaveBeenCalled();
     expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();

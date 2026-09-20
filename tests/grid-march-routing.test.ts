@@ -53,7 +53,134 @@ function ownSoldierTotal(state: any) {
   return garrison + fieldArmy + marching;
 }
 
+function expectedMarchQuote(quote: any) {
+  return {
+    revision: quote.revision,
+    requestKey: quote.requestKey,
+    path: structuredClone(quote.path),
+    cost: quote.cost,
+    durationMs: quote.durationMs
+  };
+}
+
 describe("authoritative march routing", () => {
+  it("accepts the exact authoritative quote when the service requires march CAS", () => {
+    const state = marchingState();
+    const to = { x: 12, y: 10 };
+    const quote = game.marchQuote(state, "a", to, 10, [], false, NOW);
+
+    expect(quote).toMatchObject({
+      revision: state.revision,
+      requestKey: JSON.stringify({ to, soldiers: 10, attack: false, revision: state.revision, from: { x: 10, y: 10 } })
+    });
+    const started = game.applyIntent(state, {
+      type: "march", to, soldiers: 10, attack: false,
+      expectedQuote: expectedMarchQuote(quote), idempotencyKey: "quoted-march"
+    }, { actorAccountId: "a", now: NOW, requireExpectedMarchQuote: true });
+
+    expect(started.result).toMatchObject({ cost: quote.cost, durationMs: quote.durationMs });
+    expect(started.state.jobs[started.result.jobId].path).toEqual(quote.path);
+  });
+
+  it.each([
+    ["revision", (expected: any) => { expected.revision += 1; }],
+    ["requestKey", (expected: any) => { expected.requestKey += ":stale"; }],
+    ["path", (expected: any) => { expected.path = expected.path.slice().reverse(); }],
+    ["cost", (expected: any) => { expected.cost += 1; }],
+    ["durationMs", (expected: any) => { expected.durationMs += 1; }]
+  ])("rejects a changed expected quote field %s before charging or creating a job", (_field, change) => {
+    const state = marchingState();
+    const to = { x: 12, y: 10 };
+    const quote = game.marchQuote(state, "a", to, 10, [], false, NOW);
+    const expectedQuote = expectedMarchQuote(quote);
+    change(expectedQuote);
+    const before = structuredClone(state);
+
+    let error: any;
+    try {
+      game.applyIntent(state, {
+        type: "march", to, soldiers: 10, attack: false,
+        expectedQuote, idempotencyKey: `changed-quote-${_field}`
+      }, { actorAccountId: "a", now: NOW, requireExpectedMarchQuote: true });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({
+      code: game.MARCH_QUOTE_CHANGED_ERROR_CODE,
+      errorCode: game.MARCH_QUOTE_CHANGED_ERROR_CODE
+    });
+    expect(state).toEqual(before);
+    expect(state.players.a.gold).toBe(before.players.a.gold);
+    expect(state.players.a.fieldArmySoldiers).toBe(before.players.a.fieldArmySoldiers);
+    expect(state.jobs).toEqual({});
+  });
+
+  it("requires an expected quote on the formal service march path", () => {
+    const state = marchingState();
+    const before = structuredClone(state);
+    let error: any;
+
+    try {
+      game.applyIntent(state, {
+        type: "march", to: { x: 11, y: 10 }, soldiers: 10, attack: false, idempotencyKey: "missing-quote"
+      }, { actorAccountId: "a", now: NOW, requireExpectedMarchQuote: true });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toMatchObject({ code: game.MARCH_QUOTE_CHANGED_ERROR_CODE });
+    expect(state).toEqual(before);
+  });
+
+  it("discounts owned cells by seventy-five percent and chooses the cheapest weighted route", () => {
+    const state = marchingState({ from: { x: 0, y: 0 }, fieldArmySoldiers: 30, garrison: 0 });
+    for (const point of [{ x: 0, y: 1 }, { x: 1, y: 1 }, { x: 2, y: 1 }]) {
+      state.cells[cellKey(point)] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    }
+
+    const quote = game.marchQuote(state, "a", { x: 2, y: 0 }, 30, [], false, NOW);
+
+    expect(quote.path).toEqual([
+      { x: 0, y: 1 }, { x: 1, y: 1 }, { x: 2, y: 1 }, { x: 2, y: 0 }
+    ]);
+    expect(quote).toMatchObject({
+      distance: 4,
+      ownDistance: 3,
+      ordinaryDistance: 1,
+      weightQuarters: 7,
+      weightedDistance: 1.75,
+      baseCost: 7,
+      baseDurationMs: 26_250,
+      durationMs: 26_250
+    });
+    expect(quote.baseCost).toBeLessThan(game.marchCost(2, 30, 0));
+    expect(game.findMarchPath(state, "a", { x: 0, y: 0 }, { x: 2, y: 0 })).toEqual(quote.path);
+  });
+
+  it("allows an enemy destination as the final attack step without crossing enemy territory", () => {
+    const state = marchingState();
+    const target = { x: 12, y: 10 };
+    state.cells[cellKey(target)] = { ownerAccountId: "b", soldiers: 1, generalIds: [] };
+
+    expect(game.findMarchPath(state, "a", state.players.a.position, target, { attack: false })).toBeNull();
+    expect(game.findMarchPath(state, "a", state.players.a.position, target, { attack: true })).toEqual([
+      { x: 11, y: 10 }, target
+    ]);
+  });
+
+  it("rejects an enemy destination only when every legal entrance is sealed", () => {
+    const state = marchingState();
+    const target = { x: 12, y: 10 };
+    for (const point of [target, { x: 11, y: 10 }, { x: 13, y: 10 }, { x: 12, y: 9 }, { x: 12, y: 11 }]) {
+      state.cells[cellKey(point)] = { ownerAccountId: "b", soldiers: 1, generalIds: [] };
+    }
+
+    expect(game.findMarchPath(state, "a", state.players.a.position, target, { attack: true })).toBeNull();
+    delete state.cells["12,9"];
+    expect(game.findMarchPath(state, "a", state.players.a.position, target, { attack: true })?.at(-1)).toEqual(target);
+  });
+
   it("uses the shortest passable detour instead of crossing another player's territory", () => {
     const state = marchingState();
     const target = { x: 14, y: 10 };

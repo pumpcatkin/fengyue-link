@@ -414,7 +414,8 @@ if (process.type === "renderer") {
       fs.writeFileSync(path.join(outputDir, "map-task-mining.png"), (await window.webContents.capturePage()).toPNG());
       const trainingTip = await hoverTask(4.8, 7.2);
       assert.equal(trainingTip.hidden, false);
-      assert(trainingTip.text.includes("练兵") && trainingTip.text.includes("40 士兵") && trainingTip.text.includes("剩余"));
+      assert(trainingTip.text.includes("练兵") && trainingTip.text.includes("预计新增：30 士兵")
+        && trainingTip.text.includes("计划 40 人") && trainingTip.text.includes("剩余"));
       await settle();
       fs.writeFileSync(path.join(outputDir, "map-task-training.png"), (await window.webContents.capturePage()).toPNG());
       const marchTip = await hoverTask(8, 8.5);
@@ -608,6 +609,7 @@ if (process.type === "renderer") {
       await embeddedGameFrame.executeJavaScript(`for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId); marchSubmitting=false; closeMarchConfirmation({force:true}); payload.world.players.a.fieldArmySoldiers=30; selected={x:10,y:10}; renderCell()`);
       const neutralUnderfootQa = await embeddedGameFrame.executeJavaScript(`(() => {
         const owned=payload.world.cells['4,7']; delete payload.world.cells['4,7']; selected={x:4,y:7}; openMarchConfirmation();
+        marchQuoteCache={revision:payload.world.revision,requestKey:marchQuoteKey(),path:[],cost:0,durationMs:0}; renderMarchConfirmation();
         const value={attackHidden:document.querySelector('#march-attack-field').classList.contains('hidden'),cost:document.querySelector('#march-party-cost').textContent,duration:document.querySelector('#march-party-duration').textContent,submitText:document.querySelector('#march-confirmation-submit').textContent,submitDisabled:document.querySelector('#march-confirmation-submit').disabled};
         closeMarchConfirmation(); payload.world.cells['4,7']=owned; selected={x:10,y:10}; renderCell(); return value;
       })()`);

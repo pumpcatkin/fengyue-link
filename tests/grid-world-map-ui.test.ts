@@ -24,6 +24,7 @@ function harness() {
     payload: { world: { jobs } }, selected: { x: 8, y: 9 },
     ownAccountId: () => "self", ownPlayer: () => ({ position: { x: 4, y: 7 }, fieldArmySoldiers: 100, carriedGeneralIds: [] }),
     dynamicCell: () => ({ soldiers: 90 }), fact: () => ({ garrisonCap: 100 }),
+    garrisonCapAt: () => 100,
     hostTime: () => 1000, formatDuration: (ms: number) => `${Math.ceil(ms / 1000)}秒`, formatNumber: (n: number) => String(n),
     mapTaskOverlays: [], mapPointer: null, panState: null,
     canvas: {
@@ -226,7 +227,10 @@ describe("grid world map task overlays", () => {
     expect(source).toContain('if (marchAvailable() < 1) {');
     expect(source).toContain('document.querySelector("#zero-army-march-confirmation").classList.remove("hidden")');
     expect(source).toContain('document.querySelector("#zero-army-march-confirm").addEventListener("click", dispatchMarch)');
-    expect(source).toContain('const requestId = sendIntent({ type: "march", ...selectedMarchIntent() })');
+    expect(source).toContain('const requestId = sendIntent({ type: "march", ...selectedMarchIntent(target), expectedQuote })');
+    expect(source).toContain('revision: marchQuoteCache.revision');
+    expect(source).toContain('requestKey: marchQuoteCache.requestKey');
+    expect(source).toContain('event.data.errorCode === "FYOW_MARCH_QUOTE_CHANGED"');
     expect(source).toContain('requestState?.key?.startsWith("intent:quote-march:")');
     expect(source).toContain('submit.disabled = marchSubmitting || transferPending');
     expect(source).toContain('if (marchSubmitting && !force) return false;');
@@ -300,6 +304,57 @@ describe("grid world map task overlays", () => {
       expect(ctx.marchMapRoute(bad, { x: 1, y: 1 })).toBeNull();
     }
     expect(ctx.mapTaskDescription(route)).toContain("预计耗时：90秒");
+  });
+
+  it("prefers discounted owned roads and automatically routes to a reachable enemy target", () => {
+    const { ctx } = harness();
+    const cells: Record<string, any> = {
+      "4,7": { ownerAccountId: "self", soldiers: 0, generalIds: [] },
+      "4,8": { ownerAccountId: "self", soldiers: 0, generalIds: [] },
+      "5,8": { ownerAccountId: "self", soldiers: 0, generalIds: [] },
+      "6,8": { ownerAccountId: "self", soldiers: 0, generalIds: [] }
+    };
+    ctx.dynamicCell = (x: number, y: number) => cells[`${x},${y}`] || { ownerAccountId: null, soldiers: 0, generalIds: [] };
+    const target = { x: 6, y: 7 };
+    const economic = ctx.marchMapRoute({ x: 4, y: 7 }, target);
+    expect(economic.path).toEqual([{ x: 4, y: 8 }, { x: 5, y: 8 }, { x: 6, y: 8 }, target]);
+    expect(economic).toMatchObject({ ownDistance: 3, ordinaryDistance: 1, weightQuarters: 7, durationMs: 26_250 });
+
+    cells["6,7"] = { ownerAccountId: "enemy", soldiers: 1, generalIds: [] };
+    ctx.selected = target;
+    expect(ctx.selectedMarchIntent().attack).toBe(true);
+    expect(ctx.marchMapRoute({ x: 4, y: 7 }, target, { attack: true })?.path.at(-1)).toEqual(target);
+
+    for (const point of [{ x: 5, y: 7 }, { x: 7, y: 7 }, { x: 6, y: 6 }, { x: 6, y: 8 }]) {
+      cells[`${point.x},${point.y}`] = { ownerAccountId: "enemy", soldiers: 1, generalIds: [] };
+    }
+    expect(ctx.marchMapRoute({ x: 4, y: 7 }, target, { attack: true })).toBeNull();
+    expect(source).toContain('inaccessible ? "无法抵达"');
+  });
+
+  it("isolates map-preview routes from an open confirmation target and rejects mismatched cached paths", () => {
+    const { ctx } = harness();
+    const modalTarget = { x: 6, y: 7 };
+    const selectedTarget = { x: 8, y: 9 };
+    ctx.marchConfirmationTarget = modalTarget;
+    ctx.selected = selectedTarget;
+    ctx.marchQuoteCache = {
+      requestKey: ctx.marchQuoteKey(modalTarget),
+      path: [{ x: 5, y: 7 }, modalTarget],
+      cost: 2,
+      durationMs: 30_000
+    };
+
+    const preview = ctx.buildMapTaskOverlays().find((item: any) => item.type === "march");
+    expect(preview.to).toEqual(selectedTarget);
+    expect(preview.path.at(-1)).toEqual(selectedTarget);
+    expect(preview.distance).toBe(6);
+
+    const recovered = ctx.marchMapRoute({ x: 4, y: 7 }, selectedTarget, {
+      path: [{ x: 5, y: 7 }, modalTarget]
+    });
+    expect(recovered.path.at(-1)).toEqual(selectedTarget);
+    expect(recovered.distance).toBe(6);
   });
 
   it("keeps the active route from its stored origin even after a different tile is selected", () => {

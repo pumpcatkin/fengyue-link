@@ -48,6 +48,9 @@ const {
   ensurePowerProgress,
   generalExperienceRequirement,
   ensureGeneralProfile,
+  cellOccupationCount,
+  cellGarrisonCap,
+  MAX_OCCUPATION_COUNT,
   publicMarketListingState,
   projectWorldState,
   publicGeneralState
@@ -279,20 +282,68 @@ function compareOrderValue(left, right) {
     || String(left?.commentId || "").localeCompare(String(right?.commentId || ""));
 }
 
-function publicCells(state) {
+function publicCells(state, { includeOccupationCount = false } = {}) {
   return Object.fromEntries(Object.entries(state?.cells || {})
-    .filter(([, cell]) => cell?.ownerAccountId || Number(cell?.soldiers || 0) || (cell?.generalIds || []).length)
+    .filter(([, cell]) => cell?.ownerAccountId || Number(cell?.soldiers || 0) || (cell?.generalIds || []).length || cellOccupationCount(cell) > 0)
     .map(([key, cell]) => [key, {
       ownerAccountId: cell.ownerAccountId ? String(cell.ownerAccountId) : null,
       soldiers: Math.max(0, Math.trunc(Number(cell.soldiers || 0))),
-      generalIds: [...new Set((cell.generalIds || []).map(String))].slice(0, 2)
+      generalIds: [...new Set((cell.generalIds || []).map(String))].slice(0, 2),
+      ...(includeOccupationCount ? { occupationCount: cellOccupationCount(cell) } : {})
     }]));
 }
 
 function isPublicCellShape(cell) {
   if (!cell || typeof cell !== "object" || Array.isArray(cell)) return false;
   const keys = Object.keys(cell).sort();
-  return keys.length === 3 && keys[0] === "generalIds" && keys[1] === "ownerAccountId" && keys[2] === "soldiers";
+  const legacy = keys.length === 3 && keys[0] === "generalIds" && keys[1] === "ownerAccountId" && keys[2] === "soldiers";
+  const current = keys.length === 4 && keys[0] === "generalIds" && keys[1] === "occupationCount"
+    && keys[2] === "ownerAccountId" && keys[3] === "soldiers";
+  if (!legacy && !current) return false;
+  return legacy || (Number.isSafeInteger(cell.occupationCount)
+    && cell.occupationCount >= 0 && cell.occupationCount <= MAX_OCCUPATION_COUNT);
+}
+
+function comparablePublicCell(cell) {
+  if (!cell) return null;
+  return {
+    ownerAccountId: cell.ownerAccountId ? String(cell.ownerAccountId) : null,
+    soldiers: Math.max(0, Math.trunc(Number(cell.soldiers || 0))),
+    generalIds: [...new Set((cell.generalIds || []).map(String))].slice(0, 2),
+    occupationCount: cellOccupationCount(cell)
+  };
+}
+
+function samePublicCell(left, right) {
+  return canonicalJson(comparablePublicCell(left)) === canonicalJson(comparablePublicCell(right));
+}
+
+function validOccupationTransition(currentCell, nextCell, { allowLegacy = true, baseCell = currentCell, requireBase = false } = {}) {
+  const currentCount = cellOccupationCount(currentCell);
+  const explicit = Object.hasOwn(nextCell || {}, "occupationCount");
+  // Historical records predate this field. They remain replayable only while
+  // the canonical cell has never acquired an explicit positive count and the
+  // signed control record says the record predates the protocol cutover.
+  if (!explicit) return allowLegacy && currentCount === 0;
+  const nextCount = Number(nextCell.occupationCount);
+  if (!Number.isSafeInteger(nextCount) || nextCount < 0 || nextCount > MAX_OCCUPATION_COUNT) return false;
+  const transitionBase = requireBase ? baseCell : currentCell;
+  const baseCount = cellOccupationCount(transitionBase);
+  const baseOwner = String(transitionBase?.ownerAccountId || "");
+  const nextOwner = String(nextCell?.ownerAccountId || "");
+  const ownerChanged = baseOwner !== nextOwner;
+  const expected = ownerChanged && nextCell?.ownerAccountId
+    ? Math.min(MAX_OCCUPATION_COUNT, baseCount + 1)
+    : baseCount;
+  if (nextCount !== expected) return false;
+  if (!requireBase || samePublicCell(currentCell, transitionBase) || samePublicCell(currentCell, nextCell)) return true;
+  // Two players may publish from the same observed owner before either sees the
+  // other. Both describe one causal takeover, so the later platform record may
+  // replace the earlier winner at the same increment instead of inventing an
+  // extra occupation that never happened on either client.
+  const currentOwner = String(currentCell?.ownerAccountId || "");
+  return ownerChanged && Boolean(nextOwner) && currentCount === expected
+    && currentOwner !== baseOwner && currentOwner !== nextOwner;
 }
 
 function validGeneralTransitionShape(id, transition) {
@@ -434,12 +485,20 @@ function publicBattleChanges(beforeWorld, afterWorld, effects = [], actorAccount
 }
 
 function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAccountId = "") {
+  const beforeCells = publicCells(beforeWorld);
+  const afterCells = publicCells(afterWorld);
+  const countedBeforeCells = publicCells(beforeWorld, { includeOccupationCount: true });
+  const cells = changedEntries(beforeCells, afterCells);
   const claims = changedEntries(beforeWorld?.claimedTreasures || {}, afterWorld?.claimedTreasures || {});
   for (const [id, claim] of Object.entries(claims)) {
     if (claim) claim.materialId = String(beforeWorld?.treasureSpawns?.[id]?.materialId || claim.materialId || "");
   }
   return {
-    cells: changedEntries(publicCells(beforeWorld), publicCells(afterWorld)),
+    cells,
+    cellBases: Object.fromEntries(Object.keys(cells).map(key => [key, {
+      cell: Object.hasOwn(countedBeforeCells, key) ? cloneJson(countedBeforeCells[key]) : null,
+      nextOccupationCount: cellOccupationCount(afterWorld?.cells?.[key])
+    }])),
     generals: changedPublicGenerals(beforeWorld, afterWorld),
     generalTransitions: changedPublicGeneralTransitions(beforeWorld, afterWorld),
     marketListings: changedEntries(publicMarketListings(beforeWorld), publicMarketListings(afterWorld)),
@@ -466,6 +525,37 @@ function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAcco
           }))
         }];
       }))
+  };
+}
+
+function attachCellBaseOrders(changes, cellOrders, baselineOrder) {
+  for (const [key, base] of Object.entries(changes?.cellBases || {})) {
+    if (!base || typeof base !== "object" || Array.isArray(base)) continue;
+    base.order = ledgerOrder(cellOrders?.[key] || baselineOrder);
+  }
+  return changes;
+}
+
+function occupationEnvelope(changes, key) {
+  const wireCell = changes?.cells?.[key];
+  const raw = changes?.cellBases?.[key];
+  const modern = Boolean(raw && typeof raw === "object" && !Array.isArray(raw)
+    && Object.hasOwn(raw, "cell") && Object.hasOwn(raw, "nextOccupationCount") && Object.hasOwn(raw, "order"));
+  return {
+    modern,
+    baseCell: modern ? raw.cell : null,
+    baseOrder: modern ? ledgerOrder(raw.order) : { timestamp: 0, commentId: "" },
+    nextCell: wireCell == null ? null : {
+      ...wireCell,
+      ...(modern ? { occupationCount: raw.nextOccupationCount } : {})
+    }
+  };
+}
+
+function occupationBaseDescriptor(envelope) {
+  return {
+    order: ledgerOrder(envelope?.baseOrder),
+    hash: sha256(Buffer.from(canonicalJson(comparablePublicCell(envelope?.baseCell))))
   };
 }
 
@@ -737,6 +827,12 @@ function coreConfigMatches(exported, expected) {
 function normalizeWorldState(value) {
   if (!value || typeof value !== "object") return value;
   value.cells ||= {};
+  for (const cell of Object.values(value.cells)) {
+    if (!cell || typeof cell !== "object" || !Object.hasOwn(cell, "occupationCount")) continue;
+    if (!Number.isSafeInteger(cell.occupationCount) || cell.occupationCount < 0 || cell.occupationCount > MAX_OCCUPATION_COUNT) {
+      delete cell.occupationCount;
+    }
+  }
   value.players ||= {};
   value.bans ||= {};
   value.playerEpochs ||= {};
@@ -757,6 +853,12 @@ function normalizeWorldState(value) {
   }
   for (const general of Object.values(value.generals)) ensureGeneralProfile(general);
   return value;
+}
+
+function validSnapshotOccupationCounts(state) {
+  if (!state?.cells || typeof state.cells !== "object" || Array.isArray(state.cells)) return false;
+  return Object.values(state.cells).every(cell => !cell || typeof cell !== "object" || !Object.hasOwn(cell, "occupationCount")
+    || (Number.isSafeInteger(cell.occupationCount) && cell.occupationCount >= 0 && cell.occupationCount <= MAX_OCCUPATION_COUNT));
 }
 
 function bindWorldAuthority(world, control) {
@@ -861,6 +963,7 @@ class OnlineWorldService {
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
+    this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -886,6 +989,7 @@ class OnlineWorldService {
     this.experienceSessionStartedAt = null;
     this.localDeployedGeneralProgress = {};
     this.pendingIntentTransaction = null;
+    this.lastPublishedMapOrder = null;
   }
 
   account() {
@@ -1172,6 +1276,9 @@ class OnlineWorldService {
     const record = await this.publishMapChanges(transaction.changes, identity, { mapDeltaId: transaction.mapDeltaId });
     transaction.phase = "published";
     transaction.publishedAt = this.now();
+    if (this.lastPublishedMapOrder?.mapDeltaId === transaction.mapDeltaId) {
+      transaction.publishedOrder = cloneJson(this.lastPublishedMapOrder.order);
+    }
     this.saveCache();
     this.diagnostic({
       event: "intent-transaction-publish-retried",
@@ -1182,20 +1289,25 @@ class OnlineWorldService {
     return record;
   }
 
-  applyCommittedTransactionChanges(changes) {
+  applyCommittedTransactionChanges(changes, publishedOrder = null) {
     if (!this.world || !changes || typeof changes !== "object") return false;
     for (const [key, cell] of Object.entries(changes.cells || {})) {
-      if (cell == null) delete this.world.cells[key];
-      else this.world.cells[key] = cloneJson(cell);
+      if (publishedOrder && compareOrderValue(this.publicCellOrders[key], publishedOrder) > 0) continue;
+      const envelope = occupationEnvelope(changes, key);
+      const nextCell = envelope.modern ? envelope.nextCell : cell;
+      if (nextCell == null) delete this.world.cells[key];
+      else this.world.cells[key] = cloneJson(nextCell);
     }
     for (const [id, general] of Object.entries(changes.generals || {})) {
+      if (publishedOrder && compareOrderValue(this.publicGeneralOrders[id], publishedOrder) > 0) continue;
       if (general != null) {
         this.world.generals[id] = { ...(this.world.generals[id] || {}), ...publicGeneralState(general) };
         continue;
       }
       const transition = changes.generalTransitions?.[id];
       const locationKey = validGeneralTransitionShape(id, transition) ? `${transition.from.x},${transition.from.y}` : "";
-      const nextCell = locationKey ? changes.cells?.[locationKey] : null;
+      const locationEnvelope = locationKey ? occupationEnvelope(changes, locationKey) : null;
+      const nextCell = locationEnvelope?.modern ? locationEnvelope.nextCell : locationKey ? changes.cells?.[locationKey] : null;
       if (!locationKey || !isPublicCellShape(nextCell) || (nextCell.generalIds || []).map(String).includes(String(id))) continue;
       if (this.world.generals[id]?.status === "deployed") delete this.world.generals[id];
     }
@@ -1223,7 +1335,7 @@ class OnlineWorldService {
       && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
       && String(transaction.accountId || "") === this.account().accountId
       && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0)));
-    const published = validSession && (transaction.phase === "published" || this.appliedMapDeltaIds.has(String(transaction.mapDeltaId || "")));
+    const published = validSession && this.appliedMapDeltaIds.has(String(transaction.mapDeltaId || ""));
     if (validSession && !published && transaction.changes) return false;
     const overlay = validSession ? (published ? transaction.afterOverlay : transaction.beforeOverlay) : null;
     if (validSession && !published && transaction.beforeOverlay?.completeOwnGeneralArchive && transaction.afterOverlay?.completeOwnGeneralArchive) {
@@ -1232,7 +1344,7 @@ class OnlineWorldService {
           && String(this.world.generals?.[id]?.holderAccountId || "") === this.account().accountId) delete this.world.generals[id];
       }
     }
-    if (published && transaction.changes) this.applyCommittedTransactionChanges(transaction.changes);
+    if (published && transaction.changes) this.applyCommittedTransactionChanges(transaction.changes, transaction.publishedOrder);
     if (overlay) this.replaceLocalOverlay(overlay);
     if (validSession && !published && transaction.eventId) {
       this.localEvents = this.localEvents.filter(event => String(event?.eventId || "") !== String(transaction.eventId));
@@ -1505,6 +1617,7 @@ class OnlineWorldService {
     root.accounts[accountId].worlds[this.work.id] = {
       cacheAccountId: accountId,
       control: this.control,
+      controlPlatformOrder: { ...this.controlPlatformOrder },
       world: cacheWorldForPersistence(this.world),
       localOverlay: this.captureLocalOverlay(),
       publicArchivesRequireRefresh: true,
@@ -1516,6 +1629,7 @@ class OnlineWorldService {
       publicMapBaselineOrder: { ...this.publicMapBaselineOrder },
       publicHistoryOrder: { ...this.publicHistoryOrder },
       publicCellOrders: this.publicCellOrders,
+      publicCellWriteBases: this.publicCellWriteBases,
       publicGeneralOrders: this.publicGeneralOrders,
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
@@ -1611,6 +1725,7 @@ class OnlineWorldService {
     this.work = null;
     this.program = builtInGridProgram();
     this.control = null;
+    this.controlPlatformOrder = { timestamp: 0, commentId: "" };
     this.world = null;
     this.error = null;
     this.pendingMigration = null;
@@ -1781,7 +1896,9 @@ class OnlineWorldService {
       commentId: String(cached?.publicMapBaselineOrder?.commentId || "")
     };
     this.publicHistoryOrder = ledgerOrder(cached?.publicHistoryOrder);
+    this.controlPlatformOrder = ledgerOrder(cached?.controlPlatformOrder);
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
+    this.publicCellWriteBases = cached?.publicCellWriteBases && typeof cached.publicCellWriteBases === "object" ? cached.publicCellWriteBases : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
@@ -1813,6 +1930,7 @@ class OnlineWorldService {
       this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
       this.publicHistoryOrder = { timestamp: 0, commentId: "" };
       this.publicCellOrders = {};
+      this.publicCellWriteBases = {};
       this.publicGeneralOrders = {};
       this.publicMarketOrders = {};
       this.publicMarketSaleOrders = {};
@@ -1942,6 +2060,7 @@ class OnlineWorldService {
       authoritySigningPublicKey: identity.signingPublicKey,
       authorityEncryptionPublicKey: identity.encryptionPublicKey,
       authorityPolicy: "single-authority-with-client-audit",
+      occupationCountingProtocol: 1,
       startedAt: world.startedAt,
       updatedAt: world.startedAt
     }, identity.signingPrivateKey);
@@ -1951,6 +2070,7 @@ class OnlineWorldService {
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
     this.publicCellOrders = {};
+    this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -1961,7 +2081,8 @@ class OnlineWorldService {
     this.appliedMapDeltaIds.clear();
     this.appliedAuthorityIds.clear();
     const controlSources = await this.postRecord(this.control);
-    this.rememberTreasureSources(world.treasureSpawns, recordPlatformOrder({ sources: controlSources }));
+    this.controlPlatformOrder = recordPlatformOrder({ sources: controlSources });
+    this.rememberTreasureSources(world.treasureSpawns, this.controlPlatformOrder);
     await this.publishSnapshot();
     this.status = "ready";
     this.saveCache();
@@ -2445,6 +2566,7 @@ class OnlineWorldService {
       .filter(item => this.validAuthorSource(item) && recordPlatformOrder(item).timestamp > 0)
       .filter(item => verifySignedRecord(item.record, control.authoritySigningPublicKey))
       .filter(item => item.record.stateHash === sha256(Buffer.from(canonicalJson(item.record.state))))
+      .filter(item => validSnapshotOccupationCounts(item.record.state))
       .filter(item => !item.record.ledgerCoverage || (snapshotCoverage(item.record) && compareOrderValue(ledgerOrder(snapshotCoverage(item.record).through), recordPlatformOrder(item)) <= 0))
       .sort((left, right) => comparePlatformOrder(right, left));
   }
@@ -2548,7 +2670,12 @@ class OnlineWorldService {
     const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actorAccountId] || 0)));
     if (Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) !== currentEpoch) return false;
     if (this.world?.bans?.[actorAccountId]?.banned) return false;
+    const occupationProtocolActive = Number(this.control?.occupationCountingProtocol || 0) >= 1
+      && Number(this.controlPlatformOrder?.timestamp || 0) > 0;
+    const allowLegacyOccupation = !occupationProtocolActive
+      || compareOrderValue(order, this.controlPlatformOrder) < 0;
     const cells = record.changes?.cells;
+    const cellBases = record.changes?.cellBases;
     const generals = record.changes?.generals;
     const hasGeneralTransitionEnvelope = Object.hasOwn(record.changes || {}, "generalTransitions");
     const generalTransitions = record.changes?.generalTransitions || {};
@@ -2558,6 +2685,19 @@ class OnlineWorldService {
     const battles = record.changes?.battles || {};
     const conquests = record.changes?.conquests || {};
     if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
+    if (cellBases != null && (typeof cellBases !== "object" || Array.isArray(cellBases))) return false;
+    if (!allowLegacyOccupation) {
+      if (!cellBases || Object.keys(cellBases).length !== Object.keys(cells).length
+        || Object.keys(cells).some(key => !Object.hasOwn(cellBases, key))) return false;
+    }
+    for (const [key, base] of Object.entries(cellBases || {})) {
+      if (!Object.hasOwn(cells, key) || !base || typeof base !== "object" || Array.isArray(base)) return false;
+      const envelope = occupationEnvelope(record.changes, key);
+      if (!envelope.modern || (envelope.baseCell != null && !isPublicCellShape(envelope.baseCell))) return false;
+      if (!Number.isSafeInteger(base.nextOccupationCount) || base.nextOccupationCount < 0 || base.nextOccupationCount > MAX_OCCUPATION_COUNT) return false;
+      if (!base.order || !Number.isSafeInteger(base.order.timestamp) || base.order.timestamp < 0
+        || typeof base.order.commentId !== "string" || compareOrderValue(envelope.baseOrder, order) >= 0) return false;
+    }
     if (!generalTransitions || typeof generalTransitions !== "object" || Array.isArray(generalTransitions) || Object.keys(generalTransitions).length > 100) return false;
     if (!treasureClaims || typeof treasureClaims !== "object" || Array.isArray(treasureClaims) || Object.keys(treasureClaims).length > 24) return false;
     if (!marketListings || typeof marketListings !== "object" || Array.isArray(marketListings) || Object.keys(marketListings).length > 100) return false;
@@ -2569,14 +2709,21 @@ class OnlineWorldService {
         || battle.attackerAccountId !== actorAccountId || !battle.targetOwnerAccountId || battle.targetOwnerAccountId === actorAccountId
         || !validPosition(battle) || !Number.isSafeInteger(battle.createdAt) || battle.createdAt < 0
         || !Number.isSafeInteger(battle.targetPlayerEpoch) || battle.targetPlayerEpoch < 0) return false;
-      const next = cells[`${battle.x},${battle.y}`];
+      const locationKey = `${battle.x},${battle.y}`;
+      const envelope = occupationEnvelope(record.changes, locationKey);
+      const next = envelope.modern ? envelope.nextCell : cells[locationKey];
+      const current = !allowLegacyOccupation && envelope.modern ? envelope.baseCell : this.world?.cells?.[locationKey];
       if (!isPublicCellShape(next) || next.ownerAccountId !== actorAccountId || next.generalIds?.length) return false;
+      if (!allowLegacyOccupation && (!current
+        || String(current.ownerAccountId || "") !== String(battle.targetOwnerAccountId || "")
+        || Number(current.soldiers || 0) !== Number(battle.defenderSoldiers || 0)
+        || Number(this.world?.playerEpochs?.[battle.targetOwnerAccountId] || 0) !== Number(battle.targetPlayerEpoch || 0))) return false;
       const fields = ["attackerSoldiers", "defenderSoldiers", "attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"];
       if (fields.some(field => safeBattleInteger(battle[field]) == null)
         || ["attackerPower", "defenderPower"].some(field => safeBattleInteger(battle[field], MAX_PUBLIC_BATTLE_POWER, 1) == null)) return false;
       const expected = battleCasualties(battle.attackerPower, battle.defenderPower, battle.attackerSoldiers, battle.defenderSoldiers);
       if (!expected.attackerWon || ["attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"].some(field => battle[field] !== expected[field])
-        || next.soldiers !== Math.min(staticCell(this.world.seed, battle.x, battle.y).garrisonCap, expected.attackerSurvivors)) return false;
+        || next.soldiers !== Math.min(cellGarrisonCap(this.world, battle.x, battle.y, next), expected.attackerSurvivors)) return false;
       if (!Array.isArray(battle.capturedOwnGenerals) || battle.capturedOwnGenerals.length > 2
         || new Set(battle.capturedOwnGenerals.map(item => item?.id)).size !== battle.capturedOwnGenerals.length) return false;
       for (const general of battle.capturedOwnGenerals) {
@@ -2600,14 +2747,15 @@ class OnlineWorldService {
       const key = `${x},${y}`;
       if (battleCellKeys.has(key) || !Object.hasOwn(cells, key) || cells[key] == null) return false;
       battleCellKeys.add(key);
-      const current = this.world?.cells?.[key];
+      const envelope = occupationEnvelope(record.changes, key);
+      const current = !allowLegacyOccupation && envelope.modern ? envelope.baseCell : this.world?.cells?.[key];
       if (!current || String(current.ownerAccountId || "") !== String(battle.targetOwnerAccountId || "") || String(current.ownerAccountId || "") === actorAccountId) return false;
       const beforeSoldiers = safeBattleInteger(battle.beforeSoldiers);
       const afterSoldiers = safeBattleInteger(battle.afterSoldiers);
       const currentSoldiers = safeBattleInteger(current.soldiers);
       if (beforeSoldiers == null || afterSoldiers == null || currentSoldiers == null
         || beforeSoldiers !== currentSoldiers || afterSoldiers >= beforeSoldiers) return false;
-      const next = cells[key];
+      const next = envelope.modern ? envelope.nextCell : cells[key];
       if (!isPublicCellShape(next)
         || String(next.ownerAccountId || "") !== String(current.ownerAccountId || "")
         || canonicalJson(next.generalIds || []) !== canonicalJson(current.generalIds || [])
@@ -2636,19 +2784,49 @@ class OnlineWorldService {
       const x = Number(match[1]);
       const y = Number(match[2]);
       if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
-      if (cell == null) continue;
-      if (!isPublicCellShape(cell)) return false;
-      if (String(cell.ownerAccountId || "") !== actorAccountId && !battleCellKeys.has(key)) return false;
-      const submittedSoldiers = Number(cell.soldiers);
       const currentCell = this.world?.cells?.[key];
-      const currentSoldiers = Number(currentCell?.soldiers);
-      const sameOwner = currentCell
-        && String(currentCell.ownerAccountId || "") === String(cell.ownerAccountId || "");
+      const envelope = occupationEnvelope(record.changes, key);
+      const tracked = envelope.modern;
+      const requireBase = !allowLegacyOccupation && tracked;
+      const baseCell = requireBase ? envelope.baseCell : currentCell;
+      const nextCell = tracked ? envelope.nextCell : cell;
+      if (requireBase) {
+        const currentOrder = ledgerOrder(this.publicCellOrders[key] || this.publicMapBaselineOrder);
+        const orderFromBase = compareOrderValue(currentOrder, envelope.baseOrder);
+        if (orderFromBase < 0 || (orderFromBase === 0 && !samePublicCell(currentCell, baseCell))) return false;
+        if (orderFromBase > 0) {
+          const expectedBase = occupationBaseDescriptor(envelope);
+          const currentBase = this.publicCellWriteBases[key];
+          if (!currentBase || compareOrderValue(currentBase.order, expectedBase.order) !== 0
+            || String(currentBase.hash || "") !== expectedBase.hash) return false;
+        }
+      }
+      if (nextCell == null) {
+        if (cellOccupationCount(baseCell) > 0 || (requireBase && !samePublicCell(currentCell, baseCell))) return false;
+        continue;
+      }
+      if (!isPublicCellShape(cell) || !isPublicCellShape(nextCell)) return false;
+      if (!validOccupationTransition(currentCell, nextCell, {
+        allowLegacy: allowLegacyOccupation,
+        baseCell,
+        requireBase
+      })) return false;
+      const currentOwner = String(baseCell?.ownerAccountId || "");
+      const nextOwner = String(nextCell.ownerAccountId || "");
+      if (requireBase && currentOwner && currentOwner !== actorAccountId && nextOwner === actorAccountId) {
+        const conquest = Object.values(conquests).find(battle => Number(battle?.x) === x && Number(battle?.y) === y);
+        if (!conquest) return false;
+      }
+      if (String(nextCell.ownerAccountId || "") !== actorAccountId && !battleCellKeys.has(key)) return false;
+      const submittedSoldiers = Number(nextCell.soldiers);
+      const currentSoldiers = Number(baseCell?.soldiers);
+      const sameOwner = baseCell
+        && String(baseCell.ownerAccountId || "") === String(nextCell.ownerAccountId || "");
       const garrisonCeiling = sameOwner && Number.isSafeInteger(currentSoldiers) && currentSoldiers >= 0
-        ? Math.max(staticCell(this.world.seed, x, y).garrisonCap, currentSoldiers)
-        : staticCell(this.world.seed, x, y).garrisonCap;
+        ? Math.max(cellGarrisonCap(this.world, x, y, nextCell), currentSoldiers)
+        : cellGarrisonCap(this.world, x, y, nextCell);
       if (!Number.isSafeInteger(submittedSoldiers) || submittedSoldiers < 0 || submittedSoldiers > garrisonCeiling) return false;
-      if (!Array.isArray(cell.generalIds) || cell.generalIds.length > 2 || new Set(cell.generalIds.map(String)).size !== cell.generalIds.length) return false;
+      if (!Array.isArray(nextCell.generalIds) || nextCell.generalIds.length > 2 || new Set(nextCell.generalIds.map(String)).size !== nextCell.generalIds.length) return false;
     }
     for (const general of Object.values(generals)) {
       if (general == null) continue;
@@ -2837,6 +3015,7 @@ class OnlineWorldService {
       if (cell && String(cell.ownerAccountId || "") === target) {
         cell.generalIds = (cell.generalIds || []).filter(candidate => String(candidate) !== generalId);
         this.publicCellOrders[locationKey] = order;
+        delete this.publicCellWriteBases[locationKey];
       }
       delete this.world.generals[generalId];
       delete this.localDeployedGeneralProgress[generalId];
@@ -2856,7 +3035,10 @@ class OnlineWorldService {
       const ownedCells = Object.entries(this.world.cells).filter(([, cell]) => String(cell?.ownerAccountId || "") === target).map(([key]) => key);
       const ownedGenerals = Object.entries(this.world.generals).filter(([, general]) => String(general?.holderAccountId || "") === target).map(([generalId]) => generalId);
       resetPlayerState(this.world, target, Number(record.playerEpoch));
-      for (const key of ownedCells) this.publicCellOrders[key] = order;
+      for (const key of ownedCells) {
+        this.publicCellOrders[key] = order;
+        delete this.publicCellWriteBases[key];
+      }
       for (const generalId of ownedGenerals) this.publicGeneralOrders[generalId] = order;
       this.publicParticipantOrders[target] = order;
       this.clearResetLocalPlayer(target);
@@ -2887,12 +3069,16 @@ class OnlineWorldService {
     if (this.appliedMapDeltaIds.has(String(record.mapDeltaId)) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     for (const [key, cell] of Object.entries(record.changes.cells)) {
       if (compareOrderValue(order, this.publicCellOrders[key] || this.publicMapBaselineOrder) <= 0) continue;
-      if (cell == null) {
+      const envelope = occupationEnvelope(record.changes, key);
+      const nextCell = envelope.modern ? envelope.nextCell : cell;
+      if (nextCell == null) {
         if (this.world.cells[key]?.ownerAccountId !== actorAccountId) continue;
         delete this.world.cells[key];
       }
-      else this.world.cells[key] = cloneJson(cell);
+      else this.world.cells[key] = cloneJson(nextCell);
       this.publicCellOrders[key] = order;
+      if (envelope.modern) this.publicCellWriteBases[key] = occupationBaseDescriptor(envelope);
+      else delete this.publicCellWriteBases[key];
     }
     for (const [id, general] of Object.entries(record.changes.generals)) {
       if (compareOrderValue(order, this.publicGeneralOrders[id] || this.publicMapBaselineOrder) <= 0) continue;
@@ -2901,11 +3087,12 @@ class OnlineWorldService {
         const transition = record.changes.generalTransitions?.[id];
         const transitionValid = validGeneralTransitionShape(id, transition);
         const locationKey = transitionValid ? `${transition.from.x},${transition.from.y}` : "";
-        const nextCell = locationKey ? record.changes.cells?.[locationKey] : null;
+        const locationEnvelope = locationKey ? occupationEnvelope(record.changes, locationKey) : null;
+        const nextCell = locationEnvelope?.modern ? locationEnvelope.nextCell : locationKey ? record.changes.cells?.[locationKey] : null;
         const locationVerified = transitionValid && isPublicCellShape(nextCell)
           && !(nextCell.generalIds || []).map(String).includes(String(id))
           && compareOrderValue(order, this.publicCellOrders[locationKey] || this.publicMapBaselineOrder) >= 0
-          && canonicalJson(this.world.cells[locationKey]) === canonicalJson(nextCell);
+          && samePublicCell(this.world.cells[locationKey], nextCell);
         if (!locationVerified) {
           this.diagnostic({
             event: "general-removal-rejected",
@@ -3368,6 +3555,7 @@ class OnlineWorldService {
       const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) {
         this.control = controls[0].record;
+        this.controlPlatformOrder = recordPlatformOrder(controls[0]);
         if (previousDirectSession && !this.sameDirectSession(previousDirectSession, this.directSession())) this.clearDirectSession();
       }
       // The reset is self-verifying so an old game card can follow it without
@@ -3444,6 +3632,7 @@ class OnlineWorldService {
           this.appliedAuthorityIds = new Set(coverage?.appliedAuthorityIds || []);
           this.publicDeltaCountSinceSnapshot = 0;
           this.publicCellOrders = cloneJson(coverage?.cellOrders || {});
+          this.publicCellWriteBases = cloneJson(coverage?.cellWriteBases || {});
           this.publicGeneralOrders = cloneJson(coverage?.generalOrders || {});
           this.publicMarketOrders = cloneJson(coverage?.marketOrders || {});
           this.publicMarketSaleOrders = cloneJson(coverage?.marketSaleOrders || {});
@@ -3607,7 +3796,7 @@ class OnlineWorldService {
       if (!accountId || !this.world?.players?.[accountId]) throw new Error("请先加入在线游戏世界");
       if (this.world.bans?.[accountId]?.banned) throw new Error("该风月账号已被本游戏服主封禁");
       const quote = marchQuote(cloneJson(this.world), accountId, intent.to, intent.soldiers, intent.generalIds, Boolean(intent.attack), this.now());
-      return { marchQuote: { ...quote, requestKey: intent.requestKey } };
+      return { marchQuote: quote };
     }
     if (this.syncInFlight) {
       try { await this.syncInFlight; }
@@ -3723,12 +3912,18 @@ class OnlineWorldService {
     }, identity.signingPrivateKey);
     const sources = await this.postRecord(record);
     const order = recordPlatformOrder({ sources });
+    this.lastPublishedMapOrder = { mapDeltaId: record.mapDeltaId, order: cloneJson(order) };
     const rootId = order.commentId || null;
     if (actor && rootId && !actor.commentRootId) actor.commentRootId = rootId;
     this.appliedMapDeltaIds.add(record.mapDeltaId);
     this.publicDeltaCountSinceSnapshot += 1;
     if (order.timestamp) {
-      for (const key of Object.keys(changes.cells || {})) this.publicCellOrders[key] = order;
+      for (const key of Object.keys(changes.cells || {})) {
+        this.publicCellOrders[key] = order;
+        const envelope = occupationEnvelope(changes, key);
+        if (envelope.modern) this.publicCellWriteBases[key] = occupationBaseDescriptor(envelope);
+        else delete this.publicCellWriteBases[key];
+      }
       for (const id of Object.keys(changes.generals || {})) this.publicGeneralOrders[id] = order;
       for (const id of Object.keys(changes.marketListings || {})) this.publicMarketOrders[id] = order;
       for (const id of Object.keys(changes.marketSales || {})) this.publicMarketSaleOrders[id] = order;
@@ -3764,7 +3959,8 @@ class OnlineWorldService {
       actorAccountName: this.account().username,
       authorityAccountId: this.control.authorityAccountId,
       now: actionTime,
-      experienceSince: this.experienceSessionStartedAt
+      experienceSince: this.experienceSessionStartedAt,
+      requireExpectedMarchQuote: String(intent.type || "") === "march"
     });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
     this.world = outcome.state;
@@ -3831,7 +4027,11 @@ class OnlineWorldService {
         farewell = await this.completeFarewellLetter(outcome.result.farewellRequest, actorAccountId, intent);
         await this.applyLocalIntent({ type: "execute-captive", generalId: intent.generalId, allowFarewell: false, idempotencyKey: `execute-after-farewell:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
       }
-      const changes = createPublicMapChanges(beforeWorld, this.world, outcome.effects, actorAccountId);
+      const changes = attachCellBaseOrders(
+        createPublicMapChanges(beforeWorld, this.world, outcome.effects, actorAccountId),
+        this.publicCellOrders,
+        this.publicMapBaselineOrder
+      );
       transactionMapDeltaId = !options.internal && hasPublicMapChanges(changes) ? crypto.randomUUID() : "";
       if (transactionMapDeltaId) this.prepareIntentTransaction({
         beforeWorld,
@@ -3844,6 +4044,9 @@ class OnlineWorldService {
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
+        if (this.lastPublishedMapOrder?.mapDeltaId === mapDelta.mapDeltaId) {
+          this.pendingIntentTransaction.publishedOrder = cloneJson(this.lastPublishedMapOrder.order);
+        }
         this.saveCache();
       }
       if (intent.type !== "join" && !effectsHandledEarly) {
@@ -3884,7 +4087,11 @@ class OnlineWorldService {
       localOnly
     });
     if (!settled.effects.length) return [];
-    const changes = createPublicMapChanges(beforeWorld, settled.state, settled.effects, this.account().accountId);
+    const changes = attachCellBaseOrders(
+      createPublicMapChanges(beforeWorld, settled.state, settled.effects, this.account().accountId),
+      this.publicCellOrders,
+      this.publicMapBaselineOrder
+    );
     if (localOnly && hasPublicMapChanges(changes)) return [];
     this.world = normalizeWorldState(settled.state);
     this.holdTreasureRewards(beforeWorld);
@@ -3919,6 +4126,9 @@ class OnlineWorldService {
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
+        if (this.lastPublishedMapOrder?.mapDeltaId === mapDelta.mapDeltaId) {
+          this.pendingIntentTransaction.publishedOrder = cloneJson(this.lastPublishedMapOrder.order);
+        }
         this.saveCache();
       }
       await this.handleEffects(settled.effects, identity, { deferOnFailure: Boolean(mapDelta) });
@@ -4260,6 +4470,7 @@ class OnlineWorldService {
         version: 1,
         through,
         cellOrders: cloneJson(this.publicCellOrders),
+        cellWriteBases: cloneJson(this.publicCellWriteBases),
         generalOrders: cloneJson(this.publicGeneralOrders),
         marketOrders: cloneJson(this.publicMarketOrders),
         marketSaleOrders: cloneJson(this.publicMarketSaleOrders),
@@ -4900,6 +5111,7 @@ class OnlineWorldService {
         this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
         this.publicHistoryOrder = { timestamp: 0, commentId: "" };
         this.publicCellOrders = {};
+        this.publicCellWriteBases = {};
         this.publicGeneralOrders = {};
         this.publicMarketOrders = {};
         this.publicMarketSaleOrders = {};

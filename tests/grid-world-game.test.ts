@@ -68,6 +68,46 @@ describe("grid conquest rules", () => {
     expect(game.RESOURCE_GRADES).toContain(first.resourceGrade);
   });
 
+  it("treats legacy cells as zero occupations and raises the garrison cap by five points up to seventy-five percent", () => {
+    const state = game.createWorld({ seed: "occupation-cap", seasonId: "season" });
+    const x = 12;
+    const y = 31;
+    const population = game.staticCell(state.seed, x, y).population;
+    const legacy = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+
+    expect(game.cellOccupationCount(legacy)).toBe(0);
+    expect(game.cellGarrisonCap(state, x, y, legacy)).toBe(Math.floor(population * 20 / 100));
+    expect(game.cellGarrisonCap(state, x, y, { ...legacy, occupationCount: 1 })).toBe(Math.floor(population * 25 / 100));
+    expect(game.cellGarrisonCap(state, x, y, { ...legacy, occupationCount: 2 })).toBe(Math.floor(population * 30 / 100));
+    expect(game.cellGarrisonCap(state, x, y, { ...legacy, occupationCount: 11 })).toBe(Math.floor(population * 75 / 100));
+    expect(game.cellGarrisonCap(state, x, y, { ...legacy, occupationCount: 100 })).toBe(Math.floor(population * 75 / 100));
+  });
+
+  it("increments the durable occupation count on every successful takeover", () => {
+    const now = 1_000_000;
+    let state = game.createWorld({ seed: "occupation-chain", seasonId: "season", startedAt: now });
+    state.players.a = { accountId: "a", displayName: "甲", position: { x: 10, y: 10 }, gold: 10_000, fieldArmySoldiers: 0, carriedGeneralIds: [], basePower: 100_000, power: 100_000 };
+    state.players.b = { accountId: "b", displayName: "乙", position: { x: 12, y: 10 }, gold: 10_000, fieldArmySoldiers: 0, carriedGeneralIds: [], basePower: 100_000, power: 100_000 };
+    state.privatePlayers.a = { orientation: "any" };
+    state.privatePlayers.b = { orientation: "any" };
+    state.cells["10,10"] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    state.cells["12,10"] = { ownerAccountId: "b", soldiers: 0, generalIds: [] };
+
+    const capture = (accountId: string, idempotencyKey: string, at: number) => {
+      const started = game.applyIntent(state, {
+        type: "march", to: { x: 11, y: 10 }, soldiers: 0, attack: true, idempotencyKey
+      }, { actorAccountId: accountId, now: at });
+      state = started.result.resolved ? started.state : game.settleWorld(started.state, started.result.finishAt).state;
+    };
+
+    capture("a", "occupation-a-1", now);
+    expect(state.cells["11,10"]).toMatchObject({ ownerAccountId: "a", occupationCount: 1 });
+    capture("b", "occupation-b-2", now + 20_000);
+    expect(state.cells["11,10"]).toMatchObject({ ownerAccountId: "b", occupationCount: 2 });
+    capture("a", "occupation-a-3", now + 40_000);
+    expect(state.cells["11,10"]).toMatchObject({ ownerAccountId: "a", occupationCount: 3 });
+  });
+
   it("settles one fixed ten-minute mining run and starts its resource-rank cooldown", () => {
     const now = 1_000_000;
     let state = joined(now);
@@ -170,13 +210,13 @@ describe("grid conquest rules", () => {
     expect(restored.cells[key].soldiers).toBe(0);
   });
 
-  it("rejects training above the fixed twenty-percent garrison cap", () => {
+  it("rejects training above the occupation-adjusted garrison cap", () => {
     const now = 1_000_000;
     const state = joined(now);
     const player = state.players.a;
     const cell = state.cells[`${player.position.x},${player.position.y}`];
-    const info = game.staticCell(state.seed, player.position.x, player.position.y);
-    expect(() => game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: info.garrisonCap - cell.soldiers + 1, idempotencyKey: "too-many" }, { actorAccountId: "a", now })).toThrow(/驻军上限/);
+    const cap = game.cellGarrisonCap(state, player.position.x, player.position.y, cell);
+    expect(() => game.applyIntent(state, { type: "train", x: player.position.x, y: player.position.y, amount: cap - cell.soldiers + 1, idempotencyKey: "too-many" }, { actorAccountId: "a", now })).toThrow(/驻军上限/);
   });
 
   it("keeps the training max action inside the garrison cap after yield talents", () => {
@@ -184,8 +224,8 @@ describe("grid conquest rules", () => {
     const state = joined(now);
     const player = state.players.a;
     const key = `${player.position.x},${player.position.y}`;
-    const info = game.staticCell(state.seed, player.position.x, player.position.y);
-    state.cells[key].soldiers = info.garrisonCap - 100;
+    const cap = game.cellGarrisonCap(state, player.position.x, player.position.y, state.cells[key]);
+    state.cells[key].soldiers = cap - 100;
     state.generals.office = {
       id: "office", holderAccountId: "a", status: "carried", name: "军务官", power: 500,
       basePower: 500, trainingLevel: 0,

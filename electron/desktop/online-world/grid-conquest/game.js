@@ -130,6 +130,15 @@ function battleReportById(id) { return battleReports().find(item => String(item.
 function cellKey(x, y) { return `${x},${y}`; }
 function dynamicCell(x, y) { return payload?.world?.cells?.[cellKey(x, y)] || { ownerAccountId: null, soldiers: 0, generalIds: [] }; }
 function fact(x, y) { return payload?.mapFacts?.[y * 64 + x] || { x, y, population: 0, resourceGrade: "—", resourceRank: 0, garrisonCap: 0, neutralPower: 0 }; }
+function occupationCount(cell) {
+  const count = Number(cell?.occupationCount);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+function garrisonCapAt(x, y, cell = dynamicCell(x, y)) {
+  const info = fact(x, y);
+  const percent = Math.min(75, 20 + occupationCount(cell) * 5);
+  return Math.floor(Number(info.population || 0) * percent / 100);
+}
 function formatNumber(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function formatPointValue(value, fallback = "—") {
   if (value == null || value === "") return fallback;
@@ -584,6 +593,67 @@ function validStoredMarchPath(value) {
     ? value.map(point => ({ x: point.x, y: point.y }))
     : null;
 }
+function storedMarchRoute(value, from, to) {
+  const path = validStoredMarchPath(value);
+  if (!path?.length || !sameMapPoint(path[path.length - 1], to)) return null;
+  let previous = from;
+  for (const point of path) {
+    if (Math.abs(point.x - previous.x) + Math.abs(point.y - previous.y) !== 1) return null;
+    previous = point;
+  }
+  return path;
+}
+function compareMarchFrontier(left, right) {
+  return left.weightQuarters - right.weightQuarters || left.steps - right.steps || left.order - right.order;
+}
+function pushMarchFrontier(heap, item) {
+  heap.push(item);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareMarchFrontier(heap[parent], item) <= 0) break;
+    heap[index] = heap[parent];
+    index = parent;
+  }
+  heap[index] = item;
+}
+function popMarchFrontier(heap) {
+  if (!heap.length) return null;
+  const first = heap[0];
+  const last = heap.pop();
+  if (!heap.length) return first;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    if (left >= heap.length) break;
+    let child = left;
+    if (right < heap.length && compareMarchFrontier(heap[right], heap[left]) < 0) child = right;
+    if (compareMarchFrontier(last, heap[child]) <= 0) break;
+    heap[index] = heap[child];
+    index = child;
+  }
+  heap[index] = last;
+  return first;
+}
+function targetFirstDirections(current, to) {
+  const dx = Math.sign(to.x - current.x);
+  const dy = Math.sign(to.y - current.y);
+  const directions = [];
+  if (dx) directions.push([dx, 0]);
+  if (dy) directions.push([0, dy]);
+  if (dx) directions.push([-dx, 0]);
+  if (dy) directions.push([0, -dy]);
+  if (!dx) directions.push([1, 0], [-1, 0]);
+  if (!dy) directions.push([0, 1], [0, -1]);
+  const seen = new Set();
+  return directions.filter(([stepX, stepY]) => {
+    const key = `${stepX},${stepY}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function localMarchPath(from, to, attack = false) {
   if (!validMapPosition(from) || !validMapPosition(to)) return null;
   if (sameMapPoint(from, to)) return [];
@@ -604,33 +674,29 @@ function localMarchPath(from, to, attack = false) {
   const startKey = routeKey(from);
   const targetKey = routeKey(to);
   const previous = new Map([[startKey, null]]);
-  const queue = [{ ...from }];
-  let cursor = 0;
-  while (cursor < queue.length) {
-    const current = queue[cursor++];
+  const best = new Map([[startKey, { weightQuarters: 0, steps: 0 }]]);
+  const frontier = [];
+  let order = 0;
+  pushMarchFrontier(frontier, { ...from, key: startKey, weightQuarters: 0, steps: 0, order: order++ });
+  while (frontier.length) {
+    const current = popMarchFrontier(frontier);
+    const known = best.get(current.key);
+    if (!known || known.weightQuarters !== current.weightQuarters || known.steps !== current.steps) continue;
     if (sameMapPoint(current, to)) break;
-    const dx = Math.sign(to.x - current.x);
-    const dy = Math.sign(to.y - current.y);
-    const directions = [];
-    if (dx) directions.push([dx, 0]);
-    if (dy) directions.push([0, dy]);
-    if (dx) directions.push([-dx, 0]);
-    if (dy) directions.push([0, -dy]);
-    if (!dx) directions.push([1, 0], [-1, 0]);
-    if (!dy) directions.push([0, 1], [0, -1]);
-    const seenDirections = new Set();
-    for (const [stepX, stepY] of directions) {
-      const directionKey = `${stepX},${stepY}`;
-      if (seenDirections.has(directionKey)) continue;
-      seenDirections.add(directionKey);
+    for (const [stepX, stepY] of targetFirstDirections(current, to)) {
       const next = { x: current.x + stepX, y: current.y + stepY };
       if (!validMapPosition(next)) continue;
       const nextKey = routeKey(next);
-      if (previous.has(nextKey)) continue;
       const owner = dynamicCell(next.x, next.y).ownerAccountId;
       if (owner && String(owner) !== accountId && !(attack && nextKey === targetKey)) continue;
+      const weightQuarters = current.weightQuarters + (String(owner || "") === accountId ? 1 : 4);
+      const steps = current.steps + 1;
+      const prior = best.get(nextKey);
+      if (prior && (prior.weightQuarters < weightQuarters
+        || (prior.weightQuarters === weightQuarters && prior.steps <= steps))) continue;
+      best.set(nextKey, { weightQuarters, steps });
       previous.set(nextKey, routeKey(current));
-      queue.push(next);
+      pushMarchFrontier(frontier, { ...next, key: nextKey, weightQuarters, steps, order: order++ });
     }
   }
   if (!previous.has(targetKey)) return null;
@@ -643,12 +709,20 @@ function localMarchPath(from, to, attack = false) {
   }
   return reversed.reverse();
 }
+function localMarchRouteBreakdown(path) {
+  const accountId = ownAccountId();
+  const ownDistance = path.filter(point => String(dynamicCell(point.x, point.y).ownerAccountId || "") === accountId).length;
+  const ordinaryDistance = path.length - ownDistance;
+  const weightQuarters = ownDistance + ordinaryDistance * 4;
+  return { ownDistance, ordinaryDistance, weightQuarters, weightedDistance: weightQuarters / 4 };
+}
 function marchMapRoute(from, to, options = {}) {
   if (!validMapPosition(from) || !validMapPosition(to) || sameMapPoint(from, to)) return null;
-  const path = validStoredMarchPath(options.path) || localMarchPath(from, to, Boolean(options.attack));
+  const path = storedMarchRoute(options.path, from, to) || localMarchPath(from, to, Boolean(options.attack));
   if (!path) return null;
+  const breakdown = localMarchRouteBreakdown(path);
   const points = [{ x: from.x + .5, y: from.y + .5 }, ...path.map(point => ({ x: point.x + .5, y: point.y + .5 }))];
-  return { from, to, path, points, distance: path.length, durationMs: path.length * 15000 };
+  return { from, to, path, points, distance: path.length, ...breakdown, durationMs: breakdown.weightQuarters * 15000 / 4 };
 }
 function marchDraftValue() {
   return Math.max(0, Math.trunc(Number(ownPlayer()?.fieldArmySoldiers) || 0));
@@ -664,37 +738,45 @@ function attackUnderfootAt(target = marchTarget()) {
   return Boolean(player?.position && target && sameMapPoint(player.position, target)
     && dynamicCell(target.x, target.y).ownerAccountId !== ownAccountId());
 }
-function selectedMarchQuote(route) {
-  if (marchQuoteCache?.requestKey === marchQuoteKey()) return { cost: marchQuoteCache.cost, durationMs: marchQuoteCache.durationMs };
+function hostileMarchTargetAt(target = marchTarget()) {
+  const owner = target && dynamicCell(target.x, target.y).ownerAccountId;
+  return Boolean(owner && String(owner) !== ownAccountId());
+}
+function selectedMarchQuote(route, target = marchTarget()) {
+  if (marchQuoteCache?.requestKey === marchQuoteKey(target)) return { cost: marchQuoteCache.cost, durationMs: marchQuoteCache.durationMs };
   const soldiers = marchDraftValue();
   const generalCount = new Set((ownPlayer()?.carriedGeneralIds || []).map(String)).size;
   const modifiers = ownPlayer()?.marchModifiers || {};
   const baseCostPerCell = 1 + Math.ceil(soldiers / 10) + generalCount * 2;
-  const cost = Math.max(1, Math.round(route.distance * baseCostPerCell * Number(modifiers.costMultiplier ?? 1)));
+  const baseCost = Math.ceil(Number(route.weightQuarters || route.distance * 4) * baseCostPerCell / 4);
+  const cost = Math.max(1, Math.round(baseCost * Number(modifiers.costMultiplier ?? 1)));
   return { cost, durationMs: Math.max(1000, Math.round(route.durationMs * Number(modifiers.durationMultiplier ?? 1))) };
 }
-function selectedMarchIntent() {
-  const target = marchTarget();
+function selectedMarchIntent(target = marchTarget()) {
+  const modalAttack = Boolean(marchConfirmationTarget && sameMapPoint(target, marchConfirmationTarget)
+    && document.querySelector("#march-attack")?.checked);
   return {
     to: target, soldiers: marchDraftValue(),
-    attack: attackUnderfootAt(target) || Boolean(document.querySelector("#march-attack")?.checked)
+    attack: attackUnderfootAt(target) || hostileMarchTargetAt(target) || modalAttack
   };
 }
-function marchQuoteKey() { return JSON.stringify({ ...selectedMarchIntent(), revision: payload?.world?.revision, from: ownPlayer()?.position }); }
+function marchQuoteKey(target = marchTarget()) { return JSON.stringify({ ...selectedMarchIntent(target), revision: payload?.world?.revision, from: ownPlayer()?.position }); }
 function refreshMarchQuote() {
   clearTimeout(marchQuoteTimer);
   const target = marchTarget();
-  if (!target || !ownPlayer()?.position || sameMapPoint(target, ownPlayer().position)) {
+  const attackUnderfoot = attackUnderfootAt(target);
+  if (!target || !ownPlayer()?.position || (sameMapPoint(target, ownPlayer().position) && !attackUnderfoot)) {
     if (marchConfirmationTarget) renderMarchConfirmation();
     return;
   }
-  if (!marchMapRoute(ownPlayer().position, target, { attack: selectedMarchIntent().attack })) return;
+  const intent = selectedMarchIntent(target);
+  if (!attackUnderfoot && !marchMapRoute(ownPlayer().position, target, { attack: intent.attack })) return;
   marchQuoteTimer = setTimeout(() => {
-    const requestKey = marchQuoteKey();
+    const requestKey = marchQuoteKey(target);
     if (marchQuoteCache?.requestKey === requestKey || marchQuoteFailureKey === requestKey) return;
     const pendingKey = `intent:quote-march:${requestKey}`;
     if (pendingHostKeys.has(pendingKey)) return;
-    host("intent", { intent: { type: "quote-march", ...selectedMarchIntent(), requestKey } }, { expectResult: true, silent: true, key: pendingKey });
+    host("intent", { intent: { type: "quote-march", ...intent, requestKey } }, { expectResult: true, silent: true, key: pendingKey });
   }, 120);
 }
 
@@ -718,8 +800,12 @@ function buildMapTaskOverlays() {
     }
   }
   if (!jobs.some(job => job.type === "march")) {
-    const route = marchMapRoute(ownPlayer()?.position, selected, { attack: selectedMarchIntent().attack });
-    if (route) overlays.unshift({ type: "march", ...route, ...selectedMarchQuote(route), preview: true });
+    const target = selected;
+    const intent = selectedMarchIntent(target);
+    const requestKey = marchQuoteKey(target);
+    const quotedPath = marchQuoteCache?.requestKey === requestKey ? marchQuoteCache.path : null;
+    const route = marchMapRoute(ownPlayer()?.position, target, { path: quotedPath, attack: intent.attack });
+    if (route) overlays.unshift({ type: "march", ...route, ...selectedMarchQuote(route, target), preview: true });
   }
   return overlays;
 }
@@ -755,7 +841,7 @@ function mapTaskDescription(item, now = hostTime()) {
   }
   if (job.type === "training") {
     const cell = dynamicCell(job.x, job.y);
-    const expected = Math.max(0, Math.min(Number(job.amount || 0), fact(job.x, job.y).garrisonCap - Number(cell.soldiers || 0)));
+    const expected = Math.max(0, Math.min(Number(job.amount || 0), garrisonCapAt(job.x, job.y, cell) - Number(cell.soldiers || 0)));
     return `练兵 · (${job.x}, ${job.y})\n剩余：${remaining}\n预计新增：${formatNumber(expected)} 士兵${expected < Number(job.amount) ? `（计划 ${formatNumber(job.amount)} 人，受驻军上限限制）` : ""}`;
   }
   return `${job.attack ? "进攻行军" : "行军中"}\n起点 (${job.from.x}, ${job.from.y}) → 目标 (${job.to.x}, ${job.to.y})\n剩余：${remaining}\n随军：${formatNumber(job.soldiers)} 士兵 · ${(job.generalIds || []).length} 名将领`;
@@ -1149,7 +1235,7 @@ function renderMapArmyTransfer(player, activeMarch = false) {
     renderArmyTransferControls(player, cell, 0, false);
     return;
   }
-  const cap = Number(fact(position.x, position.y)?.garrisonCap || 0);
+  const cap = garrisonCapAt(position.x, position.y, cell);
   const garrison = Math.max(0, Math.trunc(Number(cell?.soldiers) || 0));
   document.querySelector("#territory-army-count").textContent = `驻军 ${formatNumber(garrison)} / ${formatNumber(cap)} · 行军 ${formatNumber(player.fieldArmySoldiers)}`;
   renderArmyTransferControls(player, cell, cap, true);
@@ -1184,21 +1270,27 @@ function renderMarchConfirmation() {
   });
   const target = marchConfirmationTarget;
   const attackUnderfoot = attackUnderfootAt(target);
-  const attackRequested = attackUnderfoot || Boolean(document.querySelector("#march-attack")?.checked);
-  const route = marchMapRoute(player.position, target, { attack: attackRequested });
-  document.querySelector("#march-confirmation-route").textContent = attackUnderfoot
-    ? `当前位置 (${target.x}, ${target.y}) · 攻打此处`
-    : `(${player.position.x}, ${player.position.y}) → (${target.x}, ${target.y}) · ${route?.distance || 0} 格`;
+  const attackForced = attackUnderfoot || hostileMarchTargetAt(target);
   const attackField = document.querySelector("#march-attack-field");
   const attackInput = document.querySelector("#march-attack");
+  if (attackForced) attackInput.checked = true;
   attackField.classList.toggle("hidden", attackUnderfoot);
-  if (attackUnderfoot) attackInput.checked = true;
-  attackInput.disabled = attackUnderfoot || marchSubmitting;
-  const requestKey = marchQuoteKey();
+  attackInput.disabled = attackForced || marchSubmitting;
+  const attackRequested = attackForced || Boolean(attackInput.checked);
+  const requestKey = marchQuoteKey(target);
+  const quotedPath = marchQuoteCache?.requestKey === requestKey ? marchQuoteCache.path : null;
+  const route = marchMapRoute(player.position, target, { path: quotedPath, attack: attackRequested });
+  document.querySelector("#march-confirmation-route").textContent = attackUnderfoot
+    ? `当前位置 (${target.x}, ${target.y}) · 攻打此处`
+    : route
+      ? `(${player.position.x}, ${player.position.y}) → (${target.x}, ${target.y}) · ${route.distance} 格`
+      : `(${player.position.x}, ${player.position.y}) → (${target.x}, ${target.y}) · 无法抵达`;
   const quoteFailed = marchQuoteFailureKey === requestKey;
   const transferPending = pendingHostKeys.has("intent:gather-march") || pendingHostKeys.has("intent:deploy-soldiers");
-  const exactQuote = attackUnderfoot || Boolean(route && marchQuoteCache?.requestKey === requestKey);
-  const quote = attackUnderfoot ? { cost: 0, durationMs: 0 } : route ? selectedMarchQuote(route) : { cost: 0, durationMs: 0 };
+  const exactQuote = Boolean(marchQuoteCache?.requestKey === requestKey);
+  const quote = exactQuote
+    ? { cost: marchQuoteCache.cost, durationMs: marchQuoteCache.durationMs }
+    : route ? selectedMarchQuote(route, target) : { cost: 0, durationMs: 0 };
   const cost = Math.max(0, Number(quote.cost || 0));
   const affordable = cost <= Number(player.gold || 0);
   document.querySelector("#march-party-duration").textContent = attackUnderfoot ? "立即结算" : formatDuration(quote.durationMs || route?.durationMs || 0);
@@ -1208,8 +1300,8 @@ function renderMarchConfirmation() {
   note.classList.remove("error");
   if (marchSubmitting) note.textContent = "正在处理行军，请勿重复操作。";
   else if (transferPending) note.textContent = "正在同步调兵结果，请稍候。";
-  else if (requested < 1) note.textContent = `当前队伍没有士兵，将由 ${formatNumber(carried.length)} 名随行将领单独行军。`;
   else if (!route && !attackUnderfoot) { note.textContent = "当前没有可通行的路线，请避开他人领地或选择攻打目标。"; note.classList.add("error"); }
+  else if (requested < 1) note.textContent = `当前队伍没有士兵，将由 ${formatNumber(carried.length)} 名随行将领单独行军。`;
   else if (quoteFailed) { note.textContent = "行军耗时与金币核算未完成，请重新核算。"; note.classList.add("error"); }
   else if (!exactQuote) note.textContent = "正在核算行军耗时与金币消耗…";
   else if (!affordable) { note.textContent = `金币不足，还差 ${formatNumber(cost - Number(player.gold || 0))} 金币。`; note.classList.add("error"); }
@@ -1222,9 +1314,9 @@ function renderMarchConfirmation() {
   document.querySelector("#march-confirmation-cancel").disabled = marchSubmitting;
   modal.setAttribute("aria-busy", String(marchSubmitting));
   submit.disabled = marchSubmitting || transferPending || (!route && !attackUnderfoot) || !exactQuote || !affordable;
-  submit.textContent = marchSubmitting ? "正在出征…" : attackUnderfoot ? "确认攻打" : "确认出征";
+  submit.textContent = marchSubmitting ? "正在出征…" : attackForced ? "确认攻打" : "确认出征";
   modal.classList.remove("hidden");
-  if (route && !exactQuote && !marchSubmitting) refreshMarchQuote();
+  if ((route || attackUnderfoot) && !exactQuote && !marchSubmitting) refreshMarchQuote();
 }
 function openMarchConfirmation() {
   if (!selected || !ownPlayer()) return;
@@ -1233,7 +1325,7 @@ function openMarchConfirmation() {
   marchQuoteCache = null;
   marchQuoteFailureKey = "";
   const attack = document.querySelector("#march-attack");
-  attack.checked = attackUnderfootAt(marchConfirmationTarget);
+  attack.checked = attackUnderfootAt(marchConfirmationTarget) || hostileMarchTargetAt(marchConfirmationTarget);
   renderMarchConfirmation();
   refreshMarchQuote();
 }
@@ -1258,9 +1350,22 @@ function dispatchMarch() {
   document.querySelector("#zero-army-march-confirmation").classList.add("hidden");
   renderMarchConfirmation();
   if (submit.disabled || !marchConfirmationTarget) return;
+  const target = marchConfirmationTarget;
+  const requestKey = marchQuoteKey(target);
+  if (marchQuoteCache?.requestKey !== requestKey) {
+    refreshMarchQuote();
+    return;
+  }
   marchSubmitting = true;
   renderMarchConfirmation();
-  const requestId = sendIntent({ type: "march", ...selectedMarchIntent() });
+  const expectedQuote = {
+    revision: marchQuoteCache.revision,
+    requestKey: marchQuoteCache.requestKey,
+    path: marchQuoteCache.path,
+    cost: marchQuoteCache.cost,
+    durationMs: marchQuoteCache.durationMs
+  };
+  const requestId = sendIntent({ type: "march", ...selectedMarchIntent(target), expectedQuote });
   if (!requestId) { marchSubmitting = false; renderMarchConfirmation(); }
 }
 function requestMarchSubmission() {
@@ -1636,7 +1741,7 @@ function trainingGoldCost(amountValue, cell, remainingValue) {
 }
 function renderTrainingCost(value = document.querySelector("#train-amount")?.value) {
   const cell = selected ? dynamicCell(selected.x, selected.y) : null;
-  const remaining = selected ? Math.max(0, Number(fact(selected.x, selected.y)?.garrisonCap || 0) - Number(cell?.soldiers || 0)) : 0;
+  const remaining = selected ? Math.max(0, garrisonCapAt(selected.x, selected.y, cell) - Number(cell?.soldiers || 0)) : 0;
   document.querySelector("#train-cost").textContent = formatNumber(trainingGoldCost(value, cell, remaining));
 }
 function renderMaterials() {
@@ -1704,7 +1809,7 @@ function renderCell() {
     values["#cell-owner"] = cell.ownerAccountId ? (owner?.displayName || "其他势力") : "未占领";
     values["#cell-population"] = formatNumber(info.population);
     values["#cell-resource"] = info.resourceGrade;
-    values["#cell-garrison"] = `${formatNumber(cell.soldiers)} / ${formatNumber(info.garrisonCap)}`;
+    values["#cell-garrison"] = `${formatNumber(cell.soldiers)} / ${formatNumber(garrisonCapAt(selected.x, selected.y, cell))}`;
     values["#cell-power"] = formatNumber(cell.ownerAccountId ? occupiedPower : info.neutralPower);
   }
   for (const [selector, value] of Object.entries(values)) document.querySelector(selector).textContent = value;
@@ -1744,7 +1849,7 @@ function renderCell() {
     delete miningCooldown.dataset.cooldownUntil;
     miningCooldown.textContent = "";
   }
-  const remainingGarrison = mine ? Math.max(0, Number(info?.garrisonCap || 0) - Number(cell?.soldiers || 0)) : 0;
+  const remainingGarrison = mine ? Math.max(0, garrisonCapAt(selected.x, selected.y, cell) - Number(cell?.soldiers || 0)) : 0;
   const trainAmount = document.querySelector("#train-amount");
   trainAmount.max = String(remainingGarrison);
   trainAmount.disabled = !player || !mine || remainingGarrison < 1 || activeTerritoryJob;
@@ -1754,8 +1859,13 @@ function renderCell() {
   renderTrainingCost(trainAmount.value);
   document.querySelector("#train").disabled = trainAmount.disabled || Number(trainAmount.value) < 1 || trainingGoldCost(trainAmount.value, cell, remainingGarrison) > Number(player?.gold || 0);
   const attackUnderfoot = atCurrent && cell?.ownerAccountId !== ownAccountId();
-  document.querySelector("#march").textContent = attackUnderfoot ? "攻打此处" : "向这里行军";
-  document.querySelector("#march").disabled = !player || !selected || (atCurrent && !attackUnderfoot) || activeMarch;
+  const hostileTarget = Boolean(selected && cell?.ownerAccountId && cell.ownerAccountId !== ownAccountId());
+  const route = player && selected && !atCurrent
+    ? marchMapRoute(player.position, selected, { attack: hostileTarget })
+    : null;
+  const inaccessible = Boolean(player && selected && !atCurrent && !route);
+  document.querySelector("#march").textContent = attackUnderfoot ? "攻打此处" : inaccessible ? "无法抵达" : "向这里行军";
+  document.querySelector("#march").disabled = !player || !selected || (atCurrent && !attackUnderfoot) || activeMarch || inaccessible;
   if (marchConfirmationTarget) renderMarchConfirmation();
 }
 
@@ -2930,15 +3040,14 @@ document.querySelector("#train-amount").addEventListener("input", event => {
   document.querySelector("#train-amount-value").value = event.currentTarget.value;
   renderTrainingCost(event.currentTarget.value);
   const cell = selected ? dynamicCell(selected.x, selected.y) : null;
-  const remaining = selected ? Math.max(0, Number(fact(selected.x, selected.y)?.garrisonCap || 0) - Number(cell?.soldiers || 0)) : 0;
+  const remaining = selected ? Math.max(0, garrisonCapAt(selected.x, selected.y, cell) - Number(cell?.soldiers || 0)) : 0;
   document.querySelector("#train").disabled = event.currentTarget.disabled || Number(event.currentTarget.value) < 1
     || trainingGoldCost(event.currentTarget.value, cell, remaining) > Number(ownPlayer()?.gold || 0);
 });
 document.querySelector("#train").addEventListener("click", () => {
   if (!selected) return;
-  const info = fact(selected.x, selected.y);
   const cell = dynamicCell(selected.x, selected.y);
-  const remaining = Math.max(0, Number(info?.garrisonCap || 0) - Number(cell?.soldiers || 0));
+  const remaining = Math.max(0, garrisonCapAt(selected.x, selected.y, cell) - Number(cell?.soldiers || 0));
   const value = Number(document.querySelector("#train-amount").value);
   sendIntent({ type: "train", x: selected.x, y: selected.y, amount: value, ...(value >= remaining ? { mode: "max" } : {}) });
 });
@@ -3082,6 +3191,10 @@ window.addEventListener("message", event => {
     if (requestState?.silent) return;
     if (requestState?.key === "intent:march") {
       marchSubmitting = false;
+      if (event.data.errorCode === "FYOW_MARCH_QUOTE_CHANGED") {
+        marchQuoteCache = null;
+        marchQuoteFailureKey = "";
+      }
       renderMarchConfirmation();
     }
     if (requestState?.key === "intent:deploy-general") {

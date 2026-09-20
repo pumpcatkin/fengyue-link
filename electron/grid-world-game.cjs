@@ -45,6 +45,13 @@ const MAX_CONCURRENT_MINING_JOBS = 3;
 const MINING_COOLDOWN_MIN_MS = 0.9 * HOUR;
 const MINING_COOLDOWN_MAX_MS = 3.6 * HOUR;
 const MARCH_MS_PER_CELL = 15 * 1000;
+const MARCH_QUOTE_CHANGED_ERROR_CODE = "FYOW_MARCH_QUOTE_CHANGED";
+const OWN_TERRITORY_MARCH_WEIGHT_QUARTERS = 1;
+const ORDINARY_MARCH_WEIGHT_QUARTERS = 4;
+const BASE_GARRISON_PERCENT = 20;
+const OCCUPATION_GARRISON_PERCENT = 5;
+const MAX_GARRISON_PERCENT = 75;
+const MAX_OCCUPATION_COUNT = 1_000_000;
 const MINING_GRADE_YIELD_MULTIPLIERS = Object.freeze(
   RESOURCE_GRADES.map((_, index) => 2.8 + index * 0.18)
 );
@@ -161,14 +168,40 @@ function staticCell(seed, xValue, yValue) {
     resourceMultiplier: layerMultiplier,
     resourceGrade: RESOURCE_GRADES[rank],
     resourceRank: rank,
-    garrisonCap: Math.floor(population * 0.2),
+    garrisonCap: Math.floor(population * BASE_GARRISON_PERCENT / 100),
     neutralPower: Math.floor(population * 0.2)
   };
 }
 
+function cellOccupationCount(cell) {
+  const count = Number(cell?.occupationCount);
+  return Number.isSafeInteger(count) && count >= 0 ? Math.min(count, MAX_OCCUPATION_COUNT) : 0;
+}
+
+function cellGarrisonCap(state, xValue, yValue, cellValue) {
+  const x = coordinate(xValue, "横坐标");
+  const y = coordinate(yValue, "纵坐标");
+  const info = staticCell(state.seed, x, y);
+  const cell = cellValue ?? state.cells?.[keyOf(x, y)];
+  const percent = Math.min(MAX_GARRISON_PERCENT,
+    BASE_GARRISON_PERCENT + cellOccupationCount(cell) * OCCUPATION_GARRISON_PERCENT);
+  return Math.floor(info.population * percent / 100);
+}
+
+function occupyCell(cell, nextOwnerAccountId) {
+  const nextOwner = String(nextOwnerAccountId || "");
+  const currentOwner = String(cell?.ownerAccountId || "");
+  if (!cell || !nextOwner) throw new Error("占领区域缺少新的领地主人");
+  if (currentOwner !== nextOwner) {
+    cell.occupationCount = Math.min(MAX_OCCUPATION_COUNT, cellOccupationCount(cell) + 1);
+  }
+  cell.ownerAccountId = nextOwner;
+  return cell;
+}
+
 function dynamicCell(state, x, y) {
   const key = keyOf(x, y);
-  return state.cells[key] || (state.cells[key] = { ownerAccountId: null, soldiers: 0, generalIds: [] });
+  return state.cells[key] || (state.cells[key] = { ownerAccountId: null, soldiers: 0, generalIds: [], occupationCount: 0 });
 }
 
 function createWorld({ seed = crypto.randomBytes(16).toString("hex"), seasonId = crypto.randomUUID(), startedAt = Date.now(), authorityAccountId = null } = {}) {
@@ -217,7 +250,11 @@ function resetPlayerState(inputState, targetAccountId, nextEpoch) {
     .filter(([, general]) => String(general?.holderAccountId || "") === target)
     .map(([id]) => id));
   for (const [key, cell] of Object.entries(state.cells || {})) {
-    if (String(cell?.ownerAccountId || "") === target) delete state.cells[key];
+    if (String(cell?.ownerAccountId || "") === target) {
+      const occupationCount = cellOccupationCount(cell);
+      if (occupationCount > 0) state.cells[key] = { ownerAccountId: null, soldiers: 0, generalIds: [], occupationCount };
+      else delete state.cells[key];
+    }
     else if (Array.isArray(cell?.generalIds)) cell.generalIds = cell.generalIds.filter(id => !deployedIds.has(String(id)));
   }
   for (const [id, general] of Object.entries(state.generals)) {
@@ -564,6 +601,37 @@ function marchCost(distanceValue, soldiersValue, generalCountValue = 0) {
   return distance * (1 + Math.ceil(soldiers / 10) + generalCount * 2);
 }
 
+function marchRouteBreakdown(state, accountIdValue, pathValue) {
+  const accountId = String(accountIdValue || "");
+  const path = Array.isArray(pathValue) ? pathValue : [];
+  let ownDistance = 0;
+  for (const point of path) {
+    if (String(marchCellOwner(state, point) || "") === accountId) ownDistance += 1;
+  }
+  const ordinaryDistance = path.length - ownDistance;
+  const weightQuarters = ownDistance * OWN_TERRITORY_MARCH_WEIGHT_QUARTERS
+    + ordinaryDistance * ORDINARY_MARCH_WEIGHT_QUARTERS;
+  return Object.freeze({
+    ownDistance,
+    ordinaryDistance,
+    weightQuarters,
+    weightedDistance: weightQuarters / ORDINARY_MARCH_WEIGHT_QUARTERS
+  });
+}
+
+function marchRouteCost(routeValue, soldiersValue, generalCountValue = 0) {
+  const weightQuarters = Math.max(0, Math.trunc(Number(routeValue?.weightQuarters) || 0));
+  const soldiers = Math.max(0, Math.trunc(Number(soldiersValue) || 0));
+  const generalCount = Math.max(0, Math.trunc(Number(generalCountValue) || 0));
+  const perOrdinaryCell = 1 + Math.ceil(soldiers / 10) + generalCount * 2;
+  return Math.ceil(weightQuarters * perOrdinaryCell / ORDINARY_MARCH_WEIGHT_QUARTERS);
+}
+
+function marchRouteDurationMs(routeValue) {
+  const weightQuarters = Math.max(0, Math.trunc(Number(routeValue?.weightQuarters) || 0));
+  return weightQuarters * MARCH_MS_PER_CELL / ORDINARY_MARCH_WEIGHT_QUARTERS;
+}
+
 function roundByModifier(value, modifier, minimum = 0) {
   return Math.max(minimum, Math.round(Number(value) * (1 + Number(modifier || 0))));
 }
@@ -719,22 +787,62 @@ function marchQuote(state, accountId, toValue, soldiersValue = 0, _generalIdsVal
   const player = ensurePlayer(state, String(accountId));
   const from = { x: coordinate(player.position?.x, "玩家所在地横坐标"), y: coordinate(player.position?.y, "玩家所在地纵坐标") };
   const to = { x: coordinate(toValue?.x, "目标横坐标"), y: coordinate(toValue?.y, "目标纵坐标") };
-  const path = findMarchPath(state, accountId, from, to, { attack: Boolean(attacking) });
+  const attack = Boolean(attacking);
+  const path = findMarchPath(state, accountId, from, to, { attack });
   if (!path) throw new Error("没有可通行的行军路径");
   const distance = path.length;
-  if (!distance && !attacking) throw new Error("目标位置与当前位置相同");
+  if (!distance && !attack) throw new Error("目标位置与当前位置相同");
   const soldiers = integer(soldiersValue, "携带士兵", 0, 1000000);
+  const revision = Math.max(0, Math.trunc(Number(state.revision) || 0));
+  const requestKey = JSON.stringify({ to, soldiers, attack, revision, from });
   const generalIds = [...new Set((player.carriedGeneralIds || []).map(String))];
   const activeGeneralIds = generalIds.slice(0, ACTIVE_CARRIED_GENERAL_LIMIT);
-  const modifiers = actionTalentModifiers(state, accountId, "march", to, { attacking, armySize: soldiers, carriedGeneralIds: activeGeneralIds, now: nowValue });
-  const baseCost = marchCost(distance, soldiers, generalIds.length);
-  const baseDurationMs = marchDurationMs(distance);
+  const modifiers = actionTalentModifiers(state, accountId, "march", to, { attacking: attack, armySize: soldiers, carriedGeneralIds: activeGeneralIds, now: nowValue });
+  const route = marchRouteBreakdown(state, accountId, path);
+  const baseCost = marchRouteCost(route, soldiers, generalIds.length);
+  const baseDurationMs = marchRouteDurationMs(route);
   return Object.freeze({
-    from, to, path, distance, soldiers, generalIds, activeGeneralIds,
+    revision, requestKey, from, to, path, distance, soldiers, generalIds, activeGeneralIds,
+    ownDistance: route.ownDistance, ordinaryDistance: route.ordinaryDistance,
+    weightQuarters: route.weightQuarters, weightedDistance: route.weightedDistance,
     baseCost, cost: distance ? roundByModifier(baseCost, modifiers.marchCost, 1) : 0,
     baseDurationMs, durationMs: distance ? roundByModifier(baseDurationMs, modifiers.marchDuration, 1) : 0,
     modifiers
   });
+}
+
+function sameExpectedMarchPath(expected, actual) {
+  if (!Array.isArray(expected) || expected.length !== actual.length) return false;
+  return expected.every((point, index) => {
+    if (!point || typeof point !== "object" || Array.isArray(point)) return false;
+    const keys = Object.keys(point).sort();
+    return keys.length === 2 && keys[0] === "x" && keys[1] === "y"
+      && point.x === actual[index].x && point.y === actual[index].y;
+  });
+}
+
+function marchQuoteChangedError(cause) {
+  const error = new Error("行军报价已变化，请重新核算", cause ? { cause } : undefined);
+  error.code = MARCH_QUOTE_CHANGED_ERROR_CODE;
+  error.errorCode = MARCH_QUOTE_CHANGED_ERROR_CODE;
+  return error;
+}
+
+function assertExpectedMarchQuote(state, accountId, intent, nowValue = Date.now()) {
+  const expected = intent?.expectedQuote;
+  if (!expected || typeof expected !== "object" || Array.isArray(expected)) throw marchQuoteChangedError();
+  let quote;
+  try {
+    quote = marchQuote(state, accountId, intent.to, intent.soldiers, intent.generalIds, Boolean(intent.attack), nowValue);
+  } catch (cause) {
+    throw marchQuoteChangedError(cause);
+  }
+  if (expected.revision !== quote.revision
+    || expected.requestKey !== quote.requestKey
+    || expected.cost !== quote.cost
+    || expected.durationMs !== quote.durationMs
+    || !sameExpectedMarchPath(expected.path, quote.path)) throw marchQuoteChangedError();
+  return quote;
 }
 
 function ordinaryTreasureMaterial(seed, epoch, index) {
@@ -880,8 +988,63 @@ function routeIsCurrent(state, accountId, path, to, attack) {
   });
 }
 
-// Four-neighbour BFS keeps quotes, queued jobs and settlement on one route.
-// Other players' cells are walls; an attacked enemy cell may only be the end.
+function compareMarchFrontier(left, right) {
+  return left.weightQuarters - right.weightQuarters || left.steps - right.steps || left.order - right.order;
+}
+
+function pushMarchFrontier(heap, item) {
+  heap.push(item);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareMarchFrontier(heap[parent], item) <= 0) break;
+    heap[index] = heap[parent];
+    index = parent;
+  }
+  heap[index] = item;
+}
+
+function popMarchFrontier(heap) {
+  if (!heap.length) return null;
+  const first = heap[0];
+  const last = heap.pop();
+  if (!heap.length) return first;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    if (left >= heap.length) break;
+    let child = left;
+    if (right < heap.length && compareMarchFrontier(heap[right], heap[left]) < 0) child = right;
+    if (compareMarchFrontier(last, heap[child]) <= 0) break;
+    heap[index] = heap[child];
+    index = child;
+  }
+  heap[index] = last;
+  return first;
+}
+
+function targetFirstDirections(current, to) {
+  const dx = Math.sign(to.x - current.x);
+  const dy = Math.sign(to.y - current.y);
+  const directions = [];
+  if (dx) directions.push([dx, 0]);
+  if (dy) directions.push([0, dy]);
+  if (dx) directions.push([-dx, 0]);
+  if (dy) directions.push([0, -dy]);
+  if (!dx) directions.push([1, 0], [-1, 0]);
+  if (!dy) directions.push([0, 1], [0, -1]);
+  const seen = new Set();
+  return directions.filter(([stepX, stepY]) => {
+    const key = `${stepX},${stepY}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// Four-neighbour Dijkstra minimizes the actual gold/time weight. Other
+// players' cells are walls; an attacked enemy cell may only be the end.
 function findMarchPath(state, accountIdValue, fromValue, toValue, options = {}) {
   const accountId = String(accountIdValue || "");
   const from = { x: coordinate(fromValue?.x, "起点横坐标"), y: coordinate(fromValue?.y, "起点纵坐标") };
@@ -902,35 +1065,32 @@ function findMarchPath(state, accountIdValue, fromValue, toValue, options = {}) 
   if (targetOwner && String(targetOwner) !== accountId && !attack) return null;
   const startKey = keyOf(from.x, from.y);
   const targetKey = keyOf(to.x, to.y);
-  const queue = [from];
   const previous = new Map([[startKey, null]]);
-  let cursor = 0;
-  while (cursor < queue.length) {
-    const current = queue[cursor++];
+  const best = new Map([[startKey, { weightQuarters: 0, steps: 0 }]]);
+  const frontier = [];
+  let order = 0;
+  pushMarchFrontier(frontier, { ...from, key: startKey, weightQuarters: 0, steps: 0, order: order++ });
+  while (frontier.length) {
+    const current = popMarchFrontier(frontier);
+    const known = best.get(current.key);
+    if (!known || known.weightQuarters !== current.weightQuarters || known.steps !== current.steps) continue;
     if (samePoint(current, to)) break;
-    const dx = Math.sign(to.x - current.x);
-    const dy = Math.sign(to.y - current.y);
-    const directions = [];
-    if (dx) directions.push([dx, 0]);
-    if (dy) directions.push([0, dy]);
-    if (dx) directions.push([-dx, 0]);
-    if (dy) directions.push([0, -dy]);
-    if (!dx) directions.push([1, 0], [-1, 0]);
-    if (!dy) directions.push([0, 1], [0, -1]);
-    const seenDirections = new Set();
-    for (const [stepX, stepY] of directions) {
-      const directionKey = `${stepX},${stepY}`;
-      if (seenDirections.has(directionKey)) continue;
-      seenDirections.add(directionKey);
+    for (const [stepX, stepY] of targetFirstDirections(current, to)) {
       const next = { x: current.x + stepX, y: current.y + stepY };
       if (next.x < 0 || next.x >= GRID_SIZE || next.y < 0 || next.y >= GRID_SIZE) continue;
       const nextKey = keyOf(next.x, next.y);
-      if (previous.has(nextKey)) continue;
       const owner = marchCellOwner(state, next);
       const isTarget = nextKey === targetKey;
       if (owner && String(owner) !== accountId && !(isTarget && attack)) continue;
+      const weightQuarters = current.weightQuarters
+        + (String(owner || "") === accountId ? OWN_TERRITORY_MARCH_WEIGHT_QUARTERS : ORDINARY_MARCH_WEIGHT_QUARTERS);
+      const steps = current.steps + 1;
+      const prior = best.get(nextKey);
+      if (prior && (prior.weightQuarters < weightQuarters
+        || (prior.weightQuarters === weightQuarters && prior.steps <= steps))) continue;
+      best.set(nextKey, { weightQuarters, steps });
       previous.set(nextKey, keyOf(current.x, current.y));
-      queue.push(next);
+      pushMarchFrontier(frontier, { ...next, key: nextKey, weightQuarters, steps, order: order++ });
     }
   }
   if (!previous.has(targetKey)) return null;
@@ -956,7 +1116,7 @@ function returnArmy(state, player, job, soldiers) {
     player.fieldArmySoldiers = Number(player.fieldArmySoldiers || 0) + amount;
     return;
   }
-  const capacity = staticCell(state.seed, job.from.x, job.from.y).garrisonCap;
+  const capacity = cellGarrisonCap(state, job.from.x, job.from.y, origin);
   const accepted = Math.max(0, Math.min(amount, capacity - Number(origin.soldiers || 0)));
   origin.soldiers += accepted;
   player.fieldArmySoldiers = Number(player.fieldArmySoldiers || 0) + amount - accepted;
@@ -1388,7 +1548,8 @@ function settleWorld(inputState, nowValue = Date.now(), options = {}) {
       }
       const info = staticCell(state.seed, job.x, job.y);
       const trainedAmount = Math.max(0, Number(job.outputAmount ?? job.amount) || 0);
-      const accepted = Math.max(0, Math.min(trainedAmount, info.garrisonCap - Number(cell.soldiers || 0)));
+      const garrisonCap = cellGarrisonCap(state, job.x, job.y, cell);
+      const accepted = Math.max(0, Math.min(trainedAmount, garrisonCap - Number(cell.soldiers || 0)));
       cell.soldiers += accepted;
       effects.push({ type: "training-complete", jobId, accountId: job.accountId, x: job.x, y: job.y, soldiers: accepted });
       if (accepted > 0) {
@@ -1565,8 +1726,8 @@ function resolveMarch(state, job, effects, now) {
       }
       const previousOwner = target.ownerAccountId;
       const capturedGeneralIds = [...(target.generalIds || [])];
-      target.ownerAccountId = job.accountId;
-      target.soldiers = Math.min(targetInfo.garrisonCap, casualties.attackerSurvivors);
+      occupyCell(target, job.accountId);
+      target.soldiers = Math.min(cellGarrisonCap(state, job.to.x, job.to.y, target), casualties.attackerSurvivors);
       target.generalIds = [];
       player.position = { ...job.to };
       rememberMarchRoute(player, job, path);
@@ -1628,8 +1789,8 @@ function resolveMarch(state, job, effects, now) {
     const capturedGeneralIds = [...(target.generalIds || [])];
     const losses = neutralCasualties.attackerLosses;
     const survivors = neutralCasualties.attackerSurvivors;
-    target.ownerAccountId = job.accountId;
-    target.soldiers = Math.min(targetInfo.garrisonCap, survivors);
+    occupyCell(target, job.accountId);
+    target.soldiers = Math.min(cellGarrisonCap(state, job.to.x, job.to.y, target), survivors);
     target.generalIds = [];
     player.position = { ...job.to };
     rememberMarchRoute(player, job, path);
@@ -1777,8 +1938,9 @@ function applyIntent(inputState, rawIntent, context = {}) {
     const initialPower = generatedPlayerPower(state.seed, actorAccountId);
     const info = staticCell(state.seed, capital.x, capital.y);
     const cell = dynamicCell(state, capital.x, capital.y);
-    cell.ownerAccountId = actorAccountId;
-    cell.soldiers = Math.max(1, Math.floor(info.garrisonCap * 0.5));
+    occupyCell(cell, actorAccountId);
+    const garrisonCap = cellGarrisonCap(state, capital.x, capital.y, cell);
+    cell.soldiers = Math.max(1, Math.floor(garrisonCap * 0.5));
     state.players[actorAccountId] = {
       accountId: actorAccountId,
       accountName: String(context.actorAccountName || intent.accountName || actorAccountId).slice(0, 80),
@@ -1890,14 +2052,15 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (jobFor(state, job => job.type === "training" && job.accountId === actorAccountId && job.x === x && job.y === y)) throw new Error("同一格内只能同时进行一项练兵");
       if (jobFor(state, job => job.type === "mining" && job.accountId === actorAccountId && job.x === x && job.y === y)) throw new Error("该区域正在开采");
       const modifiers = actionTalentModifiers(state, actorAccountId, "training", { x, y }, { armySize: requestedAmount, now });
-      const remainingGarrison = Math.max(0, info.garrisonCap - Number(cell.soldiers || 0));
+      const garrisonCap = cellGarrisonCap(state, x, y, cell);
+      const remainingGarrison = Math.max(0, garrisonCap - Number(cell.soldiers || 0));
       const amount = String(intent.mode || "").toLowerCase() === "max"
         ? maxTrainingInputForRemaining(remainingGarrison, modifiers.trainingYield)
         : requestedAmount;
-      if (amount < 1) throw new Error(`该区域驻军上限为 ${info.garrisonCap}`);
+      if (amount < 1) throw new Error(`该区域驻军上限为 ${garrisonCap}`);
       const effectiveModifiers = actionTalentModifiers(state, actorAccountId, "training", { x, y }, { armySize: amount, now });
       const outputAmount = roundByModifier(amount, effectiveModifiers.trainingYield, 1);
-      if (cell.soldiers + outputAmount > info.garrisonCap) throw new Error(`该区域驻军上限为 ${info.garrisonCap}`);
+      if (cell.soldiers + outputAmount > garrisonCap) throw new Error(`该区域驻军上限为 ${garrisonCap}`);
       const cost = roundByModifier(amount * 2, effectiveModifiers.trainingCost, 1);
       const durationMs = roundByModifier(trainDurationMs(amount), effectiveModifiers.trainingDuration, 1000);
       if (player.gold < cost) throw new Error("金币不足");
@@ -2064,11 +2227,11 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("行军途中不能调度驻军");
       const position = { x: coordinate(player.position?.x, "玩家所在地横坐标"), y: coordinate(player.position?.y, "玩家所在地纵坐标") };
       const cell = dynamicCell(state, position.x, position.y);
-      const info = staticCell(state.seed, position.x, position.y);
+      const garrisonCap = cellGarrisonCap(state, position.x, position.y, cell);
       if (cell.ownerAccountId !== actorAccountId) throw new Error("只能在自己的领地调度驻军");
       const deploying = type === "deploy-soldiers";
       const available = deploying ? Math.max(0, Math.trunc(Number(player.fieldArmySoldiers) || 0)) : Math.max(0, Math.trunc(Number(cell.soldiers) || 0));
-      const capacity = deploying ? Math.max(0, info.garrisonCap - Math.trunc(Number(cell.soldiers) || 0)) : available;
+      const capacity = deploying ? Math.max(0, garrisonCap - Math.trunc(Number(cell.soldiers) || 0)) : available;
       const requested = String(intent.mode || "").toLowerCase() === "max"
         ? Math.min(available, capacity)
         : integer(intent.amount ?? intent.delta ?? 0, "调度士兵数量", 0, 1000000);
@@ -2081,10 +2244,8 @@ function applyIntent(inputState, rawIntent, context = {}) {
         cell.soldiers = Math.trunc(Number(cell.soldiers) || 0) - amount;
         player.fieldArmySoldiers = Math.trunc(Number(player.fieldArmySoldiers) || 0) + amount;
       }
-      result = { type, x: position.x, y: position.y, amount, fieldArmySoldiers: player.fieldArmySoldiers, garrison: cell.soldiers, garrisonCap: info.garrisonCap };
+      result = { type, x: position.x, y: position.y, amount, fieldArmySoldiers: player.fieldArmySoldiers, garrison: cell.soldiers, garrisonCap };
     } else if (type === "march") {
-      if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("已有行军正在途中");
-      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "player")) throw new Error("自身修炼期间不能行军");
       const to = { x: coordinate(intent.to?.x, "目标横坐标"), y: coordinate(intent.to?.y, "目标纵坐标") };
       const from = {
         x: coordinate(player.position?.x, "玩家所在地横坐标"),
@@ -2093,11 +2254,16 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const requested = integer(intent.soldiers ?? 0, "携带士兵", 0, 1000000);
       const generalIds = [...new Set((player.carriedGeneralIds || []).map(String))];
       const activeGeneralIds = generalIds.slice(0, ACTIVE_CARRIED_GENERAL_LIMIT);
+      const expectedQuote = context.requireExpectedMarchQuote || intent.expectedQuote !== undefined
+        ? assertExpectedMarchQuote(state, actorAccountId, { ...intent, to, soldiers: requested }, now)
+        : null;
+      if (jobFor(state, job => job.type === "march" && job.accountId === actorAccountId)) throw new Error("已有行军正在途中");
+      if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "player")) throw new Error("自身修炼期间不能行军");
       if (jobFor(state, job => job.type === "power-training" && job.accountId === actorAccountId && job.targetType === "general" && generalIds.includes(job.targetId))) throw new Error("正在修炼的将领不能随军出征");
       if (jobFor(state, job => job.type === "general-cultivation" && job.accountId === actorAccountId && generalIds.includes(job.generalId))) throw new Error("正在修炼的将领不能随军出征");
       const available = Math.max(0, Math.trunc(Number(player.fieldArmySoldiers) || 0));
       if (requested > available) throw new Error("行军队伍士兵不足，请先确认征集");
-      const quote = marchQuote(state, actorAccountId, to, requested, generalIds, Boolean(intent.attack), now);
+      const quote = expectedQuote || marchQuote(state, actorAccountId, to, requested, generalIds, Boolean(intent.attack), now);
       const path = quote.path;
       const cost = quote.cost;
       if (player.gold < cost) throw new Error("金币不足");
@@ -2658,11 +2824,18 @@ module.exports = {
   CENTRAL_LAYER_MULTIPLIERS,
   CENTRAL_LAYER_BOUNDARIES,
   CENTRAL_NEUTRAL_RADIUS,
+  BASE_GARRISON_PERCENT,
+  OCCUPATION_GARRISON_PERCENT,
+  MAX_GARRISON_PERCENT,
+  MAX_OCCUPATION_COUNT,
+  OWN_TERRITORY_MARCH_WEIGHT_QUARTERS,
+  ORDINARY_MARCH_WEIGHT_QUARTERS,
   SPAWN_NEUTRAL_RADIUS,
   SPAWN_EDGE_BAND,
   MINUTE,
   HOUR,
   MARCH_MS_PER_CELL,
+  MARCH_QUOTE_CHANGED_ERROR_CODE,
   MINING_GRADE_YIELD_MULTIPLIERS,
   MARKET_RELIST_COOLDOWN_MS,
   ACTIVE_CARRIED_GENERAL_LIMIT,
@@ -2733,8 +2906,14 @@ module.exports = {
   powerTrainingQuote,
   marchDurationMs,
   marchCost,
+  marchRouteBreakdown,
+  marchRouteCost,
+  marchRouteDurationMs,
   marchQuote,
+  assertExpectedMarchQuote,
   findMarchPath,
+  cellOccupationCount,
+  cellGarrisonCap,
   battleCasualties,
   regionPower,
   regionDefenseQuote,

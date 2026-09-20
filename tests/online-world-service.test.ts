@@ -1184,7 +1184,10 @@ describe("online world platform service", () => {
     instance.status = "degraded";
     const before = JSON.stringify(instance.world);
     const result = await instance.submitIntent({ type: "quote-march", to: { x: 3, y: 1 }, soldiers: 5, generalIds: [], attack: false, requestKey: "hover:3,1" });
-    expect(result.marchQuote).toMatchObject({ requestKey: "hover:3,1", from: { x: 1, y: 1 }, to: { x: 3, y: 1 }, distance: 2, soldiers: 5 });
+    expect(result.marchQuote).toMatchObject({ revision: 0, from: { x: 1, y: 1 }, to: { x: 3, y: 1 }, distance: 2, soldiers: 5 });
+    expect(result.marchQuote.requestKey).toBe(JSON.stringify({
+      to: { x: 3, y: 1 }, soldiers: 5, attack: false, revision: 0, from: { x: 1, y: 1 }
+    }));
     expect(result.marchQuote.cost).toBeGreaterThan(0);
     expect(result.marchQuote.durationMs).toBeGreaterThan(0);
     expect(JSON.stringify(instance.world)).toBe(before);
@@ -1192,6 +1195,47 @@ describe("online world platform service", () => {
     expect(instance.intentInFlightKey).toBe("pending-action");
     instance.world.bans.player = { banned: true };
     await expect(instance.submitIntent({ type: "quote-march", to: { x: 3, y: 1 }, soldiers: 0 })).rejects.toThrow(/封禁/);
+  });
+
+  it("rejects a stale march quote through the formal service path without charging or creating a job", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "晴岚" }),
+      getIdentity: async () => identity,
+      now: () => 1_000_000
+    });
+    instance.status = "ready";
+    instance.control = { authorityAccountId: "author" };
+    instance.world = createWorld({ seasonId: "season", authorityAccountId: "author", startedAt: 1_000_000 });
+    instance.world.players.player = {
+      accountId: "player", displayName: "晴岚", position: { x: 1, y: 1 },
+      gold: 1_000, fieldArmySoldiers: 10, carriedGeneralIds: [], basePower: 500, trainingLevel: 0, power: 500
+    };
+    instance.world.privatePlayers.player = { orientation: "any" };
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 0, generalIds: [] };
+    const quote = (await instance.submitIntent({
+      type: "quote-march", to: { x: 3, y: 1 }, soldiers: 5, attack: false
+    })).marchQuote;
+    instance.world.revision += 1;
+    const before = structuredClone(instance.world);
+
+    const submission = instance.submitIntent({
+      type: "march", to: { x: 3, y: 1 }, soldiers: 5, attack: false,
+      expectedQuote: {
+        revision: quote.revision, requestKey: quote.requestKey, path: quote.path,
+        cost: quote.cost, durationMs: quote.durationMs
+      },
+      idempotencyKey: "stale-march-quote"
+    });
+
+    await expect(submission).rejects.toMatchObject({
+      code: "FYOW_MARCH_QUOTE_CHANGED",
+      errorCode: "FYOW_MARCH_QUOTE_CHANGED"
+    });
+    expect(instance.world).toEqual(before);
+    expect(instance.world.players.player.gold).toBe(1_000);
+    expect(instance.world.players.player.fieldArmySoldiers).toBe(10);
+    expect(instance.world.jobs).toEqual({});
   });
 
   it("reports a failed in-flight sync as an unsubmitted action instead of exposing fetch internals", async () => {
@@ -1546,6 +1590,106 @@ describe("online world platform service", () => {
     expect(fixture.author.validMapDelta(reduced)).toBe(true);
     expect(fixture.author.validMapDelta(increased)).toBe(false);
     expect(fixture.author.validMapDelta(newOverCap)).toBe(false);
+  });
+
+  it("persists occupation counts monotonically while replaying legacy zero-count records", async () => {
+    const fixture = coverageHarness();
+    fixture.author.world.cells["10,10"] = { ownerAccountId: "author", soldiers: 0, generalIds: [] };
+
+    const legacyReplay = fixture.map("player", 70, {
+      cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
+    });
+    expect(fixture.author.validMapDelta(legacyReplay)).toBe(true);
+    fixture.author.control.occupationCountingProtocol = 1;
+    fixture.author.controlPlatformOrder = { timestamp: fixture.base + 71, commentId: "cutover" };
+    const postCutoverLegacyWrite = fixture.map("player", 71, {
+      cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
+    });
+    expect(fixture.author.validMapDelta(postCutoverLegacyWrite)).toBe(false);
+    delete fixture.author.control.occupationCountingProtocol;
+    fixture.author.controlPlatformOrder = { timestamp: 0, commentId: "" };
+
+    const firstTrackedTakeover = fixture.map("player", 71, {
+      cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [], occupationCount: 1 } }
+    });
+    expect(fixture.author.validMapDelta(firstTrackedTakeover)).toBe(true);
+    expect(fixture.author.applyMapDelta(firstTrackedTakeover)).toBe(true);
+    expect(fixture.author.world.cells["10,10"].occupationCount).toBe(1);
+
+    const sameOwnerIncrement = fixture.map("player", 72, {
+      cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [], occupationCount: 2 } }
+    });
+    const countDroppingLegacyWrite = fixture.map("player", 73, {
+      cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
+    });
+    const countedTombstone = fixture.map("player", 74, { cells: { "10,10": null } });
+    expect(fixture.author.validMapDelta(sameOwnerIncrement)).toBe(false);
+    expect(fixture.author.validMapDelta(countDroppingLegacyWrite)).toBe(false);
+    expect(fixture.author.validMapDelta(countedTombstone)).toBe(false);
+
+    const secondTakeover = fixture.map("author", 75, {
+      cells: { "10,10": { ownerAccountId: "author", soldiers: 0, generalIds: [], occupationCount: 2 } }
+    });
+    const skippedTakeover = fixture.map("author", 76, {
+      cells: { "10,10": { ownerAccountId: "author", soldiers: 0, generalIds: [], occupationCount: 3 } }
+    });
+    expect(fixture.author.validMapDelta(secondTakeover)).toBe(true);
+    expect(fixture.author.validMapDelta(skippedTakeover)).toBe(false);
+    expect(fixture.author.applyMapDelta(secondTakeover)).toBe(true);
+
+    const snapshot = await fixture.author.publishSnapshot();
+    expect(snapshot.state.cells["10,10"].occupationCount).toBe(2);
+  });
+
+  it("rejects signed snapshots with malformed occupation counts while accepting legacy missing counts", () => {
+    const fixture = coverageHarness();
+    const legacyState = structuredClone(fixture.author.world);
+    legacyState.cells["3,4"] = { ownerAccountId: "author", soldiers: 0, generalIds: [] };
+    const legacySnapshot = fixture.snapshot(legacyState, 81);
+    expect(fixture.author.verifiedSnapshots([legacySnapshot])).toHaveLength(1);
+
+    const malformedState = structuredClone(legacyState);
+    malformedState.cells["3,4"].occupationCount = -1;
+    const malformedSnapshot = fixture.snapshot(malformedState, 82);
+    expect(fixture.author.verifiedSnapshots([malformedSnapshot])).toEqual([]);
+  });
+
+  it("keeps occupation counts convergent when two players claim the same neutral base concurrently", () => {
+    const fixture = coverageHarness();
+    const key = "11,11";
+    const baseWorld = structuredClone(fixture.author.world);
+    fixture.author.control.occupationCountingProtocol = 1;
+    fixture.author.controlPlatformOrder = { timestamp: fixture.base + 50, commentId: "control" };
+    const baseOrder = { timestamp: 0, commentId: "" };
+    const sidecar = { cell: null, nextOccupationCount: 1, order: baseOrder };
+    const early = fixture.map("player", 90, {
+      cells: { [key]: { ownerAccountId: "player", soldiers: 0, generalIds: [] } },
+      cellBases: { [key]: sidecar }
+    });
+    const late = fixture.map("author", 91, {
+      cells: { [key]: { ownerAccountId: "author", soldiers: 0, generalIds: [] } },
+      cellBases: { [key]: sidecar }
+    });
+
+    expect(Object.keys(early.record.changes.cells[key]).sort()).toEqual(["generalIds", "ownerAccountId", "soldiers"]);
+    expect(fixture.author.applyMapDelta(early)).toBe(true);
+    expect(fixture.author.applyMapDelta(late)).toBe(true);
+    expect(fixture.author.world.cells[key]).toMatchObject({ ownerAccountId: "author", occupationCount: 1 });
+
+    const optimistic = fixture.create("author");
+    optimistic.control = fixture.author.control;
+    optimistic.controlPlatformOrder = fixture.author.controlPlatformOrder;
+    optimistic.world = baseWorld;
+    optimistic.world.cells[key] = { ownerAccountId: "author", soldiers: 0, generalIds: [], occupationCount: 1 };
+    const lateOrder = recordPlatformOrder(late);
+    optimistic.publicCellOrders[key] = lateOrder;
+    optimistic.publicCellWriteBases[key] = {
+      order: baseOrder,
+      hash: sha256(Buffer.from(canonicalJson(null)))
+    };
+    optimistic.appliedMapDeltaIds.add(late.record.mapDeltaId);
+    expect(optimistic.applyMapDelta(early)).toBe(true);
+    expect(optimistic.world.cells[key]).toMatchObject({ ownerAccountId: "author", occupationCount: 1 });
   });
 
   it("holds snapshot coverage before an incomplete root and replays it after late replies arrive", async () => {

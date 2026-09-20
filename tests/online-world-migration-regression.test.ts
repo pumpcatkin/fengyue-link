@@ -476,7 +476,7 @@ describe("online world migration regressions", () => {
       startedAt: 1,
       updatedAt: 2
     }, identity.signingPrivateKey);
-    const snapshotState = { gameId: "cc.aiero.fyow.grid-conquest", seasonId: "season", revision: 1 };
+    const snapshotState = { gameId: "cc.aiero.fyow.grid-conquest", seasonId: "season", revision: 1, cells: {} };
     const snapshot = signRecord({
       schema: "fyow.snapshot/3",
       snapshotId: "target-snapshot",

@@ -583,7 +583,8 @@ async function activateSavedProgram(window, card, workId) {
     .sort((left, right) => comparePlatformOrder(right, left));
   const current = controls[0]?.record;
   if (!current) throw new Error("评论区没有可更新的作者控制记录");
-  if (current.programHash === card.program.digest) {
+  const hasOccupationCountingCutover = Number(current.occupationCountingProtocol || 0) >= 1;
+  if (current.programHash === card.program.digest && hasOccupationCountingCutover) {
     const matching = controls.filter(item => item.record.programHash === card.program.digest);
     let removedCommentIds = [];
     if (process.env.FYOW_CLEAN_DUPLICATE_CONTROLS === "1" && matching.length > 1) {
@@ -614,7 +615,15 @@ async function activateSavedProgram(window, card, workId) {
   }
   const identity = loadOnlineWorldIdentity(signedInAccountId);
   if (identity.signingPublicKey !== current.authoritySigningPublicKey) throw new Error("本机设备密钥与当前赛季控制记录不一致");
-  const unsigned = { ...current, id: crypto.randomUUID(), programHash: card.program.digest, updatedAt: Date.now() };
+  const updatedAt = Date.now();
+  const unsigned = {
+    ...current,
+    id: crypto.randomUUID(),
+    programHash: card.program.digest,
+    updatedAt,
+    occupationCountingProtocol: 1,
+    occupationCountingFrom: hasOccupationCountingCutover ? current.occupationCountingFrom : updatedAt
+  };
   delete unsigned.signature;
   const updated = signRecord(unsigned, identity.signingPrivateKey);
   await platformCommentService(window, workId, signedInAccountId).postRecord(updated);

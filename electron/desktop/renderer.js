@@ -1455,9 +1455,9 @@ window.addEventListener("message",async event=>{
   let messageSize=0;
   try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
   const requestId=onlineWorldRequestId(event.data);
-  const supportedTypes=["ready","sound","library","admin","preferences","direct","confirm","intent"];
+  const supportedTypes=["ready","sound","library","admin","preferences","direct","confirm","intent","sync"];
   if(!supportedTypes.includes(event.data.type)){if(requestId)postOnlineWorldFrame("error",{message:"未知游戏通讯请求"},requestId);return}
-  const expectsResult=["admin","preferences","direct","confirm","intent"].includes(event.data.type);
+  const expectsResult=["admin","preferences","direct","confirm","intent","sync"].includes(event.data.type);
   if(messageSize>ONLINE_WORLD_HOST_MESSAGE_LIMIT){if(requestId)postOnlineWorldFrame("error",{message:"游戏请求内容过长"},requestId);return}
   if(expectsResult&&!requestId)return;
   const replyResult=result=>postOnlineWorldFrame("result",{result},requestId);
@@ -1481,6 +1481,15 @@ window.addEventListener("message",async event=>{
     try{await returnToOnlineWorldLibrary();renderOnlineWorldCards(await api.listOnlineWorldCards())}catch(error){toast(friendlyError(error))}return;
   }
   if(onlineWorldInLibrary){if(expectsResult)replyError(new Error("游戏页面已经关闭，请重新进入后再操作"));return}
+  if(event.data.type==="sync"){
+    try{
+      const next=await api.syncOnlineWorld(false);
+      renderOnlineWorld(next);
+      if(next?.status!=="ready")throw new Error(next?.error||"连接暂未恢复，请稍后重试");
+      replyResult({reconnected:true,state:next});
+    }catch(error){replyError(error)}
+    return;
+  }
   if(event.data.type==="admin"){
     const command={...(event.data.command||{})};
     try{

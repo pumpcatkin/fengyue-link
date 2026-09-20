@@ -108,6 +108,68 @@ describe("grid cultivation and integrated talents", () => {
       type: "cultivate-general", generalId: "cultivator-1500", goldInvestment: 1500, materialId: "white", idempotencyKey: "cultivate-1500"
     }, { actorAccountId: "a", now });
     expect(cultivated.state.generals["cultivator-1500"].power - before).toBeGreaterThanOrEqual(7);
+    expect(cultivated.state.players.a.gold).toBe(8500);
+  });
+
+  it.each([0, 1, 2, 3, 4])("requires full experience at cultivation stage %i and resets it after one attempt", count => {
+    const now = 1_000_000;
+    const state = grant(joined(now), now, "experience-gate");
+    const general = state.generals["experience-gate"];
+    general.cultivationCount = count;
+    const required = game.generalExperienceRequirement(general);
+    state.players.a.gold = 1_000_000;
+    state.privatePlayers.a.materials.white = 6;
+    const intent = {
+      type: "cultivate-general", generalId: general.id, goldInvestment: game.CULTIVATION_RANGES[count].goldMin + 137,
+      materialId: "white", idempotencyKey: `xp-${count}`
+    };
+    for (const experience of [undefined, 0, -1, NaN, Infinity, required - 1, required - 0.0001]) {
+      general.experience = experience;
+      expect(() => game.applyIntent(state, intent, { actorAccountId: "a", now })).toThrow(/经验不足/);
+      expect(state.players.a.gold).toBe(1_000_000);
+      expect(state.privatePlayers.a.materials.white).toBe(6);
+    }
+    general.experience = required;
+    const cultivated = game.applyIntent(state, intent, { actorAccountId: "a", now });
+    expect(cultivated.state.players.a.gold).toBe(1_000_000 - intent.goldInvestment);
+    expect(cultivated.result.cost).toBe(intent.goldInvestment);
+    expect(cultivated.state.generals[general.id]).toMatchObject({ cultivationCount: count + 1, experience: 0 });
+    if (count < 4) {
+      expect(() => game.applyIntent(cultivated.state, {
+        ...intent, goldInvestment: game.CULTIVATION_RANGES[count + 1].goldMin, idempotencyKey: `again-${count}`
+      }, { actorAccountId: "a", now })).toThrow(/经验不足/);
+    }
+  });
+
+  it.each([1500, 5000, 8000])("spends precisely %i submitted gold even with a cultivation discount talent", goldInvestment => {
+    const now = 1_000_000;
+    const state = grant(joined(now), now, "budget");
+    state.players.a.gold = 100_000;
+    state.privatePlayers.a.materials.white = 1;
+    state.generals.budget.experience = 100;
+    state.generals.budget.talent = talentEngine.normalizeTalent({ instanceId: "budget", talentId: "simple-retreat", progress: 1000 });
+    const result = game.applyIntent(state, {
+      type: "cultivate-general", generalId: "budget", goldInvestment, materialId: "white", idempotencyKey: "budget"
+    }, { actorAccountId: "a", now });
+    expect(result.result.modifiers.cultivationCost).toBeLessThan(0);
+    expect(result.result.cost).toBe(goldInvestment);
+    expect(result.state.players.a.gold).toBe(100_000 - goldInvestment);
+    const player = game.applyIntent(state, { type: "cultivate-player", goldInvestment, idempotencyKey: "player-budget" }, { actorAccountId: "a", now });
+    expect(player.result.cost).toBe(goldInvestment);
+    expect(player.state.players.a.gold).toBe(100_000 - goldInvestment);
+  });
+
+  it("rejects missing or invalid submitted budgets instead of substituting a default", () => {
+    const now = 1_000_000;
+    const state = grant(joined(now), now, "invalid-budget");
+    state.players.a.gold = 100_000;
+    state.privatePlayers.a.materials.white = 1;
+    state.generals["invalid-budget"].experience = 100;
+    for (const goldInvestment of [undefined, null, "", 0, 1499.5, Infinity, NaN]) {
+      expect(() => game.applyIntent(state, {
+        type: "cultivate-general", generalId: "invalid-budget", goldInvestment, materialId: "white", idempotencyKey: "invalid"
+      }, { actorAccountId: "a", now })).toThrow(/修炼投入/);
+    }
   });
 
   it("uses the same five-attempt gold model for the player without consuming materials", () => {

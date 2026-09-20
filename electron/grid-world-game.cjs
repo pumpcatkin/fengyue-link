@@ -409,8 +409,9 @@ function generalExperienceRequirement(generalOrCount) {
 function ensureGeneralExperience(general) {
   if (!general || typeof general !== "object") return general;
   const required = generalExperienceRequirement(general);
-  const experience = Math.max(0, Number(general.experience) || 0);
-  general.experience = required ? Math.min(required, Math.round(experience * 1000) / 1000) : 0;
+  const rawExperience = Number(general.experience);
+  const experience = Number.isFinite(rawExperience) ? Math.max(0, rawExperience) : 0;
+  general.experience = required ? Math.min(required, Math.floor(experience * 1000) / 1000) : 0;
   const updatedAt = Number(general.experienceUpdatedAt || 0);
   general.experienceUpdatedAt = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0;
   return general;
@@ -655,10 +656,12 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
   const modifiers = state ? actionTalentModifiers(state, player.accountId, "cultivation", position, {
     carriedGeneralIds: targetType === "general" && target.status === "carried" ? [target.id] : activeCarriedGeneralIds(player), now
   }) : { cultivationCost: 0, cultivationPower: 0, applied: [], evaluatedTalents: 0 };
-  const cost = roundByModifier(investment, modifiers.cultivationCost, 1);
+  const cost = investment;
   const investmentRatio = (investment - goldMin) / Math.max(1, goldMax - goldMin);
   const targetPowerMultiplier = targetType === "player" ? PLAYER_CULTIVATION_POWER_MULTIPLIER : 1;
-  const baseGain = (range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin)) * targetPowerMultiplier;
+  // Cost-saving talents improve the return on the submitted budget, not the debit.
+  const baseGain = (range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin))
+    * targetPowerMultiplier / Math.max(0.55, 1 + modifiers.cultivationCost);
   const targetKey = String(target.id || target.accountId || player.accountId || targetType);
   const randomFactor = 0.9 + randomUnit(String(options.seed ?? state?.seed ?? "cultivation"), "cultivation-power", targetKey, range.attempt) * 0.2;
   const powerGainFraction = Math.min(0.75, baseGain * randomFactor * (1 + modifiers.cultivationPower));
@@ -677,7 +680,7 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
     attempt: range.attempt, unlockAt, unlocked: Number.isFinite(now) && now >= unlockAt, gateHours: range.gateHours,
     goldMin, goldMax, goldInvestment: investment, cost,
     materialId: material, materialCount: targetType === "general" ? 1 : 0, remaining: CULTIVATION_RANGES.length - cultivationCount,
-    experience, experienceRequired, experienceReady: targetType !== "general" || experience >= experienceRequired,
+    experience, experienceRequired, experienceReady: targetType !== "general" || (experienceRequired > 0 && experience >= experienceRequired),
     durationMs: 0,
     randomFactor: Math.round(randomFactor * 10000) / 10000,
     basePowerGainPercent: Math.round(baseGain * 10000) / 100,
@@ -691,7 +694,7 @@ function cultivationActionQuote(state, accountId, generalId, goldInvestment, mat
   const player = ensurePlayer(state, String(accountId));
   const general = state.generals?.[String(generalId)];
   if (!general || String(general.holderAccountId) !== String(accountId)) throw new Error("只能修炼自己的将领");
-  const quote = cultivationQuote(general, player, nowValue, { state, goldInvestment, materialId });
+  const quote = cultivationQuote(general, player, nowValue, { state, goldInvestment: integer(goldInvestment, "修炼投入", 1, 1000000000), materialId });
   if (!quote.unlocked) throw new Error(`第${quote.attempt}次修炼尚未开放`);
   if (!quote.experienceReady) throw new Error(`将领经验不足，需要 ${quote.experienceRequired} 经验才能修炼`);
   return quote;
@@ -699,7 +702,7 @@ function cultivationActionQuote(state, accountId, generalId, goldInvestment, mat
 
 function playerCultivationActionQuote(state, accountId, goldInvestment, nowValue) {
   const player = ensurePlayer(state, String(accountId));
-  const quote = cultivationQuote(player, player, nowValue, { state, targetType: "player", goldInvestment });
+  const quote = cultivationQuote(player, player, nowValue, { state, targetType: "player", goldInvestment: integer(goldInvestment, "修炼投入", 1, 1000000000) });
   if (!quote.unlocked) throw new Error(`第${quote.attempt}次修炼尚未开放`);
   return quote;
 }
@@ -1310,6 +1313,8 @@ function settleWorld(inputState, nowValue = Date.now(), options = {}) {
   const effects = [];
   accrueDeployedGeneralExperience(state, now, options.experienceSince, effects, options.activeAccountId);
   for (const [jobId, job] of Object.entries(state.jobs)) {
+    // Travel without combat is local; territory mutations still require a ledger refresh.
+    if (options.localOnly && (job.type !== "march" || job.attack)) continue;
     if (job.type === "mining") {
       const cell = dynamicCell(state, job.x, job.y);
       const player = state.players[job.accountId];

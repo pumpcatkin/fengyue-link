@@ -1037,6 +1037,7 @@ class OnlineWorldService {
         ...(finiteStoredNumber(player.gold) ? { gold: Number(player.gold) } : {}),
         ...(finiteStoredNumber(player.basePower) ? { basePower: Number(player.basePower) } : {}),
         ...(finiteStoredNumber(player.trainingLevel) ? { trainingLevel: Number(player.trainingLevel) } : {}),
+        ...(finiteStoredNumber(player.cultivationCount) ? { cultivationCount: Number(player.cultivationCount) } : {}),
         ...(finiteStoredNumber(player.power) ? { power: Number(player.power) } : {}),
         ...(finiteStoredNumber(player.fieldArmySoldiers) ? { fieldArmySoldiers: Number(player.fieldArmySoldiers) } : {}),
         ...(Object.hasOwn(player, "carriedGeneralIds") ? { carriedGeneralIds: [...(player.carriedGeneralIds || [])] } : {}),
@@ -1165,6 +1166,7 @@ class OnlineWorldService {
       && String(transaction.accountId || "") === this.account().accountId
       && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0)));
     const published = validSession && (transaction.phase === "published" || this.appliedMapDeltaIds.has(String(transaction.mapDeltaId || "")));
+    if (validSession && !published && transaction.changes) return false;
     const overlay = validSession ? (published ? transaction.afterOverlay : transaction.beforeOverlay) : null;
     if (validSession && !published && transaction.beforeOverlay?.completeOwnGeneralArchive && transaction.afterOverlay?.completeOwnGeneralArchive) {
       for (const id of Object.keys(transaction.afterOverlay.generals || {})) {
@@ -1968,7 +1970,21 @@ class OnlineWorldService {
 
   async readHistoryPage(page) {
     this.assertSyncActive();
-    const payload = await this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`, { timeout: 20000 });
+    const endpoint = `/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`;
+    let payload;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        payload = await this.requestConsole(endpoint, { timeout: 20000 });
+        break;
+      } catch (error) {
+        this.assertSyncActive();
+        const transient = /fetch|network|connection|timeout|timed out|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION)|\b(?:429|502|503|504)\b|网络|超时|连接/i.test(error?.message || "");
+        if (!transient || attempt === 2) throw error;
+        this.diagnostic({ event: "comment-page-read-retry", page, attempt, error: error?.message || String(error) });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        this.assertSyncActive();
+      }
+    }
     this.assertSyncActive();
     const comments = extractCommentItems(payload);
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
@@ -3105,7 +3121,16 @@ class OnlineWorldService {
           return this.state();
         }
       }
-      const history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+      let history;
+      try {
+        history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+      } catch (error) {
+        if (!this.syncPaused && this.world && this.control) {
+          try { await this.settleLocalClock(this.now(), { localOnly: true }); }
+          catch (settleError) { this.diagnostic({ event: "local-travel-settle-failed", error: settleError?.message || String(settleError) }); }
+        }
+        throw error;
+      }
       this.assertSyncActive();
       const controls = this.verifiedControls(history.assembled.records);
       if (controls[0]) {
@@ -3154,10 +3179,6 @@ class OnlineWorldService {
           return this.state();
         }
         if (!this.pendingMigration?.requiresPublish) this.pendingMigration = null;
-        if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes) {
-          await this.retryPendingIntentTransactionPublish();
-          this.assertSyncActive();
-        }
         const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;
@@ -3200,6 +3221,15 @@ class OnlineWorldService {
         if (this.world) {
           this.collectTreasureSources(history.assembled.records);
           this.applyPublicLedger(history.assembled.records);
+          if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes
+            && !this.appliedMapDeltaIds.has(String(this.pendingIntentTransaction.mapDeltaId))) {
+            try {
+              await this.retryPendingIntentTransactionPublish();
+            } catch (error) {
+              this.diagnostic({ event: "intent-transaction-publish-deferred", intentType: this.pendingIntentTransaction?.intentType, error: error?.message || String(error) });
+            }
+            this.assertSyncActive();
+          }
           this.resolvePendingIntentTransaction();
           this.applyAuthorityPlayerActions();
           this.reconcileMarketSales();
@@ -3207,9 +3237,13 @@ class OnlineWorldService {
         }
         if (this.world) this.reconcileTreasureRewards(history);
         if (this.world) {
-          const chatHistory = await this.readWorldChatHistory(history);
+          try {
+            const chatHistory = await this.readWorldChatHistory(history);
+            this.applyWorldChatRecords(chatHistory.assembled.records);
+          } catch (error) {
+            this.diagnostic({ event: "world-chat-sync-deferred", error: error?.message || String(error) });
+          }
           this.assertSyncActive();
-          this.applyWorldChatRecords(chatHistory.assembled.records);
         }
         if (this.world) this.recoverOwnLocalPlayerState();
         if (this.world) await this.settleLocalClock();
@@ -3218,9 +3252,13 @@ class OnlineWorldService {
         // confirmation. Do not spend points or make background model calls
         // during a passive world sync.
         this.assertSyncActive();
-        if (this.world && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) await this.publishSnapshot();
+        if (this.world && !this.pendingIntentTransaction && this.isAuthority() && this.publicDeltaCountSinceSnapshot >= PUBLIC_LEDGER_COMPACTION_DELTAS) {
+          try { await this.publishSnapshot(); }
+          catch (error) { this.diagnostic({ event: "snapshot-compaction-deferred", error: error?.message || String(error) }); }
+        }
         await this.receiveDirectWakes().catch(() => []);
         this.assertSyncActive();
+        if (this.pendingIntentTransaction?.phase === "prepared") throw new Error("行动结果已保存在本机，等待同步，请重试连接");
       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
       this.lastSyncAt = this.now();
@@ -3466,6 +3504,7 @@ class OnlineWorldService {
     if (String(actorAccountId) !== this.account().accountId) throw new Error("只能在本机执行当前玩家的行动");
     const actionTime = this.now();
     if (!options.internal) await this.settleLocalClock(actionTime);
+    if (!options.internal && this.pendingIntentTransaction) throw new Error("上一项行动正在同步，请稍后重试");
     const identity = await this.getIdentity();
     bindWorldAuthority(this.world, this.control);
     const beforeWorld = cloneJson(this.world);
@@ -3585,14 +3624,17 @@ class OnlineWorldService {
     }
   }
 
-  async settleLocalClock(nowValue = this.now()) {
-    if (!this.world) return [];
+  async settleLocalClock(nowValue = this.now(), { localOnly = false } = {}) {
+    if (!this.world || this.pendingIntentTransaction) return [];
     const beforeWorld = cloneJson(this.world);
     const settled = settleWorld(this.world, nowValue, {
       activeAccountId: this.account().accountId,
-      experienceSince: this.experienceSessionStartedAt
+      experienceSince: this.experienceSessionStartedAt,
+      localOnly
     });
     if (!settled.effects.length) return [];
+    const changes = createPublicMapChanges(beforeWorld, settled.state, settled.effects, this.account().accountId);
+    if (localOnly && hasPublicMapChanges(changes)) return [];
     this.world = normalizeWorldState(settled.state);
     this.holdTreasureRewards(beforeWorld);
     this.world.revision = Number(this.world.revision || 0) + 1;
@@ -3614,7 +3656,6 @@ class OnlineWorldService {
     let mapDelta = null;
     let transactionMapDeltaId = "";
     try {
-      const changes = createPublicMapChanges(beforeWorld, this.world, settled.effects, this.account().accountId);
       transactionMapDeltaId = hasPublicMapChanges(changes) ? crypto.randomUUID() : "";
       if (transactionMapDeltaId) this.prepareIntentTransaction({
         beforeWorld,
@@ -3635,6 +3676,8 @@ class OnlineWorldService {
       return settled.effects;
     } catch (error) {
       if (!mapDelta && transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) {
+        this.status = "degraded";
+        this.error = "行动结果已保存在本机，等待同步，请重试连接";
         this.diagnostic({
           event: "intent-transaction-publish-deferred",
           status: "local-state-preserved",

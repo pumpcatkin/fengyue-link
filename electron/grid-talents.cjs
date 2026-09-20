@@ -344,7 +344,7 @@ function normalizeTalent(talent, seedOrId = "talent", idValue) {
 const KEY_LABELS = Object.freeze({
   marchDuration: "行军时长", marchCost: "行军金币消耗", combatPower: "战斗力", attackPower: "进攻力", defensePower: "防御力",
   miningDuration: "采集时长", miningYield: "采集产量", trainingDuration: "练兵时长", trainingCost: "练兵消耗",
-  trainingYield: "练兵产量", cultivationCost: "修炼消耗", cultivationPower: "修炼收益", discoveryChance: "发现概率"
+  trainingYield: "练兵产量", cultivationCost: "同等修炼效果所需金币", cultivationPower: "修炼收益", discoveryChance: "发现概率"
 });
 const SCOPE_LABELS = Object.freeze({ carried: "携带时", "own-tile": "部署地", "neighbor-allied": "相邻友方地", "neighbor-hostile": "相邻敌方地", "enemy-neighbor": "削弱敌方相邻8格：" });
 

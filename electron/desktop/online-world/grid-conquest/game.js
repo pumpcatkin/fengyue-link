@@ -109,6 +109,7 @@ function finishHostRequest(requestId) {
     if (pending.controlText) pending.control.textContent = pending.controlText;
     pending.control.classList.remove("host-pending");
   }
+  if (pending.key === "sync") renderConnectionNotice();
   return pending;
 }
 function ownAccountId() { return String(payload?.account?.accountId || payload?.account?.id || payload?.accountId || ""); }
@@ -1014,21 +1015,25 @@ function renderPowerTraining() {
   }
   const gold = document.querySelector("#cultivation-gold");
   gold.min = String(quote.goldMin); gold.max = String(quote.goldMax);
-  if (gold.dataset.target !== target.value || Number(gold.value) < quote.goldMin || Number(gold.value) > quote.goldMax) gold.value = String(quote.goldMin);
-  gold.dataset.target = target.value;
+  const investmentContext = `${target.value}:${quote.attempt}`;
+  if (gold.dataset.target !== investmentContext) gold.value = String(quote.goldMin);
+  gold.dataset.target = investmentContext;
   const unlocked = quote.unlocked !== false && (Number(quote.gateHours || 0) === 0 || hostTime() >= Number(quote.unlockAt || 0));
-  const cost = Math.max(1, Math.round(Number(gold.value) * (1 + Number(quote.modifiers?.cultivationCost || 0))));
+  const cost = Number(gold.value);
+  const validInvestment = String(gold.value).trim() !== "" && Number.isSafeInteger(cost) && cost >= quote.goldMin && cost <= quote.goldMax;
   const material = document.querySelector("#cultivation-material").value;
   const materialCount = isGeneral ? Number(ownPlayer()?.materials?.[material] || 0) : Number.POSITIVE_INFINITY;
   const materialText = isGeneral ? " + 1 件天材地宝；材料只改变将领天赋" : "；玩家闭关不使用天材地宝";
-  const experienceReady = !isGeneral || quote.experienceReady !== false;
+  const experienceReady = !isGeneral || (quote.experienceReady === true
+    && Number.isFinite(Number(quote.experience)) && Number(quote.experienceRequired) > 0
+    && Number(quote.experience) >= Number(quote.experienceRequired));
   const experienceText = isGeneral
     ? `经验 ${formatNumber(quote.experience)} / ${formatNumber(quote.experienceRequired)}。`
     : "玩家闭关无需经验。";
   const lockText = unlocked ? "" : `第 ${quote.attempt} 次闭关修炼尚未开放，剩余 ${formatDuration(Number(quote.unlockAt || 0) - hostTime())}。`;
   preview.textContent = `第 ${quote.attempt} 次 · ${experienceText}可投入 ${formatNumber(quote.goldMin)}—${formatNumber(quote.goldMax)} 金币。实际消耗 ${formatNumber(cost)} 金币${materialText}。金币越多，战力增幅越高（含随机浮动）。${lockText}`;
-  button.disabled = !unlocked || !experienceReady || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
-  button.textContent = !unlocked ? "尚未开放" : !experienceReady ? "经验不足" : quote.eligible === false ? "当前不可修炼" : materialCount < 1 ? "尚无材料" : "闭关一次";
+  button.disabled = !unlocked || !experienceReady || !validInvestment || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
+  button.textContent = !unlocked ? "尚未开放" : !experienceReady ? "经验不足" : !validInvestment ? "请输入有效金币" : quote.eligible === false ? "当前不可修炼" : materialCount < 1 ? "尚无材料" : "闭关一次";
 }
 
 function marchAvailable() {
@@ -2337,11 +2342,18 @@ function openDialogue(id) {
   if (canInteract(general)) document.querySelector("#dialogue-input").focus();
 }
 
+function renderConnectionNotice() {
+  const notice = document.querySelector("#connection-notice");
+  const button = document.querySelector("#connection-retry");
+  const retrying = pendingHostKeys.has("sync");
+  notice.classList.toggle("hidden", !["degraded", "error"].includes(payload?.status) && !retrying);
+  button.disabled = retrying;
+  button.textContent = retrying ? "重试中" : "重试";
+  button.setAttribute("aria-busy", String(retrying));
+}
 function renderAll() {
   renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); renderMarket(); renderBattleReports(); draw();
-  const notice = document.querySelector("#connection-notice");
-  notice.textContent = ["degraded", "error"].includes(payload?.status) ? "连接中断，暂时无法操作。恢复后即可继续。" : "";
-  notice.classList.toggle("hidden", !notice.textContent);
+  renderConnectionNotice();
   const player = ownPlayer();
   const banned = Boolean(payload?.world?.bans?.[ownAccountId()]?.banned);
   document.querySelector("#join-wizard").classList.toggle("hidden", !payload?.initialized || Boolean(player) || banned);
@@ -2856,12 +2868,20 @@ document.querySelector("#army-transfer-confirm").addEventListener("click", () =>
   }
 });
 document.querySelector("#training-target").addEventListener("change", renderPowerTraining);
+document.querySelector("#cultivation-gold").addEventListener("input", renderPowerTraining);
 document.querySelector("#cultivation-gold").addEventListener("change", renderPowerTraining);
 document.querySelector("#cultivation-material").addEventListener("change", renderPowerTraining);
 document.querySelector("#start-power-training").addEventListener("click", () => {
+  renderPowerTraining();
+  if (document.querySelector("#start-power-training").disabled) return;
   const [targetType, targetId] = document.querySelector("#training-target").value.split(":");
   if (targetType === "general") sendIntent({ type: "cultivate-general", generalId: targetId, goldInvestment: Number(document.querySelector("#cultivation-gold").value), materialId: document.querySelector("#cultivation-material").value });
   else sendIntent({ type: "cultivate-player", goldInvestment: Number(document.querySelector("#cultivation-gold").value) });
+});
+document.querySelector("#connection-retry").addEventListener("click", () => {
+  if (pendingHostKeys.has("sync")) return;
+  host("sync", {}, { expectResult: true, key: "sync", control: document.querySelector("#connection-retry"), timeoutMs: 120000 });
+  renderConnectionNotice();
 });
 document.querySelector("#start-mining").addEventListener("click", () => { if (selected) sendIntent({ type: "start-mining", x: selected.x, y: selected.y, auto: false }); });
 document.querySelector("#train-amount").addEventListener("input", event => {
@@ -3008,6 +3028,7 @@ window.addEventListener("message", event => {
     if (ownPlayer()) joinSubmitting = false;
     renderAll();
   } else if (event.data.type === "error") {
+    if (requestState?.key === "sync") renderConnectionNotice();
     if (requestState?.key?.startsWith("intent:quote-march:")) {
       const failedKey = requestState.key.slice("intent:quote-march:".length);
       if (failedKey === marchQuoteKey()) {

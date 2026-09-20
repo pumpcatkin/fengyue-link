@@ -56,6 +56,7 @@ if (process.type === "renderer") {
     if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 26, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd", isCurrentUserAuthor: true }], activeCardId: null };
     if (name === "getOnlineWorldState") return onlineWorldFixture || { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "openOnlineWorld") return onlineWorldFixture;
+    if (name === "syncOnlineWorld") return { ...onlineWorldFixture, status: "ready", syncing: false };
     if (name === "closeOnlineWorld") return { ...onlineWorldFixture, status: "closed", syncing: false };
     if (name === "updateOnlineWorldPreferences") {
       onlineWorldFixture = {
@@ -163,6 +164,27 @@ if (process.type === "renderer") {
       window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, status: "ready", program: { source: "work-description", digest: "fixture-description" } });
       await settle();
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-open-server').disabled`), true);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), true);
+      window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, status: "degraded", syncing: false });
+      await settle();
+      await evaluate(`document.querySelector('#official-notice-action').click()`);
+      await settle();
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), false);
+      const retryLayout = await embeddedGameFrame.executeJavaScript(`(() => {
+        const tip=document.querySelector('#connection-notice').getBoundingClientRect();
+        const button=document.querySelector('#connection-retry'); const rect=button.getBoundingClientRect();
+        return {text:button.textContent, fits:rect.right<=tip.right&&rect.bottom<=tip.bottom, width:rect.width, height:rect.height};
+      })()`);
+      assert.equal(retryLayout.text, "重试");
+      assert.equal(retryLayout.fits, true);
+      assert(retryLayout.width <= 80 && retryLayout.height <= 32, "retry action should stay compact");
+      fs.writeFileSync(path.join(outputDir, "connection-retry.png"), (await window.webContents.capturePage()).toPNG());
+      assert.equal(await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#connection-retry').click();
+        return document.querySelector('#connection-retry').textContent;
+      })()`), "重试中");
+      await settle();
+      assert.equal(calls.filter(call => call.name === "syncOnlineWorld").length, 1, "retry did not reach the host");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), true);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').click()`);
       await settle();
@@ -790,6 +812,7 @@ if (process.type === "renderer") {
       assert(navigationCalls.some(call => call.name === "hidePlatform"));
       assert.equal(await evaluate(`!document.querySelector('#home-page').classList.contains('hidden')`), true);
       state = { ...state, releaseSecurity: { status: "update-required", verified: false, message: "发现官方新版本 v9.9.9", currentVersion: version, latestVersion: "9.9.9" } };
+      await evaluate(`releaseNoticeDismissed=false`);
       window.webContents.send("qa:onState", state);
       await settle();
       assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "发现新的官方版本");

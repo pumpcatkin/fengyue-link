@@ -675,4 +675,6 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
   .general-deploying-status i { animation: none; border-top-color: #93623d66; }
 }
 @keyframes request-spin { to { transform: rotate(360deg); } }
-.connection-notice { position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 9; max-width: 80%; padding: 8px 16px; border: 2px solid #8d482e; border-radius: 8px; color: #712f20; background: #fff2d1; font-size: 13px; box-shadow: 2px 3px 0 #58432c; }
+.connection-notice { position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 9; display: flex; align-items: center; gap: 10px; max-width: 80%; padding: 8px 16px; border: 2px solid #8d482e; border-radius: 8px; color: #712f20; background: #fff2d1; font-size: 13px; box-shadow: 2px 3px 0 #58432c; }
+.connection-notice span { min-width: 0; }
+.connection-notice #connection-retry { flex: 0 0 auto; min-height: 26px; min-width: 52px; padding: 2px 8px; border-width: 1px; border-radius: 5px; font-size: 12px; line-height: 20px; box-shadow: 1px 2px 0 #58432c; }

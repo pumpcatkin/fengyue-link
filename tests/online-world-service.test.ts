@@ -2338,6 +2338,19 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
     expect(instance.world.jobs.march).toBeUndefined();
     expect(instance.pendingIntentTransaction).toMatchObject({ phase: "prepared", intentType: "time-settle" });
+    expect(instance.status).toBe("degraded");
+    const transactionId = instance.pendingIntentTransaction.transactionId;
+    expect(instance.resolvePendingIntentTransaction()).toBe(false);
+    expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+    expect(await instance.settleLocalClock(2_000_001)).toEqual([]);
+    expect(instance.pendingIntentTransaction.transactionId).toBe(transactionId);
+    instance.calibrateClock = vi.fn(async () => null);
+    instance.readHistory = vi.fn(async () => ({ assembled: { records: [] } }));
+    instance.readWorldChatHistory = vi.fn(async () => ({ assembled: { records: [] } }));
+    instance.receiveDirectWakes = vi.fn(async () => []);
+    await expect(instance.sync()).rejects.toThrow("等待同步");
+    expect(instance.world.jobs.march).toBeUndefined();
+    expect(instance.pendingIntentTransaction.transactionId).toBe(transactionId);
     online = true;
     await instance.retryPendingIntentTransactionPublish();
     expect(instance.pendingIntentTransaction.phase).toBe("published");
@@ -2345,6 +2358,68 @@ describe("online world platform service", () => {
     expect(instance.resolvePendingIntentTransaction()).toBe(true);
     expect(instance.world.cells["2,1"].ownerAccountId).toBe("player");
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+  });
+
+  it("finishes local travel when comment reads fail, without fighting on a stale map", async () => {
+    const instance = service({
+      getAccount: () => ({ accountId: "player" }),
+      getIdentity: async () => generateOnlineWorldIdentity(),
+      requestConsole: vi.fn(async () => { throw new Error("503"); }),
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ seed: "local-travel", seasonId: "season", startedAt: 1_000_000 });
+    instance.world.players.player = { accountId: "player", gold: 500, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = {};
+    instance.world.jobs.travel = {
+      id: "travel", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
+      path: [{ x: 2, y: 1 }], generalIds: [], activeGeneralIds: [], soldiers: 53, attack: false,
+      startedAt: 1_000_000, finishAt: 1_500_000
+    };
+    instance.calibrateClock = vi.fn(async () => null);
+    instance.readHistory = vi.fn(async () => { throw new Error("connection interrupted"); });
+    await expect(instance.sync()).rejects.toThrow("connection interrupted");
+    expect(instance.world.jobs.travel).toBeUndefined();
+    expect(instance.world.players.player).toMatchObject({ position: { x: 2, y: 1 }, fieldArmySoldiers: 53, gold: 500 });
+    expect(instance.pendingIntentTransaction).toBeNull();
+    const world = structuredClone(instance.world);
+    world.jobs.attack = {
+      id: "attack", type: "march", accountId: "player", from: { x: 2, y: 1 }, to: { x: 3, y: 1 },
+      path: [{ x: 3, y: 1 }], generalIds: [], activeGeneralIds: [], soldiers: 53, attack: true,
+      startedAt: 1_000_000, finishAt: 1_500_000
+    };
+    instance.world = world;
+    await expect(instance.sync()).rejects.toThrow("connection interrupted");
+    expect(instance.world.jobs.attack).toBeDefined();
+    expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+  });
+
+  it("keeps the map connected when only world chat or snapshot compaction fails", async () => {
+    const fixture = coverageHarness();
+    const instance = fixture.create();
+    await instance.sync();
+    instance.readWorldChatHistory = vi.fn(async () => { throw new Error("chat 503"); });
+    instance.publicDeltaCountSinceSnapshot = 32;
+    instance.publishSnapshot = vi.fn(async () => { throw new Error("snapshot 503"); });
+    const state = await instance.sync();
+    expect(state.status).toBe("ready");
+    expect(state.error).toBeNull();
+    expect(instance.readWorldChatHistory).toHaveBeenCalledOnce();
+    expect(instance.publishSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it("retries transient comment reads once, but not authentication errors", async () => {
+    const requestConsole = vi.fn()
+      .mockRejectedValueOnce(new Error("platform 503"))
+      .mockResolvedValueOnce({ data: [] });
+    const instance = service({ requestConsole });
+    instance.work = { id: "work" };
+    expect(await instance.readHistoryPage(1)).toEqual([]);
+    expect(requestConsole).toHaveBeenCalledTimes(2);
+    requestConsole.mockClear().mockRejectedValue(new Error("401 Unauthorized"));
+    await expect(instance.readHistoryPage(1)).rejects.toThrow("401");
+    expect(requestConsole).toHaveBeenCalledTimes(1);
   });
 
   it("ignores a banned player map delta and stale player epoch", () => {

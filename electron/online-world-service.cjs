@@ -35,6 +35,7 @@ const {
   settleWorld,
   applyIntent,
   battleCasualties,
+  recordBattleReport,
   marchQuote,
   scatterTreasures,
   buildGeneralGenerationRequest,
@@ -437,14 +438,35 @@ function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAcco
     marketListings: changedEntries(publicMarketListings(beforeWorld), publicMarketListings(afterWorld)),
     marketSales: changedEntries(beforeWorld?.marketSales || {}, afterWorld?.marketSales || {}),
     claimedTreasures: claims,
-    battles: publicBattleChanges(beforeWorld, afterWorld, effects, actorAccountId)
+    battles: publicBattleChanges(beforeWorld, afterWorld, effects, actorAccountId),
+    conquests: Object.fromEntries((effects || [])
+      .filter(effect => effect.type === "battle-won" && effect.accountId === actorAccountId && effect.previousOwner && effect.previousOwner !== actorAccountId)
+      .map(effect => {
+        const report = afterWorld.privatePlayers?.[actorAccountId]?.battleReports?.find(item => item.jobId === effect.jobId);
+        return [effect.jobId, {
+          battleId: effect.jobId, attackerAccountId: actorAccountId,
+          attackerDisplayName: String(afterWorld.players?.[actorAccountId]?.displayName || actorAccountId).slice(0, 40),
+          attackerAccountName: String(afterWorld.players?.[actorAccountId]?.accountName || actorAccountId).slice(0, 80),
+          targetOwnerAccountId: String(effect.previousOwner),
+          targetPlayerEpoch: Number(beforeWorld.playerEpochs?.[effect.previousOwner] || 0),
+          x: effect.at.x, y: effect.at.y, createdAt: Math.trunc(Number(report?.createdAt || 0)),
+          attackerPower: effect.attackerPower, defenderPower: effect.defenderPower,
+          attackerSoldiers: effect.attackerSoldiers, defenderSoldiers: effect.defenderSoldiers,
+          attackerLosses: effect.attackerLosses, defenderLosses: effect.defenderLosses,
+          attackerSurvivors: effect.attackerSurvivors, defenderSurvivors: effect.defenderSurvivors,
+          capturedOwnGenerals: (effect.capturedGeneralIds || []).map(id => ({
+            id: String(id), name: String(beforeWorld.generals?.[id]?.name || "无名将领").slice(0, 24)
+          }))
+        }];
+      }))
   };
 }
 
 function hasPublicMapChanges(changes) {
   return Boolean(Object.keys(changes?.cells || {}).length || Object.keys(changes?.generals || {}).length
     || Object.keys(changes?.marketListings || {}).length || Object.keys(changes?.marketSales || {}).length
-    || Object.keys(changes?.claimedTreasures || {}).length || Object.keys(changes?.battles || {}).length);
+    || Object.keys(changes?.claimedTreasures || {}).length || Object.keys(changes?.battles || {}).length
+    || Object.keys(changes?.conquests || {}).length);
 }
 
 function parseJsonAnswer(value) {
@@ -715,6 +737,7 @@ function normalizeWorldState(value) {
   value.generals ||= {};
   value.marketListings ||= {};
   value.marketSales ||= {};
+  value.conquests ||= {};
   value.authorityPlayerActions ||= {};
   value.jobs ||= {};
   value.processedIntents ||= [];
@@ -1155,6 +1178,7 @@ class OnlineWorldService {
       this.world.claimedTreasures[id] = cloneJson(claim);
       delete this.world.treasureSpawns[id];
     }
+    this.rememberConquests(changes.conquests);
     return true;
   }
 
@@ -1337,10 +1361,12 @@ class OnlineWorldService {
     const previousTrainingLevel = player.trainingLevel;
     ensurePowerProgress(player, 300);
     if (player.power !== previousPower || player.basePower !== previousBasePower || player.trainingLevel !== previousTrainingLevel) changed = true;
-    if (!Array.isArray(player.carriedGeneralIds)) {
-      player.carriedGeneralIds = Object.entries(this.world.generals || {})
-        .filter(([, general]) => String(general?.holderAccountId || "") === accountId && general?.status === "carried")
-        .map(([id]) => id).slice(0, 2);
+    const carriedIds = Object.entries(this.world.generals || {})
+      .filter(([, general]) => String(general?.holderAccountId || "") === accountId && general?.status === "carried")
+      .map(([id]) => id);
+    const orderedIds = [...new Set([...(player.carriedGeneralIds || []), ...carriedIds])].filter(id => carriedIds.includes(id));
+    if (canonicalJson(player.carriedGeneralIds || null) !== canonicalJson(orderedIds)) {
+      player.carriedGeneralIds = orderedIds;
       changed = true;
     }
     if (!finiteStoredNumber(player.joinedAt) && joinEvent) { player.joinedAt = Number(joinEvent.createdAt || this.world.startedAt || this.now()); changed = true; }
@@ -2421,12 +2447,38 @@ class OnlineWorldService {
     const marketSales = record.changes?.marketSales || {};
     const treasureClaims = record.changes?.claimedTreasures || {};
     const battles = record.changes?.battles || {};
+    const conquests = record.changes?.conquests || {};
     if (!cells || typeof cells !== "object" || Array.isArray(cells) || !generals || typeof generals !== "object" || Array.isArray(generals)) return false;
     if (!generalTransitions || typeof generalTransitions !== "object" || Array.isArray(generalTransitions) || Object.keys(generalTransitions).length > 100) return false;
     if (!treasureClaims || typeof treasureClaims !== "object" || Array.isArray(treasureClaims) || Object.keys(treasureClaims).length > 24) return false;
     if (!marketListings || typeof marketListings !== "object" || Array.isArray(marketListings) || Object.keys(marketListings).length > 100) return false;
     if (!marketSales || typeof marketSales !== "object" || Array.isArray(marketSales) || Object.keys(marketSales).length > 100) return false;
     if (!battles || typeof battles !== "object" || Array.isArray(battles) || Object.keys(battles).length > 24) return false;
+    if (!conquests || typeof conquests !== "object" || Array.isArray(conquests) || Object.keys(conquests).length > 24) return false;
+    for (const [id, battle] of Object.entries(conquests)) {
+      if (!battle || typeof battle !== "object" || String(battle.battleId || "") !== id || id.length > 100
+        || battle.attackerAccountId !== actorAccountId || !battle.targetOwnerAccountId || battle.targetOwnerAccountId === actorAccountId
+        || !validPosition(battle) || !Number.isSafeInteger(battle.createdAt) || battle.createdAt < 0
+        || !Number.isSafeInteger(battle.targetPlayerEpoch) || battle.targetPlayerEpoch < 0) return false;
+      const next = cells[`${battle.x},${battle.y}`];
+      if (!isPublicCellShape(next) || next.ownerAccountId !== actorAccountId || next.generalIds?.length) return false;
+      const fields = ["attackerSoldiers", "defenderSoldiers", "attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"];
+      if (fields.some(field => safeBattleInteger(battle[field]) == null)
+        || ["attackerPower", "defenderPower"].some(field => safeBattleInteger(battle[field], MAX_PUBLIC_BATTLE_POWER, 1) == null)) return false;
+      const expected = battleCasualties(battle.attackerPower, battle.defenderPower, battle.attackerSoldiers, battle.defenderSoldiers);
+      if (!expected.attackerWon || ["attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"].some(field => battle[field] !== expected[field])
+        || next.soldiers !== Math.min(staticCell(this.world.seed, battle.x, battle.y).garrisonCap, expected.attackerSurvivors)) return false;
+      if (!Array.isArray(battle.capturedOwnGenerals) || battle.capturedOwnGenerals.length > 2
+        || new Set(battle.capturedOwnGenerals.map(item => item?.id)).size !== battle.capturedOwnGenerals.length) return false;
+      for (const general of battle.capturedOwnGenerals) {
+        const transition = generalTransitions[general?.id];
+        if (!validGeneralTransitionShape(general?.id, transition) || transition.reason !== "captured"
+          || transition.holderAccountId !== battle.targetOwnerAccountId || transition.nextHolderAccountId !== actorAccountId
+          || transition.from.x !== battle.x || transition.from.y !== battle.y
+          || typeof general.name !== "string" || general.name.length > 24) return false;
+      }
+      if (String(battle.attackerDisplayName || "").length > 40 || String(battle.attackerAccountName || "").length > 80) return false;
+    }
     if (Object.hasOwn(record.changes, "treasureSpawns") || Object.hasOwn(record.changes, "treasureEpoch")) return false;
     if (Object.keys(cells).length > GRID_SIZE * GRID_SIZE || Object.keys(generals).length > 100) return false;
     const battleCellKeys = new Set();
@@ -2742,7 +2794,9 @@ class OnlineWorldService {
         const locationKey = transitionValid ? `${transition.from.x},${transition.from.y}` : "";
         const nextCell = locationKey ? record.changes.cells?.[locationKey] : null;
         const locationVerified = transitionValid && isPublicCellShape(nextCell)
-          && !(nextCell.generalIds || []).map(String).includes(String(id));
+          && !(nextCell.generalIds || []).map(String).includes(String(id))
+          && compareOrderValue(order, this.publicCellOrders[locationKey] || this.publicMapBaselineOrder) >= 0
+          && canonicalJson(this.world.cells[locationKey]) === canonicalJson(nextCell);
         if (!locationVerified) {
           this.diagnostic({
             event: "general-removal-rejected",
@@ -2755,6 +2809,13 @@ class OnlineWorldService {
           continue;
         }
         const viewer = this.account().accountId;
+        // A public deployed tombstone is not evidence that a newer private
+        // carried/captured/market archive has ceased to exist.
+        if (existing && String(existing.holderAccountId || "") === viewer && existing.status !== "deployed") {
+          this.diagnostic({ event: "general-removal-rejected", status: "preserved-local-archive", generalId: id, actorAccountId, reason: "private-location-is-newer" });
+          this.publicGeneralOrders[id] = order;
+          continue;
+        }
         if (existing && transition.reason === "recalled" && String(transition.holderAccountId) === viewer) {
           existing.status = "carried";
           existing.location = null;
@@ -2821,6 +2882,7 @@ class OnlineWorldService {
       this.publicParticipantOrders[actorAccountId] = order;
     }
     this.world.revision = Number(this.world.revision || 0) + 1;
+    this.rememberConquests(record.changes.conquests, order);
     this.appliedMapDeltaIds.add(String(record.mapDeltaId));
     if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
     if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
@@ -2840,6 +2902,57 @@ class OnlineWorldService {
       }
     });
     return true;
+  }
+
+  rememberConquests(conquests = {}, order = null) {
+    if (!this.world) return;
+    this.world.conquests ||= {};
+    for (const [id, battle] of Object.entries(conquests || {})) {
+      if (!this.world.conquests[id]) this.world.conquests[id] = {
+        ...cloneJson(battle), ...(order?.timestamp ? { createdAt: order.timestamp, platformOrder: cloneJson(order) } : {})
+      };
+    }
+    // Keep the latest twenty per defender, including players currently offline.
+    const counts = new Map();
+    this.world.conquests = Object.fromEntries(Object.entries(this.world.conquests)
+      .sort(([, a], [, b]) => Number(b.createdAt) - Number(a.createdAt))
+      .filter(([, battle]) => {
+        const key = `${battle.targetOwnerAccountId}:${battle.targetPlayerEpoch}`;
+        counts.set(key, Number(counts.get(key) || 0) + 1);
+        return counts.get(key) <= 20;
+      }));
+    this.reconcileConquestReports();
+  }
+
+  reconcileConquestReports() {
+    const accountId = this.account().accountId;
+    if (!this.world?.players?.[accountId]) return;
+    const preferences = this.world.privatePlayers[accountId] ||= {};
+    const seen = new Set(preferences.seenConquestReportIds || []);
+    for (const battle of Object.values(this.world.conquests || {}).sort((a, b) => a.createdAt - b.createdAt)) {
+      if (battle.targetOwnerAccountId !== accountId || Number(battle.targetPlayerEpoch || 0) !== Number(this.world.playerEpochs?.[accountId] || 0)) continue;
+      const cell = this.world.cells[`${battle.x},${battle.y}`];
+      for (const captured of battle.capturedOwnGenerals || []) {
+        const general = this.world.generals[captured.id];
+        if (!general || general.holderAccountId !== accountId || general.status !== "deployed"
+          || general.location?.x !== battle.x || general.location?.y !== battle.y
+          || cell?.ownerAccountId !== battle.attackerAccountId || cell.generalIds?.includes(captured.id)
+          || !battle.platformOrder || compareOrderValue(battle.platformOrder, this.publicGeneralOrders[captured.id]) < 0) continue;
+        preferences.capturedGeneralArchives ||= {};
+        preferences.capturedGeneralArchives[captured.id] = { ...cloneJson(general), capturedByAccountId: battle.attackerAccountId, capturedAt: battle.createdAt };
+        delete this.world.generals[captured.id];
+        delete this.localDeployedGeneralProgress[captured.id];
+        this.world.players[accountId].carriedGeneralIds = (this.world.players[accountId].carriedGeneralIds || []).filter(id => id !== captured.id);
+      }
+      const id = `loss:${battle.battleId}`;
+      if (seen.has(id)) continue;
+      recordBattleReport(this.world, accountId, {
+        ...battle, id, jobId: battle.battleId, kind: "territory-loss", outcome: "defeat",
+        target: { x: battle.x, y: battle.y }, ownLosses: battle.defenderLosses, ownSurvivors: battle.defenderSurvivors
+      });
+      seen.add(id);
+    }
+    preferences.seenConquestReportIds = [...seen].slice(-1000);
   }
 
   applyMarketSaleToSeller(sale) {
@@ -3233,6 +3346,7 @@ class OnlineWorldService {
           this.resolvePendingIntentTransaction();
           this.applyAuthorityPlayerActions();
           this.reconcileMarketSales();
+          this.reconcileConquestReports();
           if (history.completeThrough && compareOrderValue(history.completeThrough, this.publicHistoryOrder) > 0) this.publicHistoryOrder = { ...history.completeThrough };
         }
         if (this.world) this.reconcileTreasureRewards(history);
@@ -3497,6 +3611,7 @@ class OnlineWorldService {
         mapDeltaId: record.mapDeltaId, platformOrder: order, scanFrom: pending.scanFrom || { ...this.publicMapBaselineOrder }
       };
     }
+    this.rememberConquests(changes.conquests, order);
     return record;
   }
 
@@ -3819,14 +3934,13 @@ class OnlineWorldService {
     const accountId = this.account().accountId;
     const preferences = this.world?.privatePlayers?.[accountId];
     if (!preferences?.treasureClaimRewards) return;
-    // Upgrade prerelease caches whose rewards were credited at publication.
+    // Legacy rewards were already credited. Do not debit them merely because
+    // an old comment is slow to read or has been compacted into a snapshot.
     for (const reward of Object.values(preferences.treasureClaimRewards)) {
       if (reward.status || reward.reconciled) continue;
-      preferences.materials ||= {};
-      preferences.materials[reward.materialId] = Math.max(0, Number(preferences.materials[reward.materialId] || 0) - 1);
       reward.status = "pending";
       reward.amount = 1;
-      reward.credited = false;
+      reward.credited = reward.credited !== false;
       reward.scanFrom = { timestamp: 0, commentId: "" };
     }
     if (!history?.confirmationComplete || history.assembled?.incomplete?.length || this.world.bans?.[accountId]?.banned) return;
@@ -3835,10 +3949,12 @@ class OnlineWorldService {
       const matching = candidates.filter(item => item.record.changes?.claimedTreasures?.[id]);
       const ownPublished = matching.find(item => item.record.actorAccountId === accountId
         && (!reward.mapDeltaId || item.record.mapDeltaId === reward.mapDeltaId));
-      if (!ownPublished) continue;
+      const stored = this.world.claimedTreasures?.[id];
+      const coveredClaim = stored?.platformOrder && compareOrderValue(stored.platformOrder, this.publicMapBaselineOrder) <= 0 ? stored : null;
+      if (!ownPublished && !coveredClaim) continue;
       const earliest = matching[0];
-      const claim = earliest.record.changes.claimedTreasures[id];
-      const order = recordPlatformOrder(earliest);
+      const claim = earliest?.record.changes.claimedTreasures[id] || coveredClaim;
+      const order = earliest ? recordPlatformOrder(earliest) : coveredClaim.platformOrder;
       const current = this.world.claimedTreasures?.[id];
       const currentWins = current?.platformOrder && compareOrderValue(current.platformOrder, order) < 0;
       const winner = currentWins ? current : { ...cloneJson(claim), platformOrder: order };
@@ -3856,6 +3972,9 @@ class OnlineWorldService {
         preferences.materials ||= {};
         preferences.materials[reward.materialId] = Math.max(0, Number(preferences.materials[reward.materialId] || 0) - Number(reward.amount || 1));
         reward.credited = false;
+      }
+      if (reward.status === "rejected") for (const report of preferences.battleReports || []) {
+        report.treasures = (report.treasures || []).filter(item => item.treasureId !== id);
       }
     }
   }
@@ -4101,7 +4220,7 @@ class OnlineWorldService {
         await this.applyLocalIntent({
           type: "grant-general",
           generalId: crypto.randomUUID(),
-          discoveryId: request.idempotencyKey,
+          discoveryId: effect.discoveryId || request.idempotencyKey,
           name: general.name,
           gender: general.gender,
           heightCm: general.heightCm,

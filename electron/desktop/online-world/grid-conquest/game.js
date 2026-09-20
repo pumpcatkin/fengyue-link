@@ -13,6 +13,7 @@ let selected = null;
 let zoom = 1;
 let mapCssSize = 2048;
 let mapCentered = false;
+let mapCenterFrame = null;
 let panState = null;
 let suppressMapClick = false;
 let mapPointer = null;
@@ -178,7 +179,9 @@ function battleReportMarker(report) {
   const time = new Date(Number(report?.createdAt || hostTime())).toLocaleString("zh-CN", {
     month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
   });
-  return `【战报-${time} 对(${Number(target.x)},${Number(target.y)})发动的进攻】`;
+  return report?.kind === "territory-loss"
+    ? `【战报-${time} (${Number(target.x)},${Number(target.y)})领地失守】`
+    : `【战报-${time} 对(${Number(target.x)},${Number(target.y)})发动的进攻】`;
 }
 function withoutBattleReportMarker(value, marker) {
   const text = String(value || "");
@@ -922,11 +925,16 @@ function stepZoom(direction) {
 }
 function centerMap(position, behavior = "smooth") {
   if (!position) return;
-  const tile = mapCssSize / 64;
-  viewport.scrollTo({
-    left: canvas.offsetLeft + (position.x + .5) * tile - viewport.clientWidth / 2,
-    top: canvas.offsetTop + (position.y + .5) * tile - viewport.clientHeight / 2,
-    behavior
+  if (mapCenterFrame != null) cancelAnimationFrame(mapCenterFrame);
+  // Let pending panel-size changes finish before choosing the final map center.
+  mapCenterFrame = requestAnimationFrame(() => {
+    mapCenterFrame = null;
+    const tile = mapCssSize / 64;
+    viewport.scrollTo({
+      left: canvas.offsetLeft + (position.x + .5) * tile - viewport.clientWidth / 2,
+      top: canvas.offsetTop + (position.y + .5) * tile - viewport.clientHeight / 2,
+      behavior
+    });
   });
 }
 
@@ -1160,7 +1168,7 @@ function renderMarchConfirmation() {
   const requested = marchAvailable();
   const carried = (player.carriedGeneralIds || []).map(id => allGenerals()[id]).filter(Boolean);
   const activeGenerals = carried.slice(0, 2);
-  const power = requested + activeGenerals.reduce((sum, general) => sum + Number(trainingPower(general) || general.power || 0), 0);
+  const power = requested + trainingPower(player) + activeGenerals.reduce((sum, general) => sum + Number(trainingPower(general) || general.power || 0), 0);
   document.querySelector("#march-party-count").textContent = `${formatNumber(requested)} 人`;
   document.querySelector("#march-party-power").textContent = formatNumber(power);
   const generalList = document.querySelector("#march-confirmation-generals");
@@ -2059,6 +2067,7 @@ function renderBattleReports() {
     return;
   }
   const victory = report.outcome === "victory";
+  const lostTerritory = report.kind === "territory-loss";
   const target = report.target || {};
   const reportIndex = reports.findIndex(item => String(item.id) === String(report.id));
   document.querySelector("#battle-report-index").textContent = `${reportIndex + 1} / ${reports.length}`;
@@ -2066,16 +2075,34 @@ function renderBattleReports() {
   document.querySelector("#battle-report-next").disabled = reportIndex >= reports.length - 1;
   modal.querySelector(".battle-report-modal").classList.toggle("victory", victory);
   modal.querySelector(".battle-report-modal").classList.toggle("defeat", !victory);
-  document.querySelector("#battle-report-kind").textContent = victory ? "攻占成功" : "进攻失利";
-  document.querySelector("#battle-report-title").textContent = victory ? "我方获胜" : "我方战败";
+  document.querySelector("#battle-report-kind").textContent = lostTerritory ? "失地战报" : victory ? "攻占成功" : "进攻失利";
+  document.querySelector("#battle-report-title").textContent = lostTerritory ? "领地失守" : victory ? "我方获胜" : "我方战败";
   document.querySelector("#battle-report-meta").textContent = `${battleReportTime(report)} · 目标 (${Number(target.x)}, ${Number(target.y)})`;
   const stats = document.querySelector("#battle-report-stats"); stats.replaceChildren();
-  appendBattleReportStat(stats, "我方战力", formatNumber(report.attackerPower));
-  appendBattleReportStat(stats, "守方战力", formatNumber(report.defenderPower));
+  appendBattleReportStat(stats, lostTerritory ? "攻方战力" : "我方战力", formatNumber(report.attackerPower));
+  appendBattleReportStat(stats, lostTerritory ? "我方战力" : "守方战力", formatNumber(report.defenderPower));
   if (Number(report.ownSurvivors || 0) > 0) appendBattleReportStat(stats, "幸存士兵", `${formatNumber(report.ownSurvivors)} 人`);
   if (Number(report.soldiersGained || 0) > 0) appendBattleReportStat(stats, "获得士兵", `${formatNumber(report.soldiersGained)} 人`, "gained");
   if (Number(report.ownLosses || 0) > 0) appendBattleReportStat(stats, "我方牺牲", `${formatNumber(report.ownLosses)} 人`, "losses");
   const specials = document.querySelector("#battle-report-specials"); specials.replaceChildren();
+  const addSpecial = (label, text, className) => {
+    const item = document.createElement("article"); item.className = `battle-report-special ${className}`;
+    const title = document.createElement("small"); title.textContent = label;
+    const content = document.createElement("b"); content.textContent = text;
+    item.append(title, content); specials.append(item);
+  };
+  if (lostTerritory) {
+    const displayName = report.attackerDisplayName || report.attackerAccountName || report.attackerAccountId;
+    const accountName = report.attackerAccountName && report.attackerAccountName !== displayName ? `（${report.attackerAccountName}）` : "";
+    addSpecial("攻打方", `${displayName}${accountName}`, "attacker");
+    const names = (report.capturedOwnGenerals || []).map(item => item.name).filter(Boolean);
+    if (names.length) addSpecial("我方被俘将领", names.join("、"), "captive");
+  }
+  for (const treasure of report.treasures || []) {
+    if (!MATERIAL_NAMES[treasure.materialId] || !(treasure.amount > 0)) continue;
+    const purpose = MATERIAL_PURPOSES[treasure.materialId];
+    addSpecial("获得天材地宝", `${MATERIAL_NAMES[treasure.materialId]}${purpose ? `（${purpose}）` : ""} × ${formatNumber(treasure.amount)}`, "treasure");
+  }
   const captured = (report.capturedGenerals || []).map(item => String(item?.name || allGenerals()[item?.id]?.name || "").trim()).filter(Boolean);
   if (captured.length) {
     const item = document.createElement("article"); item.className = "battle-report-special captive";
@@ -2100,10 +2127,16 @@ function renderBattleReports() {
 function openBattleReport() {
   const reports = battleReports();
   if (!reports.length) return;
-  activeBattleReportId = String(reports[reports.length - 1].id);
-  battleReportGeneralPickerOpen = false;
   document.querySelector("#battle-report-modal").classList.remove("hidden");
+  selectBattleReport(reports[reports.length - 1].id);
+}
+function selectBattleReport(id) {
+  const report = battleReportById(id);
+  if (!report) return;
+  activeBattleReportId = String(report.id);
+  battleReportGeneralPickerOpen = false;
   renderBattleReports();
+  centerMap(report.target);
 }
 function closeBattleReport() {
   battleReportGeneralPickerOpen = false;
@@ -2925,12 +2958,12 @@ document.querySelector("#battle-report-later").addEventListener("click", closeBa
 document.querySelector("#battle-report-prev").addEventListener("click", () => {
   const reports = battleReports();
   const index = reports.findIndex(item => String(item.id) === String(activeBattleReportId));
-  if (index > 0) { activeBattleReportId = String(reports[index - 1].id); battleReportGeneralPickerOpen = false; renderBattleReports(); }
+  if (index > 0) selectBattleReport(reports[index - 1].id);
 });
 document.querySelector("#battle-report-next").addEventListener("click", () => {
   const reports = battleReports();
   const index = reports.findIndex(item => String(item.id) === String(activeBattleReportId));
-  if (index >= 0 && index < reports.length - 1) { activeBattleReportId = String(reports[index + 1].id); battleReportGeneralPickerOpen = false; renderBattleReports(); }
+  if (index >= 0 && index < reports.length - 1) selectBattleReport(reports[index + 1].id);
 });
 document.querySelector("#battle-report-discuss").addEventListener("click", () => {
   if (!battleReportById(activeBattleReportId)) return;

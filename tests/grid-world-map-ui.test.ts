@@ -40,6 +40,26 @@ function harness() {
 }
 
 describe("grid world map task overlays", () => {
+  it("centers only the map when selecting either report type and leaves the selected cell unchanged", () => {
+    const centered: any[] = [];
+    const report = { id: "loss", kind: "territory-loss", target: { x: 16, y: 0 } };
+    const context: any = {
+      activeBattleReportId: null, selected: { x: 1, y: 1 }, battleReportGeneralPickerOpen: true,
+      battleReportById: (id: string) => id === report.id ? report : null,
+      renderBattleReports: () => {}, centerMap: (position: any) => centered.push(position)
+    };
+    runInNewContext(source.slice(source.indexOf("function selectBattleReport("), source.indexOf("function closeBattleReport(")), context);
+    context.selectBattleReport("loss");
+    expect(context.activeBattleReportId).toBe("loss");
+    expect(centered).toEqual([report.target]);
+    expect(context.selected).toEqual({ x: 1, y: 1 });
+    expect(context.battleReportGeneralPickerOpen).toBe(false);
+    context.selectBattleReport("missing");
+    expect(centered).toHaveLength(1);
+    expect(source).toContain("requested + trainingPower(player)");
+    expect(css).toMatch(/\.battle-report-navigation button \{[^}]*width: 44px; height: 44px/);
+  });
+
   it("keeps mottled tile colors while darkening the central layers", () => {
     const colorSource = source.slice(source.indexOf("function tileColorHash"), source.indexOf("function validMapPosition"));
     const context: any = { ownAccountId: () => "self" };

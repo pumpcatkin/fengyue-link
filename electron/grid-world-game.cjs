@@ -185,6 +185,7 @@ function createWorld({ seed = crypto.randomBytes(16).toString("hex"), seasonId =
     generals: {},
     marketListings: {},
     marketSales: {},
+    conquests: {},
     authorityPlayerActions: {},
     jobs: {},
     treasureSpawns: {},
@@ -788,7 +789,12 @@ function claimTreasureAt(state, accountId, position, now, effects) {
   state.claimedTreasures ||= {};
   const claim = {
     treasureId: entry.id, epoch: entry.epoch, x: entry.x, y: entry.y,
-    accountId: String(accountId), claimedAt: Number(now)
+    accountId: String(accountId), claimedAt: Number(now), materialId: entry.materialId, amount: 1
+  };
+  privatePlayer.treasureClaimRewards ||= {};
+  privatePlayer.treasureClaimRewards[entry.id] = {
+    materialId: entry.materialId, amount: 1, status: "pending", credited: true,
+    playerEpoch: Math.max(0, Math.trunc(Number(state.playerEpochs?.[accountId] || 0)))
   };
   state.claimedTreasures[entry.id] = claim;
   delete state.treasureSpawns[entry.id];
@@ -986,8 +992,10 @@ function battleReportsFor(state, accountId) {
 
 function battleReportSummary(report, state = null) {
   if (!report || typeof report !== "object") return "";
+  const lostTerritory = report.kind === "territory-loss";
   const parts = [
-    report.outcome === "victory" ? "我方获胜并占领目标" : "我方战败并返回出发地",
+    lostTerritory ? `领地被${report.attackerDisplayName || report.attackerAccountName || report.attackerAccountId}攻占`
+      : report.outcome === "victory" ? "我方获胜并占领目标" : "我方战败并返回出发地",
     `双方战力 ${Math.max(0, Math.trunc(Number(report.attackerPower || 0)))}/${Math.max(0, Math.trunc(Number(report.defenderPower || 0)))}`
   ];
   if (Number(report.soldiersGained || 0) > 0) parts.push(`获得士兵 ${Math.trunc(Number(report.soldiersGained))}`);
@@ -995,11 +1003,16 @@ function battleReportSummary(report, state = null) {
   if (Number(report.ownSurvivors || 0) > 0) parts.push(`我方幸存 ${Math.trunc(Number(report.ownSurvivors))} 名士兵`);
   const capturedNames = (report.capturedGenerals || []).map(item => String(item?.name || state?.generals?.[item?.id]?.name || "").trim()).filter(Boolean);
   if (capturedNames.length) parts.push(`俘虏将领：${capturedNames.join("、")}`);
+  const lostNames = (report.capturedOwnGenerals || []).map(item => item.name).filter(Boolean);
+  if (lostNames.length) parts.push(`我方被俘将领：${lostNames.join("、")}`);
+  for (const treasure of report.treasures || []) {
+    if (MATERIAL_BY_ID[treasure.materialId] && treasure.amount > 0) parts.push(`获得${MATERIAL_BY_ID[treasure.materialId].label} × ${treasure.amount}`);
+  }
   const discoveredName = String(report.discoveredGeneralName || "").trim();
   if (discoveredName) parts.push(`发掘将领：${discoveredName}`);
   else if (report.discoveryId) parts.push("发现一名待提拔的拔尖兵士");
   const target = report.target || {};
-  return `战报：于 (${Number(target.x)}, ${Number(target.y)}) 发动进攻，${parts.join("；")}。`;
+  return `战报：于 (${Number(target.x)}, ${Number(target.y)}) ${lostTerritory ? "防守" : "发动进攻"}，${parts.join("；")}。`;
 }
 
 function recordBattleReport(state, accountId, value) {
@@ -1007,6 +1020,7 @@ function recordBattleReport(state, accountId, value) {
   const id = String(value?.id || value?.jobId || crypto.randomUUID()).slice(0, 100);
   const report = {
     id,
+    kind: value?.kind === "territory-loss" ? "territory-loss" : "attack",
     jobId: String(value?.jobId || id).slice(0, 100),
     createdAt: Number(value?.createdAt || Date.now()),
     target: { x: coordinate(value?.target?.x, "战报横坐标"), y: coordinate(value?.target?.y, "战报纵坐标") },
@@ -1019,6 +1033,13 @@ function recordBattleReport(state, accountId, value) {
     capturedGenerals: (value?.capturedGeneralIds || []).map(idValue => ({
       id: String(idValue),
       name: String(state.generals?.[idValue]?.name || "无名将领").slice(0, 24)
+    })),
+    capturedOwnGenerals: clone(value?.capturedOwnGenerals || []),
+    attackerAccountId: String(value?.attackerAccountId || "").slice(0, 100),
+    attackerAccountName: String(value?.attackerAccountName || "").slice(0, 80),
+    attackerDisplayName: String(value?.attackerDisplayName || "").slice(0, 40),
+    treasures: (value?.treasures || []).filter(item => item && MATERIAL_BY_ID[item.materialId]).map(item => ({
+      treasureId: String(item.treasureId), materialId: item.materialId, amount: Math.max(1, Math.trunc(Number(item.amount) || 1))
     })),
     discoveryId: value?.discoveryId ? String(value.discoveryId).slice(0, 120) : null,
     discoveredGeneralId: value?.discoveredGeneralId ? String(value.discoveredGeneralId).slice(0, 120) : null,
@@ -1562,12 +1583,12 @@ function resolveMarch(state, job, effects, now) {
         attackModifiers, defenseModifiers
       });
       grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects);
+      const treasure = claimTreasureAt(state, job.accountId, job.to, now, effects);
       recordBattleReport(state, job.accountId, {
         jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
         attackerPower, defenderPower, soldiersGained: target.soldiers, ownLosses: casualties.attackerLosses,
-        ownSurvivors: casualties.attackerSurvivors, capturedGeneralIds
+        ownSurvivors: casualties.attackerSurvivors, capturedGeneralIds, treasures: treasure ? [treasure] : []
       });
-      claimTreasureAt(state, job.accountId, job.to, now, effects);
       return;
     }
     const neutralCasualties = battleCasualties(attackerPower, defenderPower, job.soldiers, targetInfo.neutralPower);
@@ -1623,7 +1644,7 @@ function resolveMarch(state, job, effects, now) {
       attackerSurvivors: survivors, defenderSurvivors: neutralCasualties.defenderSurvivors,
       attackModifiers, defenseModifiers
     });
-    claimTreasureAt(state, job.accountId, job.to, now, effects);
+    const treasure = claimTreasureAt(state, job.accountId, job.to, now, effects);
     let discoveryId = null;
     if (neutral) {
       const chance = clamp(generalDiscoveryChance(targetInfo.population) + discoveryModifiers.discoveryChance, 0, 1);
@@ -1654,7 +1675,7 @@ function resolveMarch(state, job, effects, now) {
     recordBattleReport(state, job.accountId, {
       jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
       attackerPower, defenderPower, soldiersGained: target.soldiers, ownLosses: losses, ownSurvivors: survivors,
-      capturedGeneralIds, discoveryId
+      capturedGeneralIds, discoveryId, treasures: treasure ? [treasure] : []
     });
     return;
   }
@@ -2239,6 +2260,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
         appearanceSetting: intent.appearanceSetting, coreSetting: intent.coreSetting, setting: intent.setting,
         power, holderAccountId: actorAccountId, holderName: player.displayName, year: gameYear(state, now), talentSeed: state.seed
       });
+      if (state.generals[general.id]) throw new Error("将领编号已存在，请重新登记；原将领已保留");
       state.generals[general.id] = general;
       if (!player.carriedGeneralIds.includes(general.id)) player.carriedGeneralIds.push(general.id);
       if (intent.initial && state.privatePlayers[actorAccountId]) state.privatePlayers[actorAccountId].initialGeneralGranted = true;
@@ -2595,6 +2617,7 @@ function projectWorldState(state, viewerAccountId, nowValue = Date.now()) {
     authorityPlayerActions: clone(state.authorityPlayerActions || {}),
     marketListings: Object.fromEntries(Object.entries(state.marketListings || {}).map(([id, listing]) => [id, publicMarketListingState(state, listing)])),
     marketSales: clone(state.marketSales || {}),
+    conquests: clone(state.conquests || {}),
     jobs: Object.fromEntries(Object.entries(state.jobs || {}).filter(([, job]) => job.accountId === viewer)),
     treasureSpawns: clone(state.treasureSpawns || {}),
     claimedTreasures: clone(state.claimedTreasures || {}),
@@ -2603,6 +2626,8 @@ function projectWorldState(state, viewerAccountId, nowValue = Date.now()) {
 }
 
 module.exports = {
+  recordBattleReport,
+  battleReportSummary,
   GRID_GAME_ID,
   GRID_SIZE,
   RESOURCE_GRADES,

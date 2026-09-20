@@ -30,6 +30,16 @@ function deploy(state: any, id = "general", now = NOW) {
 }
 
 describe("grid progression update rules", () => {
+  it("rejects general ID collisions without replacing the original archive or roster", () => {
+    const state = grant(joined(), "first");
+    state.generals.first.interactionHistory = [{ userText: "old", reply: "retained" }];
+    const before = structuredClone(state);
+    expect(() => game.applyIntent(state, {
+      type: "grant-general", generalId: "first", name: "另一人", gender: "female", power: 300, idempotencyKey: "collision"
+    }, { actorAccountId: "a", authorityAccountId: "a", now: NOW })).toThrow(/编号已存在/);
+    expect(state).toEqual(before);
+  });
+
   it("increases every mining grade by at least 2.8x while retaining grade ordering", () => {
     const population = 4_000;
     let previous = 0;

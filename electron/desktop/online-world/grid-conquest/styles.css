@@ -359,8 +359,8 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .battle-report-modal { width: min(620px, 94vw); background: #f3dfb0; }
 .battle-report-modal > header { align-items: flex-start; }
 .battle-report-modal > header p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
-.battle-report-navigation { display: flex; align-items: center; gap: 5px; margin-top: 6px; color: var(--muted); font-size: 9px; font-weight: 900; }
-.battle-report-navigation button { display: grid; width: 22px; height: 20px; place-items: center; border-width: 1px; border-radius: 5px; padding: 0; font-size: 15px; line-height: 1; box-shadow: 1px 1px 0 var(--shadow); }
+.battle-report-navigation { display: flex; align-items: center; gap: 10px; margin-top: 6px; color: var(--muted); font-size: 11px; font-weight: 900; }
+.battle-report-navigation button { display: grid; width: 44px; height: 44px; flex: 0 0 44px; place-items: center; border-width: 1px; border-radius: 5px; padding: 0; font-size: 26px; line-height: 1; box-shadow: 1px 1px 0 var(--shadow); }
 .battle-report-navigation button:disabled { opacity: .35; }
 .battle-report-modal.victory { border-color: #55743f; } .battle-report-modal.defeat { border-color: #8e3c31; }
 .battle-report-modal.victory h1 { color: #42623d; } .battle-report-modal.defeat h1 { color: #8e3c31; }
@@ -376,6 +376,8 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .battle-report-special { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; border-left: 4px solid #b3783f; background: #f5e2b5; padding: 7px 9px; }
 .battle-report-special small { color: var(--muted); font-size: 9px; font-weight: 900; } .battle-report-special b { color: var(--red-dark); font-size: 11px; text-align: right; }
 .battle-report-special.captive { border-left-color: #8a5a75; } .battle-report-special.discovered { border-left-color: #b3783f; }
+.battle-report-special.treasure { border-left-color: #367777; }
+.battle-report-special b { overflow-wrap: anywhere; }
 .battle-report-general-picker { display: grid; gap: 7px; border-top: 1px solid #8a6d3d55; padding-top: 10px; }
 .battle-report-general-picker > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .battle-report-general-picker > header b { color: var(--red-dark); font-size: 12px; } .battle-report-general-picker > header small { color: var(--muted); font-size: 9px; }

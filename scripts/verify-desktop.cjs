@@ -719,6 +719,43 @@ if (process.type === "renderer") {
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#map-task-tooltip').classList.contains('hidden')`), true, "removed task leaves a stale tooltip");
       await embeddedGameFrame.executeJavaScript(`viewport.dispatchEvent(new Event('scroll'))`);
       assert.equal(await embeddedGameFrame.executeJavaScript(`mapPointer`), null);
+      const reportInitial = await embeddedGameFrame.executeJavaScript(`(() => {
+        setSocialOpen(false);
+        payload.world.privatePlayers ||= {};
+        payload.world.privatePlayers.a ||= {};
+        payload.world.privatePlayers.a.battleReports = [
+          {id:'qa-attack',kind:'attack',createdAt:1000,target:{x:12,y:12},outcome:'victory',attackerPower:1600,defenderPower:500,ownLosses:20,ownSurvivors:980,soldiersGained:300,treasures:[{treasureId:'pill',materialId:'gold',amount:1}]},
+          {id:'qa-loss',kind:'territory-loss',createdAt:2000,target:{x:50,y:50},outcome:'defeat',attackerPower:2400,defenderPower:1300,ownLosses:100,attackerDisplayName:'北境玩家',attackerAccountName:'north@example',capturedOwnGenerals:[{id:'qa-guard',name:'守地将领'}]}
+        ];
+        centerMap({x:2,y:2}, 'instant');
+        renderBattleReports();
+        document.querySelector('#battle-report-button').click();
+        const rect = document.querySelector('.battle-report-modal').getBoundingClientRect();
+        return {scroll:viewport.scrollLeft,top:rect.top,left:rect.left};
+      })()`);
+      await new Promise(resolve => setTimeout(resolve, 650));
+      const lossQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const box = document.querySelector('.battle-report-modal').getBoundingClientRect();
+        const button = document.querySelector('#battle-report-prev').getBoundingClientRect();
+        return {text:document.querySelector('.battle-report-modal').textContent,scroll:viewport.scrollLeft,top:box.top,left:box.left,width:button.width,height:button.height};
+      })()`);
+      assert(lossQa.text.includes("失地战报") && lossQa.text.includes("守地将领") && lossQa.text.includes("north@example"));
+      assert(lossQa.scroll > reportInitial.scroll + 100, "opening a report did not center its map location");
+      assert.equal(lossQa.top, reportInitial.top, "map movement shifted the report modal");
+      assert.equal(lossQa.left, reportInitial.left);
+      assert(lossQa.width >= 44 && lossQa.height >= 44);
+      fs.writeFileSync(path.join(outputDir, "battle-report-loss.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#battle-report-prev').click()`);
+      await new Promise(resolve => setTimeout(resolve, 650));
+      const attackQa = await embeddedGameFrame.executeJavaScript(`({text:document.querySelector('.battle-report-modal').textContent,scroll:viewport.scrollLeft,index:document.querySelector('#battle-report-index').textContent})`);
+      assert(attackQa.text.includes("金髓丹") && attackQa.text.includes("获得天材地宝"));
+      assert(attackQa.scroll < lossQa.scroll - 100, `paging did not center the other battle: ${JSON.stringify({loss:lossQa.scroll,attack:attackQa.scroll,index:attackQa.index})}`);
+      assert.equal(attackQa.index, "1 / 2");
+      fs.writeFileSync(path.join(outputDir, "battle-report-treasure.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#battle-report-next').click()`);
+      await new Promise(resolve => setTimeout(resolve, 650));
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#battle-report-index').textContent`), "2 / 2");
+      await embeddedGameFrame.executeJavaScript(`closeBattleReport()`);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#return-library').click()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-setup').classList.contains('hidden')`), true);

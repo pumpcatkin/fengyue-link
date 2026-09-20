@@ -108,6 +108,128 @@ function coverageHarness() {
 }
 
 describe("online world platform service", () => {
+  it("keeps all three existing generals and dialogue after generating a fourth, then restoring the cache overlay", async () => {
+    const { author: instance } = coverageHarness();
+    instance.world.players.author = { accountId: "author", displayName: "yuoa333", position: { x: 16, y: 0 }, carriedGeneralIds: ["first", "second", "third"], fieldArmySoldiers: 0, gold: 100 };
+    instance.world.privatePlayers.author = { orientation: "any", pendingGeneralDiscoveries: [{
+      type: "general-generation-request", sourceKind: "neutral-battle", sourceId: "battle16",
+      id: "neutral-battle:battle16", accountId: "author", x: 16, y: 0, gender: "female",
+      initial: false, createdAt: instance.now()
+    }], battleReports: [{ id: "battle16", jobId: "battle16", target: { x: 16, y: 0 }, discoveryId: "neutral-battle:battle16" }] };
+    for (const id of ["first", "second", "third"]) {
+      instance.world.generals[id] = createFallbackGeneral({ id, name: id, gender: "female", holderAccountId: "author", power: 300 });
+    }
+    instance.world.generals.first.interactionHistory = [{ userText: "以前的对话", reply: "保留原始回复", narration: "她点头。" }];
+    const first = structuredClone(instance.world.generals.first);
+    await instance.submitIntent({ type: "confirm-general-discovery", discoveryId: "neutral-battle:battle16", idempotencyKey: "fourth" });
+    expect(Object.keys(instance.world.generals)).toHaveLength(4);
+    expect(instance.world.generals.first).toEqual(first);
+    expect(instance.world.players.author.carriedGeneralIds.slice(0, 3)).toEqual(["first", "second", "third"]);
+    expect(instance.world.privatePlayers.author.battleReports[0].discoveredGeneralName).toBe("初将");
+    const overlay = instance.captureLocalOverlay();
+    const restarted = service({ getAccount: () => ({ accountId: "author" }) });
+    restarted.world = require("../electron/grid-world-game.cjs").projectWorldState(instance.world, "");
+    restarted.restoreLocalOverlay(JSON.parse(JSON.stringify(overlay)));
+    delete restarted.world.players.author.carriedGeneralIds;
+    restarted.recoverOwnLocalPlayerState();
+    expect(restarted.world.players.author.carriedGeneralIds).toHaveLength(4);
+    expect(restarted.world.generals.first.interactionHistory).toEqual(first.interactionHistory);
+    await instance.submitIntent({ type: "confirm-general-discovery", discoveryId: "neutral-battle:battle16", idempotencyKey: "fourth" });
+    expect(Object.keys(instance.world.generals)).toHaveLength(4);
+  });
+
+  it("does not delete a recalled private general when an old capture tombstone arrives", () => {
+    const { author: instance, map, base } = coverageHarness();
+    instance.world.players.author = { accountId: "author", position: { x: 16, y: 0 }, carriedGeneralIds: ["first"] };
+    instance.world.generals.first = createFallbackGeneral({ id: "first", name: "初将", holderAccountId: "author", power: 300 });
+    const original = structuredClone(instance.world.generals.first);
+    const stale = map("player", 100, {
+      cells: { "2,2": { ownerAccountId: "player", soldiers: 1, generalIds: [] } }, generals: { first: null },
+      generalTransitions: { first: { generalId: "first", holderAccountId: "author", from: { x: 2, y: 2 }, targetStatus: "captured", nextHolderAccountId: "player", reason: "captured" } }
+    });
+    expect(instance.applyMapDelta(stale)).toBe(true);
+    expect(instance.world.generals.first).toEqual(original);
+    expect(instance.world.players.author.carriedGeneralIds).toEqual(["first"]);
+
+    instance.world.generals.first.status = "deployed";
+    instance.world.generals.first.location = { x: 2, y: 2 };
+    instance.world.cells["2,2"] = { ownerAccountId: "author", soldiers: 2, generalIds: ["first"] };
+    instance.publicCellOrders["2,2"] = { timestamp: base + 1000, commentId: "new-deployment" };
+    const staleSecond = map("player", 200, stale.record.changes);
+    expect(instance.applyMapDelta(staleSecond)).toBe(true);
+    expect(instance.world.generals.first.status).toBe("deployed");
+    expect(instance.world.cells["2,2"].generalIds).toEqual(["first"]);
+  });
+
+  it("publishes loss reports with captive names, retains them in snapshots, and never resurrects dismissed reports", async () => {
+    const { author: attacker, create, identities, base } = coverageHarness();
+    attacker.world.players.author = { accountId: "author", displayName: "攻方角色", accountName: "attacker@example", position: { x: 1, y: 1 }, carriedGeneralIds: [], fieldArmySoldiers: 0, gold: 100 };
+    attacker.world.players.player = { accountId: "player", displayName: "守方" };
+    attacker.world.privatePlayers.author = { orientation: "any" };
+    attacker.world.cells["2,1"] = { ownerAccountId: "player", soldiers: 100, generalIds: ["guard"] };
+    attacker.world.generals.guard = createFallbackGeneral({ id: "guard", name: "守地将领", holderAccountId: "player", power: 300 });
+    Object.assign(attacker.world.generals.guard, { status: "deployed", location: { x: 2, y: 1 } });
+    attacker.world.treasureSpawns.pill = { id: "pill", epoch: 1, materialId: "gold", x: 2, y: 1, spawnedAt: base };
+    const defender = create("player");
+    defender.control = attacker.control;
+    defender.world = structuredClone(attacker.world);
+    defender.world.privatePlayers = { player: { battleReports: [{ id: "own-attack", kind: "attack", outcome: "victory", target: { x: 9, y: 9 }, createdAt: base }] } };
+    attacker.world.jobs.conquest = { id: "conquest", type: "march", accountId: "author", from: { x: 1, y: 1 }, to: { x: 2, y: 1 }, generalIds: [], activeGeneralIds: [], soldiers: 20000, attack: true, startedAt: base, finishAt: base + 1000 };
+    let posted: any;
+    const publish = attacker.publishMapChanges.bind(attacker);
+    attacker.publishMapChanges = async (...args: any[]) => { posted = await publish(...args); return posted; };
+    await attacker.settleLocalClock();
+    expect(attacker.world.privatePlayers.author.battleReports[0].treasures).toEqual([{ treasureId: "pill", materialId: "gold", amount: 1 }]);
+    expect(attacker.world.privatePlayers.author.materials.gold).toBe(1);
+    const item = { record: posted, sources: [{ id: "conquest-comment", account_id: "author", created_at: base + 500 }] };
+    expect(defender.validMapDelta(item)).toBe(true);
+    expect(defender.applyMapDelta(item)).toBe(true);
+    const reports = defender.world.privatePlayers.player.battleReports;
+    expect(reports).toHaveLength(2);
+    expect(reports[1]).toMatchObject({ kind: "territory-loss", target: { x: 2, y: 1 }, attackerDisplayName: "攻方角色", attackerAccountName: "attacker@example", capturedOwnGenerals: [{ id: "guard", name: "守地将领" }], ownLosses: 100 });
+    expect(defender.world.generals.guard).toBeUndefined();
+    const snapshot = require("../electron/grid-world-game.cjs").projectWorldState(attacker.world, "");
+    const offline = create("player");
+    offline.world = structuredClone(snapshot);
+    offline.reconcileConquestReports();
+    expect(offline.world.privatePlayers.player.battleReports[0]).toMatchObject({ kind: "territory-loss", capturedOwnGenerals: [{ id: "guard", name: "守地将领" }] });
+    const summary = require("../electron/grid-world-game.cjs").battleReportSummary(reports[1]);
+    expect(summary).toContain("领地被攻方角色攻占");
+    expect(summary).toContain("我方被俘将领：守地将领");
+    defender.world.privatePlayers.player.battleReports = [];
+    const overlay = defender.captureLocalOverlay();
+    defender.world = structuredClone(snapshot);
+    defender.restoreLocalOverlay(overlay);
+    defender.reconcileConquestReports();
+    expect(defender.world.privatePlayers.player.battleReports).toEqual([]);
+    offline.world.playerEpochs.player = 1;
+    offline.world.privatePlayers.player = {};
+    offline.reconcileConquestReports();
+    expect(offline.world.privatePlayers.player.battleReports).toBeUndefined();
+    const forged = structuredClone(posted);
+    forged.changes.conquests.conquest.defenderLosses = 0;
+    expect(defender.validMapDelta({ ...item, record: signRecord(forged, identities.author.signingPrivateKey) })).toBe(false);
+  });
+
+  it("confirms a compacted pending treasure without losing or duplicating the local reward", () => {
+    const { author: instance, base } = coverageHarness();
+    instance.world.privatePlayers.author = { materials: { white: 0 }, treasureClaimRewards: {
+      old: { materialId: "white", amount: 1, status: "pending", credited: false, playerEpoch: 0 }
+    } };
+    instance.world.claimedTreasures.old = { treasureId: "old", materialId: "white", accountId: "author", epoch: 1, x: 1, y: 1, platformOrder: { timestamp: base + 50, commentId: "claim" } };
+    instance.publicMapBaselineOrder = { timestamp: base + 100, commentId: "covered" };
+    const history = { confirmationComplete: true, assembled: { records: [], incomplete: [] } };
+    instance.reconcileTreasureRewards(history);
+    expect(instance.world.privatePlayers.author.materials.white).toBe(1);
+    instance.world.privatePlayers.author.materials.white = 0;
+    const overlay = instance.captureLocalOverlay();
+    instance.world = require("../electron/grid-world-game.cjs").projectWorldState(instance.world, "");
+    instance.restoreLocalOverlay(overlay);
+    instance.reconcileTreasureRewards(history);
+    expect(instance.world.privatePlayers.author.materials.white).toBe(0);
+    expect(instance.world.privatePlayers.author.treasureClaimRewards.old.status).toBe("confirmed");
+  });
+
   it("persists updated local preferences into the active player state", async () => {
     const saveCache = vi.fn();
     const instance = service({ getAccount: () => ({ accountId: "player" }) });
@@ -1107,6 +1229,10 @@ describe("online world platform service", () => {
     expect(instance.world.claimedTreasures["treasure-1"].accountId).toBe("second");
     instance.reconcileTreasureRewards();
     instance.reconcileTreasureRewards();
+    expect(instance.world.privatePlayers.first.materials.white).toBe(2);
+    const history = { confirmationComplete: true, assembled: { incomplete: [], records: [claim("first", firstIdentity, 300), claim("second", secondIdentity, 200)] } };
+    instance.reconcileTreasureRewards(history);
+    instance.reconcileTreasureRewards(history);
     expect(instance.world.privatePlayers.first.materials.white).toBe(1);
     const forged = claim("first", firstIdentity, 400);
     forged.record = signRecord({ ...forged.record, mapDeltaId: "forged-scatter", changes: { ...forged.record.changes, treasureSpawns: { fake: {} } } }, firstIdentity.signingPrivateKey);
@@ -1153,6 +1279,7 @@ describe("online world platform service", () => {
     await instance.settleLocalClock();
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
     expect(instance.world.privatePlayers.player.materials.white).toBe(1);
+    expect(instance.world.privatePlayers.player.battleReports[0].treasures).toEqual([{ treasureId: "treasure-1", materialId: "white", amount: 1 }]);
     expect(instance.world.generals.general.cultivationCount).toBe(0);
     const own = assembleCommentRecords(comments).records.find((item: any) => item.record.changes?.claimedTreasures?.["treasure-1"]);
     expect(own).toBeTruthy();
@@ -1180,6 +1307,7 @@ describe("online world platform service", () => {
     loser.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [loserOwn, competing], incomplete: [] } });
     expect(loser.world.privatePlayers.player.materials.white).toBe(0);
     expect(loser.world.privatePlayers.player.treasureClaimRewards["treasure-1"].status).toBe("rejected");
+    expect(loser.world.privatePlayers.player.battleReports[0].treasures).toEqual([]);
     await expect(loser.submitIntent(cultivation)).rejects.toThrow(/素材不足/);
     expect(loser.world.generals.general.cultivationCount).toBe(0);
     expect(loser.world.players.player.gold).toBe(20_000);

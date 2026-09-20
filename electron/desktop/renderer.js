@@ -26,6 +26,9 @@ const appVersion = document.querySelector("#app-version");
 const settingsToggle = document.querySelector("#settings-toggle");
 const settingsPopover = document.querySelector("#settings-popover");
 const settingsDomainList = document.querySelector("#settings-domain-list");
+const settingsUpdateVersion = document.querySelector("#settings-update-version");
+const settingsUpdateStatus = document.querySelector("#settings-update-status");
+const settingsUpdateAction = document.querySelector("#settings-update-action");
 const officialNoticeOverlay = document.querySelector("#official-notice-overlay");
 const officialNoticeCard = document.querySelector("#official-notice-card");
 const officialNoticeEyebrow = document.querySelector("#official-notice-eyebrow");
@@ -39,6 +42,7 @@ const authorName = document.querySelector("#author-name");
 const authorLinkButtons = [...document.querySelectorAll("[data-author-link]")];
 const UI_THEME_STORAGE_KEY = "fengyue-link-ui-theme";
 let automaticLoginActive=false;
+let releaseNoticeDismissed=false;
 
 function applyReleaseIdentity(){
   const productName="风月联机工具";
@@ -66,6 +70,7 @@ function setOfficialNoticePoints(items){
 
 function showStartupOfficialNotice(){
   if(settingsOverlayMode)return;
+  releaseNoticeDismissed=false;
   officialNoticeCard.dataset.mode="announcement";
   officialNoticeEyebrow.textContent="版本号对照";
   officialNoticeVersion.textContent="启动检查";
@@ -73,8 +78,8 @@ function showStartupOfficialNotice(){
   officialNoticeMessage.textContent="每次启动都会对照当前版本号与发布版本号。";
   setOfficialNoticePoints(["当前版本","发布版本","每次启动"]);
   officialNoticeOpen.classList.remove("primary");
-  officialNoticeOpen.disabled=false;
-  officialNoticeOpen.textContent="检查并自动更新";
+  officialNoticeOpen.disabled=true;
+  officialNoticeOpen.textContent="正在检查…";
   officialNoticeAction.classList.add("primary");
   officialNoticeAction.disabled=false;
   officialNoticeAction.textContent="进入工具";
@@ -82,43 +87,87 @@ function showStartupOfficialNotice(){
   requestAnimationFrame(()=>officialNoticeAction.focus());
 }
 
-function showReleaseVerificationFailure(security,update={}){
+function renderUpdateSettings(security={},update={}){
+  const current=update.currentVersion||security.currentVersion;
+  const latest=update.latestVersion||security.latestVersion;
+  settingsUpdateVersion.textContent=latest&&latest!==current?`v${current||"?"} → v${latest}`:`当前 v${current||"?"}`;
+  settingsUpdateStatus.textContent=update.message||security.message||"尚未核验 GitHub 最新版本。";
+  const busy=["checking","downloading","verifying","installing"].includes(update.status);
+  const deferredReady=update.status==="ready"&&update.installDeferred;
+  settingsUpdateAction.disabled=busy||deferredReady||update.status==="development";
+  settingsUpdateAction.classList.toggle("primary",["available","ready"].includes(update.status));
+  settingsUpdateAction.textContent=update.status==="available"
+    ? "一键更新"
+    : update.status==="ready"
+      ? deferredReady?"退出后安装":"安装并重启"
+      : update.status==="downloading"
+        ? `下载 ${Math.round(Number(update.percent)||0)}%`
+        : update.status==="verifying"
+          ? "正在验证"
+          : update.status==="installing"
+            ? "正在安装"
+            : update.status==="checking"
+              ? "正在核验"
+              : "检查最新版本";
+}
+
+function showReleaseVerificationStatus(security,update={}){
   if(settingsOverlayMode)return;
-  const automaticUpdate=["downloading","verifying","installing","ready"].includes(update?.status);
-  const updateRequired=security?.status==="update-required"||automaticUpdate;
-  officialNoticeCard.dataset.mode=updateRequired?"update-required":"blocked";
-  officialNoticeEyebrow.textContent="版本号对照";
-  officialNoticeVersion.textContent=automaticUpdate?"正在更新":updateRequired?"发现新版本":"未完成";
-  officialNoticeTitle.textContent=automaticUpdate
-    ? update.status==="ready"?"新版本已下载":"正在更新版本"
-    : updateRequired?"请更新版本":"版本号对照未完成";
-  officialNoticeMessage.textContent=automaticUpdate
-    ? update.message||security.message||"正在获取发布版本。"
-    : security?.message||"版本号对照未完成。";
+  const status=update?.status||"idle";
+  const updating=["downloading","verifying","installing","ready"].includes(status);
+  const deferredReady=status==="ready"&&update.installDeferred;
+  const securityBlocked=!security?.verified&&["blocked","unavailable"].includes(security?.status);
+  const available=status==="available"||security?.status==="update-required";
+  officialNoticeCard.dataset.mode=securityBlocked?"blocked":available?"update-required":updating?"updating":status;
+  officialNoticeEyebrow.textContent="GitHub 版本核验";
+  officialNoticeVersion.textContent=securityBlocked?"校验未通过":available?"发现新版本":updating?"正在更新":status==="current"?"已是最新":status==="error"?"核验未完成":"正在检查";
+  officialNoticeTitle.textContent=securityBlocked
+    ? "本地版本校验未通过"
+    : available
+      ? "发现新的官方版本"
+      : status==="current"
+        ? "当前已是最新版本"
+        : status==="ready"
+          ? "新版本已准备完成"
+          : updating
+            ? "正在更新版本"
+            : status==="error"
+              ? "GitHub 版本核验未完成"
+              : "正在核验最新版本";
+  officialNoticeMessage.textContent=securityBlocked
+    ? security?.message||"本地程序完整性校验未通过。"
+    : update?.message||"正在读取 GitHub 官方发布版本。";
   const latestVersion=update?.latestVersion||security?.latestVersion;
-  setOfficialNoticePoints([`当前 ${security?.currentVersion?`v${security.currentVersion}`:"版本未知"}`,`发布 ${latestVersion?`v${latestVersion}`:"版本未知"}`]);
-  officialNoticeOpen.classList.toggle("primary",!automaticUpdate);
-  officialNoticeOpen.disabled=automaticUpdate;
-  officialNoticeOpen.textContent=automaticUpdate?"自动更新中…":update?.status==="error"?"重试自动更新":"检查并自动更新";
-  officialNoticeAction.classList.toggle("primary",automaticUpdate);
-  officialNoticeAction.disabled=automaticUpdate;
-  officialNoticeAction.textContent=automaticUpdate?(update.status==="ready"?"关闭工具后自动安装":"自动更新中…"):"退出工具";
+  setOfficialNoticePoints([`当前 ${security?.currentVersion?`v${security.currentVersion}`:"版本未知"}`,`发布 ${latestVersion?`v${latestVersion}`:"正在读取"}`]);
+  officialNoticeOpen.classList.toggle("primary",available||status==="ready");
+  officialNoticeOpen.disabled=securityBlocked||deferredReady||["checking","downloading","verifying","installing"].includes(status);
+  officialNoticeOpen.textContent=available
+    ? "一键更新"
+    : status==="ready"
+      ? deferredReady?"退出后安装":"安装并重启"
+      : ["downloading","verifying","installing"].includes(status)
+        ? "更新处理中…"
+        : status==="checking"
+          ? "正在核验…"
+          : "重新核验";
+  officialNoticeAction.classList.toggle("primary",!available&&!updating&&!securityBlocked);
+  officialNoticeAction.disabled=["downloading","verifying","installing"].includes(status);
+  officialNoticeAction.textContent=securityBlocked?"退出工具":available?"暂不更新":updating?status==="ready"?"稍后安装":"更新处理中…":"进入工具";
   officialNoticeOverlay.classList.remove("hidden");
-  requestAnimationFrame(()=>(automaticUpdate?officialNoticeAction:officialNoticeOpen).focus());
+  requestAnimationFrame(()=>(available?officialNoticeOpen:officialNoticeAction).focus());
 }
 
 function renderReleaseVerificationResult(next){
   const security=next?.releaseSecurity||{};
   const update=next?.appUpdate||{};
-  const automaticUpdate=["downloading","verifying","installing","ready"].includes(update.status);
-  // Packaged builds only become verified after the signed runtime check;
-  // development launches are already verified by definition. In both cases,
-  // release the login surface as soon as the backend confirms that state.
-  if(security.verified&&!(!next?.loggedIn&&automaticUpdate)){
+  renderUpdateSettings(security,update);
+  const securityBlocked=!security.verified&&["blocked","unavailable"].includes(security.status);
+  const updating=["downloading","verifying","installing","ready"].includes(update.status);
+  if(releaseNoticeDismissed&&!securityBlocked&&!updating){
     officialNoticeOverlay.classList.add("hidden");
     return;
   }
-  if(automaticUpdate||["blocked","unavailable","update-required"].includes(security.status))showReleaseVerificationFailure(security,update);
+  showReleaseVerificationStatus(security,update);
 }
 
 function initialUiTheme(){
@@ -1583,17 +1632,22 @@ async function submitCredentials({automatic=autoLoginInput.checked}={}){
 loginForm.addEventListener("submit",event=>{event.preventDefault();invoke(()=>submitCredentials()).catch(()=>{})});
 autoLoginInput.addEventListener("change",()=>{if(autoLoginInput.checked)rememberInput.checked=true;if(state)render(state)});
 rememberInput.addEventListener("change",()=>{if(!rememberInput.checked)autoLoginInput.checked=false;if(state)render(state)});
-officialNoticeOpen.addEventListener("click",()=>invoke(async()=>{
-  officialNoticeOpen.disabled=true;
-  officialNoticeOpen.textContent="正在检查…";
-  const update=await api.checkForUpdates();
+async function runUpdateAction(){
+  releaseNoticeDismissed=false;
+  const currentStatus=state?.appUpdate?.status;
+  const update=["available","ready"].includes(currentStatus)
+    ? await api.requestAppUpdate()
+    : await api.checkForUpdates();
   if(update?.status==="current")toast("当前已是最新官方版本");
-  else if(update?.status==="error")toast(update.message||"自动更新暂未完成，请检查网络后重试");
+  else if(update?.status==="error")toast(update.message||"版本更新暂未完成，请检查网络后重试");
   return update;
-}).catch(()=>{}));
+}
+officialNoticeOpen.addEventListener("click",()=>invoke(runUpdateAction).catch(()=>{}));
+settingsUpdateAction.addEventListener("click",()=>invoke(runUpdateAction).catch(()=>{}));
 officialNoticeAction.addEventListener("click",()=>{
-  if(officialNoticeCard.dataset.mode==="announcement"){officialNoticeOverlay.classList.add("hidden");return}
-  void api.quitApp();
+  if(officialNoticeCard.dataset.mode==="blocked"){void api.quitApp();return}
+  releaseNoticeDismissed=true;
+  officialNoticeOverlay.classList.add("hidden");
 });
 document.querySelector("#google-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("google");toast("请在 Google 认证窗口中完成登录")}).catch(()=>{}));
 document.querySelector("#telegram-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("telegram");toast("请在 Telegram 认证窗口中完成登录")}).catch(()=>{}));
@@ -1804,7 +1858,7 @@ document.querySelector("#submit-round").addEventListener("click",()=>invoke(asyn
 document.querySelector("#copy-logs").addEventListener("click",()=>invoke(async()=>{const entries=orderedSessionLogs();if(!entries.length)throw new Error("当前还没有日志");await api.copyText(entries.map(entry=>JSON.stringify(entry)).join("\n"));toast(`已复制 ${entries.length} 条本次运行日志`)}).catch(()=>{}));
 window.addEventListener("resize",syncSurfaceBounds);
 new ResizeObserver(syncSurfaceBounds).observe(slot);
-api.onState(next=>{const previous=state;consumeStateEffects(next,previous);render(next);if(next.roundCompleted)toast("本轮回复已就绪");if(next.roundError)toast(next.roundError);if(next.workLoadError)toast(next.workLoadError);if(next.introUnavailable)toast("作品介绍暂时不可用");if(next.protocolError)console.warn("会话同步重试",next.protocolError);if(next.messageOperationCompleted)toast("所有成员的对话已更新");if(next.messageOperationError)toast(`对话更新失败：${next.messageOperationError}`);if(next.hostModelChanged)toast("房主已更换平台模型");if(next.roomChatError)toast(next.roomChatError);if(next.appUpdateChanged&&next.appUpdate?.status==="ready")toast(next.appUpdate.message);if(next.appUpdateChanged&&next.appUpdate?.status==="error"&&next.releaseSecurity?.verified)toast(next.appUpdate.message)});
+api.onState(next=>{const previous=state;consumeStateEffects(next,previous);render(next);if(next.roundCompleted)toast("本轮回复已就绪");if(next.roundError)toast(next.roundError);if(next.workLoadError)toast(next.workLoadError);if(next.introUnavailable)toast("作品介绍暂时不可用");if(next.protocolError)console.warn("会话同步重试",next.protocolError);if(next.messageOperationCompleted)toast("所有成员的对话已更新");if(next.messageOperationError)toast(`对话更新失败：${next.messageOperationError}`);if(next.hostModelChanged)toast("房主已更换平台模型");if(next.roomChatError)toast(next.roomChatError);if(next.appUpdateChanged&&next.appUpdate?.status==="available"&&previous?.appUpdate?.latestVersion!==next.appUpdate.latestVersion)toast(`发现新版本 v${next.appUpdate.latestVersion}`);if(next.appUpdateChanged&&next.appUpdate?.status==="ready")toast(next.appUpdate.message);if(next.appUpdateChanged&&next.appUpdate?.status==="error"&&next.releaseSecurity?.verified)toast(next.appUpdate.message)});
 api.onGameFrame(frame=>{if(frame?.reset){resetGameFrame();return}if(!frame?.bytes||state?.backgroundPages?.gamePresentationAllowed===false)return;pendingGameFrame=frame;void drainGameFrames()});
 api.onOnlineWorldState(next=>renderOnlineWorld(next));
 api.onLog(entry=>{if(state?.isAdmin)receiveSessionLog(entry)});

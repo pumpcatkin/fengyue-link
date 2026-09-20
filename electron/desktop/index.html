@@ -286,6 +286,10 @@
           <button type="button" data-author-link="github"><span>GitHub 下载页</span><small>固定下载页</small></button>
         </div>
       </div>
+      <div class="settings-group settings-update-group">
+        <div class="settings-group-head"><span><small>版本更新</small><b id="settings-update-version">正在核验</b></span><button id="settings-update-action" type="button">检查最新版本</button></div>
+        <p id="settings-update-status">正在读取 GitHub 官方发布版本。</p>
+      </div>
       <div class="settings-group">
         <div class="settings-group-head"><span><small>切换节点</small><b>可用节点</b></span><button id="settings-refresh-domains" type="button">重新检测</button></div>
         <p>切换节点会退出当前账号，并使用所选节点重新登录。</p>
@@ -312,12 +316,12 @@
           <span>当前版本</span><span>发布版本</span><span>每次启动</span>
         </div>
         <footer class="official-notice-actions">
-          <button id="official-notice-open" type="button">检查并自动更新</button>
+          <button id="official-notice-open" type="button">检查最新版本</button>
           <button id="official-notice-action" class="primary" type="button">进入工具</button>
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v0.15.7</div>
+    <div id="app-version" aria-label="当前版本">v0.15.8</div>
     <div id="model-loading" class="model-loading hidden" role="status" aria-live="polite">
       <span class="model-loading-logo" aria-hidden="true">✦</span>
       <div><strong id="model-loading-title">正在生成</strong><small id="model-loading-detail"></small></div>

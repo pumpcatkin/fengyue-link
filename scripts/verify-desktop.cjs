@@ -72,8 +72,8 @@ if (process.type === "renderer") {
     try {
       await window.loadFile(path.join(root, "electron/desktop/index.html"));
       await settle();
-      assert.equal(await evaluate(`document.querySelector('#official-notice-overlay').classList.contains('hidden')`), true);
-      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "正在对照版本号");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-overlay').classList.contains('hidden')`), false);
+      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "正在核验最新版本");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
       assert.equal(await evaluate(`!document.querySelector('#home-page').classList.contains('hidden')`), true);
       fs.writeFileSync(path.join(outputDir, "startup-login-ready.png"), (await window.webContents.capturePage()).toPNG());

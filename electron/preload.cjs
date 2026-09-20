@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   getReleaseChannel: () => ipcRenderer.invoke("app:get-release-channel"),
   openOfficialReleasePage: () => ipcRenderer.invoke("app:open-official-release-page"),
   checkForUpdates: () => ipcRenderer.invoke("app:check-for-updates"),
+  requestAppUpdate: () => ipcRenderer.invoke("app:request-update"),
   getAuthorInfo: () => ipcRenderer.invoke("app:get-author-info"),
   openAuthorLink: key => ipcRenderer.invoke("app:open-author-link", key),
   quitApp: () => ipcRenderer.invoke("app:quit"),

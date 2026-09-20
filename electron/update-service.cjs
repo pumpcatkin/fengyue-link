@@ -22,6 +22,7 @@ class OfficialUpdateService {
     this.installing = false;
     this.installTimer = null;
     this.downloadedFile = null;
+    this.updateApproved = false;
     this.updateState = this.makeState(this.isPackaged ? "idle" : "development", this.isPackaged
       ? "启动后会自动检查官方更新"
       : "开发模式不运行安装包更新");
@@ -69,7 +70,7 @@ class OfficialUpdateService {
   async start() {
     if (!this.isPackaged || this.started) return this.state();
     this.started = true;
-    this.updater.autoDownload = true;
+    this.updater.autoDownload = false;
     this.updater.autoInstallOnAppQuit = false;
     this.updater.allowPrerelease = false;
     this.bind();
@@ -80,16 +81,14 @@ class OfficialUpdateService {
     if (!this.isPackaged) return this.state();
     if (!this.started) {
       this.started = true;
-      this.updater.autoDownload = true;
+      this.updater.autoDownload = false;
       this.updater.autoInstallOnAppQuit = false;
       this.updater.allowPrerelease = false;
       this.bind();
     }
     if (this.installing) return this.state();
-    if (this.downloadedFile) {
-      if (this.canInstallNow()) this.scheduleInstall(this.updateState.latestVersion || this.currentVersion);
-      return this.state();
-    }
+    if (["downloading", "verifying", "installing", "ready"].includes(this.updateState.status)) return this.state();
+    if (this.downloadedFile) return this.state();
     if (this.checkPromise) return this.checkPromise;
     this.setState("checking", "正在检查官方更新…");
     this.checkPromise = (async () => {
@@ -107,10 +106,38 @@ class OfficialUpdateService {
 
   onUpdateAvailable(info) {
     const version = parseVersion(info?.version)?.raw || null;
-    this.setState("downloading", version ? `正在自动下载 v${version}…` : "正在自动下载官方更新…", {
+    this.updateApproved = false;
+    this.setState("available", version ? `发现新版本 v${version}，可由您选择是否更新` : "发现新的官方版本，可由您选择是否更新", {
+      latestVersion: version,
+      percent: null
+    });
+  }
+
+  async requestUpdate() {
+    if (!this.isPackaged) return this.state();
+    if (!this.started) await this.start();
+    if (this.installing) return this.state();
+    if (this.downloadedFile) {
+      this.updateApproved = true;
+      if (this.canInstallNow()) this.scheduleInstall(this.updateState.latestVersion || this.currentVersion);
+      return this.state();
+    }
+    if (this.updateState.status !== "available") {
+      await this.checkNow();
+      if (this.updateState.status !== "available") return this.state();
+    }
+    this.updateApproved = true;
+    const version = this.updateState.latestVersion;
+    this.setState("downloading", version ? `正在下载 v${version}…` : "正在下载官方更新…", {
       latestVersion: version,
       percent: 0
     });
+    try {
+      await this.updater.downloadUpdate();
+    } catch (error) {
+      this.onError(error);
+    }
+    return this.state();
   }
 
   onUpdateUnavailable(info) {
@@ -122,7 +149,7 @@ class OfficialUpdateService {
   onDownloadProgress(progress) {
     const percent = Math.min(100, Math.max(0, Number(progress?.percent || 0)));
     const version = this.updateState.latestVersion;
-    this.setState("downloading", `正在自动下载${version ? ` v${version}` : "官方更新"}（${percent.toFixed(0)}%）…`, {
+    this.setState("downloading", `正在下载${version ? ` v${version}` : "官方更新"}（${percent.toFixed(0)}%）…`, {
       latestVersion: version,
       percent,
       transferred: Number(progress?.transferred || 0),
@@ -133,7 +160,7 @@ class OfficialUpdateService {
   onError(error) {
     if (this.installing) return;
     const detail = String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 300);
-    this.setState("error", `自动更新暂未完成：${detail}。请检查网络后重试。`, {
+    this.setState("error", `版本更新暂未完成：${detail}。请检查网络后重试。`, {
       latestVersion: this.updateState.latestVersion,
       error: detail
     });
@@ -141,6 +168,14 @@ class OfficialUpdateService {
 
   async verifyAndInstall(info) {
     if (this.installing) return;
+    if (!this.updateApproved) {
+      const version = parseVersion(info?.version)?.raw || this.updateState.latestVersion;
+      this.setState("available", version ? `发现新版本 v${version}，可由您选择是否更新` : "发现新的官方版本，可由您选择是否更新", {
+        latestVersion: version,
+        percent: null
+      });
+      return;
+    }
     try {
       const version = parseVersion(info?.version)?.raw;
       if (!version || compareVersions(version, this.currentVersion) <= 0) {
@@ -164,6 +199,8 @@ class OfficialUpdateService {
         throw new ReleaseSecurityError("update-installer-mismatch", "下载的安装包未通过官方签名清单完整性验证");
       }
       this.downloadedFile = installerPath;
+      // Installation on quit is enabled only after the player explicitly chose
+      // the one-click update action.
       this.updater.autoInstallOnAppQuit = true;
       if (!this.canInstallNow()) {
         this.setState("ready", `v${version} 已验证，将在退出当前账号或关闭工具后自动安装`, {

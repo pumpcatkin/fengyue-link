@@ -17,6 +17,7 @@ afterEach(() => {
 function updater() {
   const value: any = new EventEmitter();
   value.checkForUpdates = vi.fn(async () => null);
+  value.downloadUpdate = vi.fn(async () => []);
   value.quitAndInstall = vi.fn();
   return value;
 }
@@ -50,7 +51,7 @@ function updateFixture(canInstallNow = () => true) {
   return { service, fakeUpdater, releaseSecurity, file, update };
 }
 
-describe("official installer auto-update", () => {
+describe("official installer optional update", () => {
   it("checks GitHub updates only for a packaged application", async () => {
     const fakeUpdater = updater();
     const service = new OfficialUpdateService({
@@ -64,13 +65,15 @@ describe("official installer auto-update", () => {
     expect(service.state().status).toBe("development");
   });
 
-  it("enables automatic download while withholding exit-time installation until verification", async () => {
+  it("checks for a new version without downloading or enabling installation", async () => {
     const { service, fakeUpdater } = updateFixture();
     await service.start();
-    expect(fakeUpdater.autoDownload).toBe(true);
+    expect(fakeUpdater.autoDownload).toBe(false);
     expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
     expect(fakeUpdater.allowPrerelease).toBe(false);
     expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+    expect(fakeUpdater.downloadUpdate).not.toHaveBeenCalled();
+    expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
   });
 
   it("lets the pre-login UI retry the same automatic updater without opening a browser", async () => {
@@ -81,8 +84,26 @@ describe("official installer auto-update", () => {
     expect(service.state().status).toBe("checking");
   });
 
-  it("verifies the signed installer hash before silently installing and restarting", async () => {
+  it("leaves an available update optional until the player requests it", async () => {
     const { service, fakeUpdater, releaseSecurity, file } = updateFixture();
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+
+    expect(service.state()).toMatchObject({ status: "available", latestVersion: "0.12.7" });
+    expect(fakeUpdater.downloadUpdate).not.toHaveBeenCalled();
+    expect(fakeUpdater.autoInstallOnAppQuit).toBe(false);
+    await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
+    expect(releaseSecurity.fetchSignedUpdate).not.toHaveBeenCalled();
+    expect(fakeUpdater.quitAndInstall).not.toHaveBeenCalled();
+    expect(service.state().status).toBe("available");
+  });
+
+  it("downloads and verifies only after the player requests the one-click update", async () => {
+    const { service, fakeUpdater, releaseSecurity, file } = updateFixture();
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    await service.requestUpdate();
+    expect(fakeUpdater.downloadUpdate).toHaveBeenCalledOnce();
     await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(releaseSecurity.fetchSignedUpdate).toHaveBeenCalledWith("0.12.7");
@@ -90,9 +111,32 @@ describe("official installer auto-update", () => {
     expect(fakeUpdater.quitAndInstall).toHaveBeenCalledWith(true, true);
   });
 
+  it("does not restart version checks while an approved download is in progress", async () => {
+    const { service, fakeUpdater } = updateFixture();
+    let finishDownload!: () => void;
+    fakeUpdater.downloadUpdate.mockImplementation(() => new Promise<unknown[]>(resolve => {
+      finishDownload = () => resolve([]);
+    }));
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+
+    const request = service.requestUpdate();
+    await Promise.resolve();
+    expect(service.state()).toMatchObject({ status: "downloading", latestVersion: "0.12.7" });
+    await service.checkNow();
+    expect(fakeUpdater.checkForUpdates).toHaveBeenCalledOnce();
+    expect(service.state()).toMatchObject({ status: "downloading", latestVersion: "0.12.7" });
+
+    finishDownload();
+    await request;
+  });
+
   it("rejects a modified installer and never schedules it for installation", async () => {
     const { service, fakeUpdater, file } = updateFixture();
     writeFileSync(file, "tampered installer", "utf8");
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    await service.requestUpdate();
     await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(service.state().status).toBe("error");
@@ -105,6 +149,9 @@ describe("official installer auto-update", () => {
 
   it("defers an authenticated update while a room or account session is active", async () => {
     const { service, fakeUpdater, file } = updateFixture(() => false);
+    await service.start();
+    fakeUpdater.emit("update-available", { version: "0.12.7" });
+    await service.requestUpdate();
     await service.verifyAndInstall({ version: "0.12.7", downloadedFile: file });
     expect(service.state()).toMatchObject({ status: "ready", installDeferred: true });
     expect(fakeUpdater.autoInstallOnAppQuit).toBe(true);

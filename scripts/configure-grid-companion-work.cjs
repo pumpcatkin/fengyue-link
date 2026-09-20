@@ -9,8 +9,8 @@ const { createBundledGridCard, configurationDigest, normalizeConfiguration, rebi
 const { FYOW_SCHEMAS, canonicalJson, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { parseProgram } = require("../electron/online-world-runtime.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
-const { createWorld, createFallbackGeneral, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
-const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder } = require("../electron/online-world-service.cjs");
+const { createWorld, createFallbackGeneral, ensureGeneralProfile, publicGeneralState, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
+const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder, recordPlatformOrder } = require("../electron/online-world-service.cjs");
 
 const ORIGIN = "https://staging.aiero.cc";
 const PROFILE_ID = String(process.env.FYOW_PROFILE_ID || "default").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80) || "default";
@@ -646,6 +646,217 @@ async function main() {
   });
   try {
     await login(window, loadCredentials());
+    if (process.env.FYOW_RESTORE_DEPLOYED_GENERAL === "1") {
+      const targetAccountId = String(process.env.FYOW_RESTORE_TARGET_ACCOUNT_ID || "").trim();
+      const targetAccountName = String(process.env.FYOW_RESTORE_TARGET_ACCOUNT_NAME || "").trim();
+      const generalId = String(process.env.FYOW_RESTORE_GENERAL_ID || "").trim();
+      const sourceMapDeltaId = String(process.env.FYOW_RESTORE_SOURCE_MAP_DELTA_ID || "").trim();
+      const sourceRootId = String(process.env.FYOW_RESTORE_SOURCE_ROOT_ID || "").trim();
+      const removalMapDeltaId = String(process.env.FYOW_RESTORE_REMOVAL_MAP_DELTA_ID || "").trim();
+      const removalRootId = String(process.env.FYOW_RESTORE_REMOVAL_ROOT_ID || "").trim();
+      const targetX = Number(process.env.FYOW_RESTORE_X);
+      const targetY = Number(process.env.FYOW_RESTORE_Y);
+      const apply = process.env.FYOW_RESTORE_APPLY === "1";
+      const verifyOnly = process.env.FYOW_RESTORE_VERIFY_ONLY === "1";
+      if (!targetAccountId || !targetAccountName || !generalId || !sourceMapDeltaId || !sourceRootId || !removalMapDeltaId || !removalRootId
+        || !Number.isInteger(targetX) || !Number.isInteger(targetY)) throw new Error("恢复参数不完整");
+      const profileResponse = await api(window, "/go/api/account/profile");
+      if (!profileResponse.ok) throw new Error(`读取当前账号失败：HTTP ${profileResponse.status}`);
+      const profile = unwrap(profileResponse);
+      const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+      const username = String(profile?.name || profile?.username || profile?.email || "服主");
+      const makeService = () => new OnlineWorldService({
+        requestConsole: async (endpoint, options) => {
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(response.payload?.message || response.payload?.msg || `平台接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        requestGo: async (endpoint, options) => {
+          const response = await api(window, `/go/api${endpoint}`, options);
+          if (!response.ok) throw new Error(`作品页面接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        requestModel: async () => { throw new Error("将领恢复不应调用模型"); },
+        getAccount: () => ({ accountId, username }),
+        getIdentity: async () => loadOnlineWorldIdentity(accountId),
+        getOrigin: () => ORIGIN,
+        cacheFile: null,
+        onChange: () => {}
+      });
+      const readExactRecord = async (service, rootId, recordId) => {
+        const tailPage = Math.max(1, Number(service.historyTailPage || 1));
+        for (let page = 1; page <= tailPage; page += 1) {
+          const comments = await service.readHistoryPage(page);
+          const root = comments.find(item => String(item?.id || item?.comment_id || "") === rootId);
+          if (!root) continue;
+          const branches = await service.readCommentBranches(rootId, 100, { rootComment: root });
+          const records = assembleCommentRecords([root, ...branches]).records;
+          const item = records.find(candidate => String(candidate.record?.mapDeltaId || candidate.record?.id || "") === recordId);
+          if (!item) throw new Error(`评论 ${rootId} 没有组装出记录 ${recordId}`);
+          return item;
+        }
+        throw new Error(`没有找到来源评论 ${rootId}`);
+      };
+      const service = makeService();
+      let verifier = null;
+      try {
+        const opened = await service.open({ card, displayName: username, orientation: "any" });
+        if (!opened.initialized || !opened.isAuthority || accountId !== service.work?.authorAccountId) throw new Error("当前账号或设备不是这个服务器的服主");
+        await service.syncNow(true);
+        const sourceItem = await readExactRecord(service, sourceRootId, sourceMapDeltaId);
+        const removalItem = await readExactRecord(service, removalRootId, removalMapDeltaId);
+        if (!service.validMapDelta(sourceItem) || !service.validMapDelta(removalItem)) throw new Error("来源部署或移除记录未通过当前签名与结构校验");
+        const sourceRecord = sourceItem.record;
+        const removalRecord = removalItem.record;
+        const key = `${targetX},${targetY}`;
+        const sourceGeneral = sourceRecord.changes?.generals?.[generalId];
+        const sourceCell = sourceRecord.changes?.cells?.[key];
+        const removalCell = removalRecord.changes?.cells?.[key];
+        const currentPlayer = service.world?.players?.[targetAccountId];
+        const currentCell = service.world?.cells?.[key];
+        const currentEpoch = Math.max(0, Math.trunc(Number(service.world?.playerEpochs?.[targetAccountId] || 0)));
+        const conflicts = {
+          currentGeneral: Boolean(service.world?.generals?.[generalId]),
+          cells: Object.entries(service.world?.cells || {}).filter(([, cell]) => (cell?.generalIds || []).map(String).includes(generalId)).map(([cellKey]) => cellKey),
+          listings: Object.entries(service.world?.marketListings || {}).filter(([, listing]) => String(listing?.generalId || listing?.general?.id || "") === generalId).map(([listingId]) => listingId),
+          sales: Object.entries(service.world?.marketSales || {}).filter(([, sale]) => String(sale?.generalId || sale?.general?.id || "") === generalId).map(([saleId]) => saleId)
+        };
+        if (!currentPlayer || (targetAccountName && String(currentPlayer.accountName || "") !== targetAccountName)) throw new Error("目标玩家身份与恢复目标不一致");
+        if (!currentCell || String(currentCell.ownerAccountId || "") !== targetAccountId) throw new Error("恢复格子当前已不属于目标玩家");
+        if ((currentCell.generalIds || []).length >= 2) throw new Error("恢复格子的驻守将领已满");
+        if (sourceRecord.actorAccountId !== targetAccountId || Number(sourceRecord.playerEpoch || 0) !== currentEpoch
+          || !sourceGeneral || String(sourceGeneral.id || "") !== generalId || String(sourceGeneral.holderAccountId || "") !== targetAccountId
+          || sourceGeneral.status !== "deployed" || Number(sourceGeneral.location?.x) !== targetX || Number(sourceGeneral.location?.y) !== targetY
+          || !sourceCell || String(sourceCell.ownerAccountId || "") !== targetAccountId || !(sourceCell.generalIds || []).map(String).includes(generalId)) {
+          throw new Error("原始部署记录与目标玩家、纪元或坐标不一致");
+        }
+        if (removalRecord.actorAccountId !== targetAccountId || Number(removalRecord.playerEpoch || 0) !== currentEpoch
+          || removalRecord.changes?.generals?.[generalId] !== null || !removalCell
+          || (removalCell.generalIds || []).map(String).includes(generalId)
+          || comparePlatformOrder(sourceItem, removalItem) >= 0) throw new Error("后续移除记录与恢复证据链不一致");
+        const currentGeneralOrder = service.publicGeneralOrders?.[generalId] || {};
+        const removalOrder = recordPlatformOrder(removalItem);
+        if (Number(currentGeneralOrder.timestamp || 0) !== Number(removalOrder.timestamp || 0)
+          || String(currentGeneralOrder.commentId || "") !== String(removalOrder.commentId || "")) throw new Error("该将领在来源移除记录之后仍有其他公开变更");
+        const restoredGeneral = JSON.parse(JSON.stringify(sourceGeneral));
+        restoredGeneral.status = "deployed";
+        restoredGeneral.location = { x: targetX, y: targetY };
+        restoredGeneral.holderAccountId = targetAccountId;
+        restoredGeneral.experienceUpdatedAt = service.now();
+        ensureGeneralProfile(restoredGeneral);
+        const expectedPublicGeneral = publicGeneralState(restoredGeneral);
+        if (verifyOnly) {
+          const currentGeneral = service.world?.generals?.[generalId] || null;
+          const currentPublicGeneral = currentGeneral ? publicGeneralState(currentGeneral) : null;
+          process.stdout.write(`${JSON.stringify({
+            ok: Boolean(currentGeneral
+              && currentGeneral.status === "deployed"
+              && String(currentGeneral.holderAccountId || "") === targetAccountId
+              && Number(currentGeneral.location?.x) === targetX
+              && Number(currentGeneral.location?.y) === targetY
+              && (currentCell.generalIds || []).map(String).includes(generalId)),
+            workId,
+            seasonId: service.control.seasonId,
+            revision: service.world.revision,
+            general: currentGeneral ? {
+              id: currentGeneral.id,
+              name: currentGeneral.name,
+              status: currentGeneral.status,
+              location: currentGeneral.location,
+              holderAccountId: currentGeneral.holderAccountId,
+              power: currentGeneral.power,
+              interactionCount: Array.isArray(currentGeneral.interactionHistory) ? currentGeneral.interactionHistory.length : 0,
+              memoryEntryCount: Array.isArray(currentGeneral.memory?.entries) ? currentGeneral.memory.entries.length : 0,
+              memoryCharacters: String(currentGeneral.memoryText || "").length,
+              archiveSha256: crypto.createHash("sha256").update(canonicalJson(currentPublicGeneral)).digest("hex"),
+              sourceArchiveSha256: crypto.createHash("sha256").update(canonicalJson(expectedPublicGeneral)).digest("hex")
+            } : null,
+            cell: currentCell,
+            conflicts
+          }, null, 2)}\n`);
+          return;
+        }
+        if (conflicts.currentGeneral || conflicts.cells.length || conflicts.listings.length || conflicts.sales.length) throw new Error(`当前世界存在同 ID 冲突：${JSON.stringify(conflicts)}`);
+        const before = {
+          revision: Number(service.world.revision || 0),
+          playerEpoch: currentEpoch,
+          player: JSON.parse(JSON.stringify(currentPlayer)),
+          cell: JSON.parse(JSON.stringify(currentCell)),
+          publicGeneralOrder: service.publicGeneralOrders?.[generalId] || null
+        };
+        const preview = {
+          apply,
+          workId,
+          seasonId: service.control.seasonId,
+          targetAccountId,
+          targetAccountName: currentPlayer.accountName,
+          targetDisplayName: currentPlayer.displayName,
+          target: { x: targetX, y: targetY },
+          general: {
+            id: restoredGeneral.id,
+            name: restoredGeneral.name,
+            power: restoredGeneral.power,
+            interactionCount: Array.isArray(restoredGeneral.interactionHistory) ? restoredGeneral.interactionHistory.length : 0,
+            memoryEntryCount: Array.isArray(restoredGeneral.memory?.entries) ? restoredGeneral.memory.entries.length : 0,
+            memoryCharacters: String(restoredGeneral.memoryText || "").length,
+            archiveSha256: crypto.createHash("sha256").update(canonicalJson(expectedPublicGeneral)).digest("hex")
+          },
+          source: { mapDeltaId: sourceMapDeltaId, rootId: sourceRootId, order: recordPlatformOrder(sourceItem) },
+          removal: { mapDeltaId: removalMapDeltaId, rootId: removalRootId, order: recordPlatformOrder(removalItem) },
+          before
+        };
+        if (!apply) {
+          process.stdout.write(`${JSON.stringify({ ok: true, preview }, null, 2)}\n`);
+          return;
+        }
+        const auditDirectory = path.join(process.cwd(), "output", "general-recovery", new Date().toISOString().replace(/[:.]/g, "-"));
+        fs.mkdirSync(auditDirectory, { recursive: true });
+        const cachePath = path.join(app.getPath("userData"), "online-world", "cache", `${PROFILE_ID}.json`);
+        if (fs.existsSync(cachePath)) fs.copyFileSync(cachePath, path.join(auditDirectory, `${PROFILE_ID}.json.before`));
+        service.world.generals[generalId] = restoredGeneral;
+        currentCell.generalIds = [...new Set([...(currentCell.generalIds || []).map(String), generalId])];
+        service.world.revision = before.revision + 1;
+        const snapshot = await service.publishSnapshot();
+        fs.writeFileSync(path.join(auditDirectory, "recovery.json"), JSON.stringify({ preview, snapshotId: snapshot.snapshotId, restoredGeneral }, null, 2));
+        await sleep(1500);
+        verifier = makeService();
+        let verifiedState = await verifier.open({ card, displayName: username, orientation: "any" });
+        let verifiedGeneral = null;
+        let verifiedCell = null;
+        let verifiedArchiveSha256 = null;
+        let verified = false;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          if (attempt) verifiedState = await verifier.syncNow(true);
+          verifiedGeneral = verifier.world?.generals?.[generalId];
+          verifiedCell = verifier.world?.cells?.[key];
+          verifiedArchiveSha256 = verifiedGeneral
+            ? crypto.createHash("sha256").update(canonicalJson(verifiedGeneral)).digest("hex") : null;
+          verified = Boolean(verifiedState.initialized && verifiedGeneral && verifiedGeneral.status === "deployed"
+            && String(verifiedGeneral.holderAccountId || "") === targetAccountId
+            && (verifiedCell?.generalIds || []).map(String).includes(generalId)
+            && verifiedArchiveSha256 === preview.general.archiveSha256);
+          if (verified) break;
+          await sleep(3000);
+        }
+        if (!verified) throw new Error("恢复快照发布后平台回读校验不一致");
+        process.stdout.write(`${JSON.stringify({
+          ok: true,
+          applied: true,
+          workId,
+          seasonId: service.control.seasonId,
+          snapshotId: snapshot.snapshotId,
+          revision: verifier.world.revision,
+          auditDirectory,
+          general: preview.general,
+          cell: { key, ownerAccountId: verifiedCell.ownerAccountId, generalIds: verifiedCell.generalIds },
+          verification: { status: verifiedState.status, archiveSha256: verifiedArchiveSha256 }
+        }, null, 2)}\n`);
+      } finally {
+        verifier?.close();
+        service.close();
+      }
+      return;
+    }
     if (process.env.FYOW_PROBE_REPLY === "1") {
       const profile = unwrap(await api(window, "/go/api/account/profile"));
       const accountId = String(profile?.id || "");

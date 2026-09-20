@@ -52,11 +52,11 @@ const PLAYER_CULTIVATION_POWER_MULTIPLIER = 0.9;
 const GENERAL_BATTLE_EXPERIENCE_MAX_RATE = 0.48;
 const GENERAL_BATTLE_EXPERIENCE_MIN_RATE = 0.1;
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainMin: 0.0065, powerGainMax: 0.011 }),
-  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainMin: 0.010, powerGainMax: 0.0155 }),
-  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainMin: 0.0145, powerGainMax: 0.022 }),
-  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainMin: 0.020, powerGainMax: 0.031 }),
-  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainMin: 0.028, powerGainMax: 0.044 })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainMin: 0.025, powerGainMax: 0.045 }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainMin: 0.040, powerGainMax: 0.065 }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainMin: 0.060, powerGainMax: 0.095 }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainMin: 0.090, powerGainMax: 0.140 }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainMin: 0.130, powerGainMax: 0.200 })
 ]);
 const MATERIAL_IDS = Object.freeze(TALENT_MATERIALS.map(item => item.id));
 const CULTIVATION_MATERIAL_IDS = MATERIAL_IDS;

@@ -188,7 +188,7 @@ canvas {
 .legend { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; border-top: 3px solid var(--line); padding: 6px 9px; color: var(--muted); font-size: 9px; font-weight: 800; }
 .legend span { display: flex; align-items: center; gap: 4px; }
 .legend i { width: 11px; height: 11px; border: 2px solid var(--line); border-radius: 2px; }
-.legend .neutral { background: #b6c88d; } .legend .mine { background: #edbb59; } .legend .other { background: #c76757; }
+.legend .neutral { background: #b6c88d; } .legend .mine { background: #6993bd; } .legend .other { background: #c76757; }
 .legend-tip { margin-left: 0; }
 .legend button { padding: 3px 7px; font-size: 9px; }
 .legend #center-player { display: inline-grid; place-items: center; width: 26px; height: 24px; margin-left: auto; margin-right: 4px; border-width: 1px; background: #f7e4b2; color: var(--red-dark); padding: 0; box-shadow: 1px 1px 0 var(--shadow); }

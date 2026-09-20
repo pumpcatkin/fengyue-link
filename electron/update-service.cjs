@@ -17,22 +17,29 @@ class OfficialUpdateService {
     this.currentVersion = String(options.currentVersion || "");
     this.canInstallNow = typeof options.canInstallNow === "function" ? options.canInstallNow : () => true;
     this.onStateChange = typeof options.onStateChange === "function" ? options.onStateChange : () => {};
-    this.installDelayMs = Math.max(0, Number(options.installDelayMs ?? 800));
+    this.installDelayMs = Math.max(0, Number(options.installDelayMs ?? 0));
     this.started = false;
     this.checkPromise = null;
     this.installing = false;
     this.installTimer = null;
     this.downloadedFile = null;
     this.updateApproved = false;
+    this.downloadPromise = null;
+    this.verificationPromise = null;
     this.updateState = this.makeState(this.isPackaged ? "idle" : "development", this.isPackaged
       ? "启动后会自动检查官方更新"
       : "开发模式不运行安装包更新");
     this.listeners = {
-      checking: () => this.setState("checking", "正在检查官方更新…"),
+      checking: () => this.setState("checking", "正在获取最新版本信息"),
       available: info => this.onUpdateAvailable(info),
       unavailable: info => this.onUpdateUnavailable(info),
       progress: progress => this.onDownloadProgress(progress),
-      downloaded: info => { void this.verifyAndInstall(info); },
+      downloaded: info => {
+        this.verificationPromise = this.verifyAndInstall(info).finally(() => {
+          this.verificationPromise = null;
+        });
+        void this.verificationPromise;
+      },
       error: error => this.onError(error)
     };
   }
@@ -96,10 +103,14 @@ class OfficialUpdateService {
     if (["downloading", "verifying", "installing", "ready"].includes(this.updateState.status)) return this.state();
     if (this.downloadedFile) return this.state();
     if (this.checkPromise) return this.checkPromise;
-    this.setState("checking", "正在检查官方更新…");
+    this.setState("checking", "正在获取最新版本信息");
     this.checkPromise = (async () => {
       try {
-        await this.updater.checkForUpdates();
+        const result = await this.updater.checkForUpdates();
+        // electron-updater emits the result as events in normal operation. Also
+        // reconcile its documented return value so an adapter that only returns
+        // the result cannot leave the UI stuck in the checking state.
+        this.reconcileCheckResult(result);
       } catch (error) {
         this.onError(error);
       } finally {
@@ -110,10 +121,46 @@ class OfficialUpdateService {
     return this.checkPromise;
   }
 
+  reconcileCheckResult(result) {
+    if (this.updateState.status !== "checking") return;
+    if (!result) {
+      this.onError(new ReleaseSecurityError("missing-update-result", "GitHub 未返回最新版本信息"));
+      return;
+    }
+    const info = result?.updateInfo || result?.versionInfo;
+    const version = parseVersion(info?.version)?.raw || null;
+    if (!version) {
+      this.onError(new ReleaseSecurityError("invalid-update-version", "GitHub 最新版本号无效"));
+      return;
+    }
+    const available = typeof result?.isUpdateAvailable === "boolean"
+      ? result.isUpdateAvailable
+      : compareVersions(version, this.currentVersion) > 0;
+    const comparison = compareVersions(version, this.currentVersion);
+    if (comparison > 0 && available) this.onUpdateAvailable({ ...info, version });
+    else if (comparison === 0) this.onUpdateUnavailable({ ...info, version });
+    else {
+      this.onError(new ReleaseSecurityError(
+        "inconsistent-update-result",
+        comparison > 0
+          ? `GitHub 最新版本 v${version} 暂不适用于当前系统`
+          : `当前版本 v${this.currentVersion} 高于 GitHub 最新版本 v${version}`
+      ));
+    }
+  }
+
   onUpdateAvailable(info) {
     const version = parseVersion(info?.version)?.raw || null;
+    if (!version) {
+      this.onError(new ReleaseSecurityError("invalid-update-version", "GitHub 最新版本号无效"));
+      return;
+    }
+    if (compareVersions(version, this.currentVersion) <= 0) {
+      this.onUpdateUnavailable({ ...info, version });
+      return;
+    }
     this.updateApproved = false;
-    this.setState("available", version ? `发现新版本 v${version}，可由您选择是否更新` : "发现新的官方版本，可由您选择是否更新", {
+    this.setState("available", `发现新版本 v${version}，可由您选择是否更新`, {
       latestVersion: version,
       percent: null
     });
@@ -139,9 +186,21 @@ class OfficialUpdateService {
       percent: 0
     });
     try {
-      await this.updater.downloadUpdate();
+      this.downloadPromise = Promise.resolve(this.updater.downloadUpdate());
+      const downloadedFiles = await this.downloadPromise;
+      // update-downloaded is emitted before downloadUpdate resolves. Waiting for
+      // the async signature check makes one explicit click cover the full path.
+      if (this.verificationPromise) await this.verificationPromise;
+      else if (this.updateState.status === "downloading") {
+        const installerFile = Array.isArray(downloadedFiles)
+          ? downloadedFiles.find(file => /\.exe$/i.test(String(file || ""))) || downloadedFiles[0]
+          : null;
+        if (installerFile) await this.verifyAndInstall({ version, downloadedFile: installerFile });
+      }
     } catch (error) {
       this.onError(error);
+    } finally {
+      this.downloadPromise = null;
     }
     return this.state();
   }
@@ -149,6 +208,10 @@ class OfficialUpdateService {
   onUpdateUnavailable(info) {
     if (this.installing || this.downloadedFile) return;
     const version = parseVersion(info?.version)?.raw || this.currentVersion;
+    if (compareVersions(version, this.currentVersion) !== 0) {
+      this.onError(new ReleaseSecurityError("inconsistent-update-result", `GitHub 返回的最新版本 v${version} 与当前版本不一致`));
+      return;
+    }
     this.setState("current", "当前已是最新官方版本", { latestVersion: version });
   }
 
@@ -164,8 +227,20 @@ class OfficialUpdateService {
   }
 
   onError(error) {
-    if (this.installing) return;
+    const wasInstalling = this.installing;
+    this.installing = false;
+    if (this.installTimer) clearTimeout(this.installTimer);
+    this.installTimer = null;
     const detail = String(error?.message || error || "未知错误").replace(/\s+/g, " ").slice(0, 300);
+    if (wasInstalling && this.downloadedFile) {
+      this.setState("ready", `安装程序未能启动：${detail}。请点击“安装并重启”重试。`, {
+        latestVersion: this.updateState.latestVersion,
+        percent: 100,
+        installDeferred: false,
+        error: detail
+      });
+      return;
+    }
     this.setState("error", `版本更新暂未完成：${detail}。请检查网络后重试。`, {
       latestVersion: this.updateState.latestVersion,
       error: detail
@@ -188,6 +263,10 @@ class OfficialUpdateService {
         throw new ReleaseSecurityError("update-version-mismatch", "下载的更新版本号无效");
       }
       const signedUpdate = await this.releaseSecurity.fetchSignedUpdate(version);
+      const signedVersion = parseVersion(signedUpdate?.version)?.raw;
+      if (signedVersion !== version || compareVersions(signedVersion, this.currentVersion) <= 0) {
+        throw new ReleaseSecurityError("update-version-mismatch", "下载的更新版本与 GitHub 最新版本不一致");
+      }
       const installerPath = path.resolve(String(info?.downloadedFile || ""));
       if (!installerPath || !fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) {
         throw new ReleaseSecurityError("missing-update-installer", "自动更新缓存中缺少安装包");
@@ -230,8 +309,7 @@ class OfficialUpdateService {
       latestVersion: version,
       percent: 100
     });
-    this.installTimer = setTimeout(() => {
-      this.installTimer = null;
+    const install = () => {
       if (!this.canInstallNow()) {
         this.setState("ready", `v${version} 已验证，将在关闭工具后自动安装`, {
           latestVersion: version,
@@ -241,7 +319,19 @@ class OfficialUpdateService {
         return;
       }
       this.installing = true;
-      this.updater.quitAndInstall(true, true);
+      try {
+        this.updater.quitAndInstall(true, true);
+      } catch (error) {
+        this.onError(error);
+      }
+    };
+    if (this.installDelayMs === 0) {
+      install();
+      return;
+    }
+    this.installTimer = setTimeout(() => {
+      this.installTimer = null;
+      install();
     }, this.installDelayMs);
   }
 

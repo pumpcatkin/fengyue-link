@@ -16,7 +16,9 @@ describe("optional desktop updates", () => {
     expect(renderer).toContain('document.querySelector("#settings-update-status")');
     expect(renderer).toContain('document.querySelector("#settings-update-action")');
     expect(renderer).toContain("renderUpdateSettings(security,update)");
-    expect(renderer).toContain('? "一键更新"');
+    expect(renderer).toContain('? "更新并重启"');
+    expect(renderer).toContain('officialNoticeTitle.textContent="正在获取最新版本信息"');
+    expect(renderer).toContain(': "正在获取最新版本信息"');
   });
 
   it("routes checking separately from the player's explicit update request", () => {
@@ -24,6 +26,7 @@ describe("optional desktop updates", () => {
     expect(preload).toContain('requestAppUpdate: () => ipcRenderer.invoke("app:request-update")');
     expect(main).toContain('handleLocalIpc("app:check-for-updates", () => updateService.checkNow())');
     expect(main).toContain('handleLocalIpc("app:request-update", () => updateService.requestUpdate())');
+    expect(main).toContain("canInstallNow: () => true");
     expect(renderer).toContain('const update=["available","ready"].includes(currentStatus)');
     expect(renderer).toContain("? await api.requestAppUpdate()");
     expect(renderer).toContain(": await api.checkForUpdates()");

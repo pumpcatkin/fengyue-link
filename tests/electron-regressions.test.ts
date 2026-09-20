@@ -207,6 +207,9 @@ describe("Electron platform API regressions", () => {
     expect(login).toContain("const authenticationDeadline = Date.now() + 15000");
     expect(login).toContain("await this.loginPageWarmPromise");
     expect(login).toContain("setTimeout(resolve, 200)");
+    expect(login).toContain("attempt < 150");
+    expect(login).toContain("element.shadowRoot");
+    expect(login).toContain('input[name="username"]');
     expect(login).toContain('event: "authenticated"');
     expect(login).not.toContain("await this.refreshAccount(true)");
     expect(main).toContain("async loginWithFailover({ account, password, remember = true, autoLogin = true })");
@@ -219,6 +222,22 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain("账号实例“${profileId}”已经打开");
     expect(main).toContain('app.on("will-quit", () => {');
     expect(main).toContain("releaseProfileInstanceLock(profileInstanceLock);");
+  });
+
+  it("keeps behavior diagnostics across restarts and exports them with Ctrl+Shift+8", () => {
+    const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    const service = readFileSync(new URL("../electron/online-world-service.cjs", import.meta.url), "utf8");
+    expect(main).toContain("bindDiagnosticExportShortcut(webContents)");
+    expect(main).toContain("globalShortcut");
+    expect(main).toContain('CommandOrControl+Shift+8');
+    expect(main).toContain("registerDiagnosticGlobalShortcut()");
+    expect(main).toContain("unregisterDiagnosticGlobalShortcut()");
+    expect(main).toContain('String(input.code || "") === "Digit8"');
+    expect(main).toContain("exportDiagnosticLogToDesktop()");
+    expect(main).toContain('app.getPath("desktop")');
+    expect(main).not.toContain("fs.rmSync(this.sessionLogFile, { force: true });\n    catch {}");
+    expect(service).toContain('event: "player-behavior"');
+    expect(service).toContain('source: "public-ledger"');
   });
 
   it("uses the platform model endpoints and keeps guest context visible while waiting", () => {
@@ -998,7 +1017,7 @@ describe("Electron platform API regressions", () => {
     expect(renderer).not.toContain("verifyOfficialRelease");
     expect(html).not.toContain('id="release-security-card"');
     expect(html).toContain('id="official-notice-overlay"');
-    expect(html).toContain("正在对照版本号");
+    expect(html).toContain("正在获取最新版本信息");
     expect(html).toContain("github.com/pumpcatkin/fengyue-link/releases/latest");
     expect(html).toContain('id="official-notice-open" type="button">检查最新版本</button>');
     expect(html).toContain('id="settings-update-action" type="button">检查最新版本</button>');

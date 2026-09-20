@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, net, session, shell, Menu, safeStorage, clipboard, dialog } = require("electron");
+const { app, BrowserWindow, WebContentsView, ipcMain, net, session, shell, Menu, safeStorage, clipboard, dialog, globalShortcut } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -593,9 +593,9 @@ class AccountBackend {
     const sessionLogDirectory = path.dirname(this.sessionLogFile);
     fs.mkdirSync(sessionLogDirectory, { recursive: true });
     this.sessionLogPruneResult = pruneSessionLogDirectory(fs, sessionLogDirectory, {
-      maxAgeMs: 7 * 24 * 60 * 60 * 1000,
-      maxFiles: 20,
-      maxTotalBytes: 20 * 1024 * 1024
+      maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      maxFiles: 100,
+      maxTotalBytes: 100 * 1024 * 1024
     });
     fs.rmSync(this.sessionLogFile, { force: true });
     fs.writeFileSync(this.sessionLogFile, "", { encoding: "utf8", mode: 0o600 });
@@ -630,6 +630,8 @@ class AccountBackend {
     this.settingsSurfaceAttached = false;
     this.seenPackets = new Set();
     this.destroying = false;
+    this.diagnosticExportBusy = false;
+    this.diagnosticGlobalShortcutRegistered = false;
     this.loginInProgress = false;
     this.authSessionRevision = 0;
     this.authFailureStreak = 0;
@@ -744,6 +746,10 @@ class AccountBackend {
     // work document is ready and before its mandatory state-refresh reload.
     this.gameNetworkCaptureReady = Promise.resolve(false);
     this.anchor = this.createAnchorWindow();
+    this.registerDiagnosticGlobalShortcut();
+    for (const webContents of [this.window.webContents, this.surface.webContents, this.introSurface.webContents, this.gameSurface.webContents, this.anchor.webContents]) {
+      this.bindDiagnosticExportShortcut(webContents);
+    }
     this.bindSurfaceNavigation();
     this.statusTimer = setInterval(() => this.runBackgroundTask("login-state", () => this.refreshLoginState()), 5000);
     this.accountTimer = setInterval(() => this.runBackgroundTask("account", () => this.refreshAccount()), 20000);
@@ -1023,6 +1029,7 @@ class AccountBackend {
       view.setBackgroundColor(this.uiTheme === "light" ? "#f3e4d2" : "#17222c");
       view.setBounds(this.settingsSurfaceBounds());
       guardDesktopNavigation(view.webContents);
+      this.bindDiagnosticExportShortcut(view.webContents);
       await view.webContents.loadFile(path.join(__dirname, "desktop", "index.html"), { query: { settingsOverlay: "1" } });
       this.settingsSurface = view;
       return view;
@@ -2087,6 +2094,92 @@ class AccountBackend {
     return [...this.sessionLogs];
   }
 
+  bindDiagnosticExportShortcut(webContents) {
+    if (!webContents || webContents.isDestroyed?.() || webContents.__fengyueDiagnosticShortcutBound) return;
+    webContents.__fengyueDiagnosticShortcutBound = true;
+    webContents.on("before-input-event", (event, input) => {
+      const pressed = input?.type === "keyDown" && Boolean(input.control) && Boolean(input.shift)
+        && (String(input.code || "") === "Digit8" || String(input.key || "") === "8" || String(input.key || "") === "*");
+      if (!pressed || input.isAutoRepeat) return;
+      event.preventDefault();
+      this.triggerDiagnosticExport("webcontents");
+    });
+  }
+
+  registerDiagnosticGlobalShortcut() {
+    const accelerator = "CommandOrControl+Shift+8";
+    try {
+      const registered = globalShortcut.register(accelerator, () => this.triggerDiagnosticExport("global"));
+      this.diagnosticGlobalShortcutRegistered = Boolean(registered);
+      this.appendSessionLog("diagnostic-shortcut", {
+        event: registered ? "global-registered" : "global-register-failed",
+        accelerator
+      });
+      return registered;
+    } catch (error) {
+      this.appendSessionLog("diagnostic-shortcut", {
+        event: "global-register-error",
+        accelerator,
+        error: error?.message || String(error)
+      });
+      return false;
+    }
+  }
+
+  unregisterDiagnosticGlobalShortcut() {
+    if (!this.diagnosticGlobalShortcutRegistered) return;
+    try { globalShortcut.unregister("CommandOrControl+Shift+8"); } catch {}
+    this.diagnosticGlobalShortcutRegistered = false;
+  }
+
+  triggerDiagnosticExport(source = "unknown") {
+    if (this.destroying || this.diagnosticExportBusy) return;
+    this.diagnosticExportBusy = true;
+    this.runBackgroundTask("export-diagnostic-log", async () => {
+      try {
+        const file = this.exportDiagnosticLogToDesktop();
+        if (this.window && !this.window.isDestroyed()) {
+          await dialog.showMessageBox(this.window, {
+            type: "info",
+            title: "日志已保存",
+            message: "诊断日志已保存到桌面",
+            detail: file,
+            buttons: ["确定"],
+            defaultId: 0,
+            noLink: true
+          });
+        }
+        this.appendSessionLog("diagnostic-export", { event: "completed", source, file });
+      } finally {
+        this.diagnosticExportBusy = false;
+      }
+    });
+  }
+
+  exportDiagnosticLogToDesktop() {
+    this.appendSessionLog("diagnostic-export", { event: "requested", shortcut: "Ctrl+Shift+8" });
+    const directory = path.dirname(this.sessionLogFile);
+    const prefix = `${safeProfileId(this.profileId)}-`;
+    const files = fs.readdirSync(directory, { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".jsonl"))
+      .map(entry => path.join(directory, entry.name))
+      .sort((left, right) => fs.statSync(left).mtimeMs - fs.statSync(right).mtimeMs);
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").replace(/\.\d{3}Z$/, "");
+    const target = path.join(app.getPath("desktop"), `风月联机日志-${stamp}.txt`);
+    const header = [
+      "风月联机工具诊断日志",
+      `导出时间: ${new Date().toISOString()}`,
+      `配置实例: ${this.profileId}`,
+      `账号: ${this.account?.username || "未登录"}`,
+      `在线世界: ${this.onlineWorldService?.work?.id || "未打开"}`,
+      "每行均为一条按时间记录的 JSON 行为或诊断事件。",
+      ""
+    ].join("\n");
+    const body = files.map(file => fs.readFileSync(file, "utf8").trim()).filter(Boolean).join("\n");
+    atomicWriteFileSync(fs, target, `${header}${body}${body ? "\n" : ""}`, { encoding: "utf8", mode: 0o600 });
+    return target;
+  }
+
   rememberSeenPacket(value) {
     const key = String(value || "");
     if (!key) return;
@@ -3045,35 +3138,61 @@ class AccountBackend {
       }
       if (!reuseLoginPage) await this.loadSurfaceUrl(anchor, platformUrlForOrigin(this.origin, "/zh/signin").href, "账号登录页", 12000);
       this.appendSessionLog("login", { event: "page-ready", elapsedMs: Date.now() - startedAt, reused: reuseLoginPage });
-      const result = await anchor.webContents.executeJavaScript(`(async () => {
+      const fillLoginForm = () => anchor.webContents.executeJavaScript(`(async () => {
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        let account = null;
+        const roots = () => {
+          const found = [document];
+          for (let index = 0; index < found.length && index < 100; index += 1) {
+            const root = found[index];
+            for (const element of root.querySelectorAll?.('*') || []) if (element.shadowRoot) found.push(element.shadowRoot);
+            for (const frame of root.querySelectorAll?.('iframe') || []) {
+              try { if (frame.contentDocument) found.push(frame.contentDocument); } catch {}
+            }
+          }
+          return found;
+        };
+        const first = selector => roots().map(root => root.querySelector?.(selector)).find(Boolean) || null;
+        let accountElement = null;
         let password = null;
-        for (let attempt = 0; attempt < 50 && (!account || !password); attempt += 1) {
-          account = document.querySelector('#email,input[autocomplete="username"],input[placeholder*="邮箱"],input[placeholder*="用户名"]');
-          password = document.querySelector('#password,input[autocomplete="current-password"],input[type="password"]');
-          if (!account || !password) await sleep(100);
+        for (let attempt = 0; attempt < 150 && (!accountElement || !password); attempt += 1) {
+          accountElement = first('#email,input[name="email"],input[name="username"],input[autocomplete="email"],input[autocomplete="username"],input[type="email"],input[placeholder*="邮箱"],input[placeholder*="用户名"],input[placeholder*="账号"],input[placeholder*="email" i],input[placeholder*="user" i]');
+          password = first('#password,input[name="password"],input[autocomplete="current-password"],input[type="password"],input[placeholder*="密码"]');
+          if (!accountElement || !password) await sleep(200);
         }
-        if (!account || !password) return { ok:false, message:"找不到平台登录输入框" };
+        if (!accountElement || !password) return {
+          ok:false,
+          message:"找不到平台登录输入框",
+          diagnostic:{ url:location.href, readyState:document.readyState, inputs:roots().reduce((count,root)=>count+(root.querySelectorAll?.('input')?.length||0),0) }
+        };
         const setValue = (element,value) => {
-          const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value");
+          const Input = element?.ownerDocument?.defaultView?.HTMLInputElement || HTMLInputElement;
+          const descriptor = Object.getOwnPropertyDescriptor(Input.prototype,"value");
           descriptor?.set?.call(element,value);
           element.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:value}));
           element.dispatchEvent(new Event("change",{bubbles:true}));
         };
-        setValue(account, ${JSON.stringify(account)});
+        setValue(accountElement, ${JSON.stringify(account)});
         setValue(password, ${JSON.stringify(password)});
         await sleep(150);
-        const form = password.closest('form') || account.closest('form');
+        const form = password.closest('form') || accountElement.closest('form');
         const submit = form?.querySelector('button[type="submit"],input[type="submit"]')
-          || [...document.querySelectorAll('button')].find(button => /^(登录|登錄|Sign in)$/i.test((button.textContent || '').trim()));
+          || roots().flatMap(root => [...(root.querySelectorAll?.('button') || [])]).find(button => /^(登录|登錄|Sign in|Log in)$/i.test((button.textContent || '').trim()));
         if (!submit) return { ok:false, message:"找不到平台登录按钮" };
         for (let attempt = 0; attempt < 20 && (submit.disabled || submit.getAttribute('aria-disabled') === 'true'); attempt += 1) await sleep(50);
         if (submit.disabled || submit.getAttribute('aria-disabled') === 'true') return { ok:false, message:"登录按钮暂不可用，请检查输入内容" };
         submit.click();
         return { ok:true };
       })()`, true);
-      if (!result?.ok) throw new Error(result?.message || "无法提交登录");
+      let result = await fillLoginForm();
+      if (!result?.ok) {
+        this.appendSessionLog("login", { event: "form-not-found-reloading", elapsedMs: Date.now() - startedAt, origin: this.origin, diagnostic: result?.diagnostic || null });
+        await this.loadSurfaceUrl(anchor, platformUrlForOrigin(this.origin, "/zh/signin").href, "账号登录页", 20000);
+        result = await fillLoginForm();
+      }
+      if (!result?.ok) {
+        this.appendSessionLog("login", { event: "form-not-found", elapsedMs: Date.now() - startedAt, origin: this.origin, diagnostic: result?.diagnostic || null });
+        throw new Error(result?.message || "登录提交失败");
+      }
       this.appendSessionLog("login", { event: "submitted", elapsedMs: Date.now() - startedAt });
       let authenticatedSnapshot = null;
       const authenticationDeadline = Date.now() + 15000;
@@ -9410,6 +9529,7 @@ class AccountBackend {
   destroy() {
     if (this.destroying) return;
     this.destroying = true;
+    this.unregisterDiagnosticGlobalShortcut();
     this.cancelAutoModels();
     this.onlineWorldService.close();
     clearInterval(this.statusTimer);
@@ -9438,8 +9558,6 @@ class AccountBackend {
       }
     }
     if (this.anchor && !this.anchor.isDestroyed()) this.anchor.destroy();
-    try { fs.rmSync(this.sessionLogFile, { force: true }); }
-    catch {}
   }
 }
 
@@ -9521,7 +9639,9 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
     feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
     isPackaged: app.isPackaged,
     currentVersion: app.getVersion(),
-    canInstallNow: () => Boolean(backend && !backend.loggedIn && !backend.loginInProgress && !backend.room),
+    // The player has explicitly chosen "update and restart". Install as soon as
+    // the downloaded installer passes the signed release-manifest checks.
+    canInstallNow: () => true,
     onStateChange: () => {
       if (backend && !backend.destroying && mainWindow && !mainWindow.isDestroyed()) backend.emit({ appUpdateChanged: true });
     }

@@ -72,10 +72,10 @@ function showStartupOfficialNotice(){
   if(settingsOverlayMode)return;
   releaseNoticeDismissed=false;
   officialNoticeCard.dataset.mode="announcement";
-  officialNoticeEyebrow.textContent="版本号对照";
-  officialNoticeVersion.textContent="启动检查";
-  officialNoticeTitle.textContent="正在对照版本号";
-  officialNoticeMessage.textContent="每次启动都会对照当前版本号与发布版本号。";
+  officialNoticeEyebrow.textContent="版本更新";
+  officialNoticeVersion.textContent="正在获取";
+  officialNoticeTitle.textContent="正在获取最新版本信息";
+  officialNoticeMessage.textContent="正在连接 GitHub 官方发布页。";
   setOfficialNoticePoints(["当前版本","发布版本","每次启动"]);
   officialNoticeOpen.classList.remove("primary");
   officialNoticeOpen.disabled=true;
@@ -90,14 +90,16 @@ function showStartupOfficialNotice(){
 function renderUpdateSettings(security={},update={}){
   const current=update.currentVersion||security.currentVersion;
   const latest=update.latestVersion||security.latestVersion;
-  settingsUpdateVersion.textContent=latest&&latest!==current?`v${current||"?"} → v${latest}`:`当前 v${current||"?"}`;
-  settingsUpdateStatus.textContent=update.message||security.message||"尚未核验 GitHub 最新版本。";
+  settingsUpdateVersion.textContent=update.status==="checking"
+    ? "正在获取最新版本信息"
+    : latest&&latest!==current?`v${current||"?"} → v${latest}`:`当前 v${current||"?"}`;
+  settingsUpdateStatus.textContent=update.message||security.message||"正在获取最新版本信息";
   const busy=["checking","downloading","verifying","installing"].includes(update.status);
   const deferredReady=update.status==="ready"&&update.installDeferred;
   settingsUpdateAction.disabled=busy||deferredReady||update.status==="development";
   settingsUpdateAction.classList.toggle("primary",["available","ready"].includes(update.status));
   settingsUpdateAction.textContent=update.status==="available"
-    ? "一键更新"
+    ? "更新并重启"
     : update.status==="ready"
       ? deferredReady?"退出后安装":"安装并重启"
       : update.status==="downloading"
@@ -107,7 +109,7 @@ function renderUpdateSettings(security={},update={}){
           : update.status==="installing"
             ? "正在安装"
             : update.status==="checking"
-              ? "正在核验"
+              ? "正在获取"
               : "检查最新版本";
 }
 
@@ -119,8 +121,8 @@ function showReleaseVerificationStatus(security,update={}){
   const securityBlocked=!security?.verified&&["blocked","unavailable"].includes(security?.status);
   const available=status==="available"||security?.status==="update-required";
   officialNoticeCard.dataset.mode=securityBlocked?"blocked":available?"update-required":updating?"updating":status;
-  officialNoticeEyebrow.textContent="GitHub 版本核验";
-  officialNoticeVersion.textContent=securityBlocked?"校验未通过":available?"发现新版本":updating?"正在更新":status==="current"?"已是最新":status==="error"?"核验未完成":"正在检查";
+  officialNoticeEyebrow.textContent="GitHub 版本更新";
+  officialNoticeVersion.textContent=securityBlocked?"校验未通过":available?"发现新版本":updating?"正在更新":status==="current"?"已是最新":status==="error"?"获取未完成":"正在获取";
   officialNoticeTitle.textContent=securityBlocked
     ? "本地版本校验未通过"
     : available
@@ -132,8 +134,8 @@ function showReleaseVerificationStatus(security,update={}){
           : updating
             ? "正在更新版本"
             : status==="error"
-              ? "GitHub 版本核验未完成"
-              : "正在核验最新版本";
+              ? "GitHub 最新版本信息获取未完成"
+              : "正在获取最新版本信息";
   officialNoticeMessage.textContent=securityBlocked
     ? security?.message||"本地程序完整性校验未通过。"
     : update?.message||"正在读取 GitHub 官方发布版本。";
@@ -142,14 +144,14 @@ function showReleaseVerificationStatus(security,update={}){
   officialNoticeOpen.classList.toggle("primary",available||status==="ready");
   officialNoticeOpen.disabled=securityBlocked||deferredReady||["checking","downloading","verifying","installing"].includes(status);
   officialNoticeOpen.textContent=available
-    ? "一键更新"
+    ? "更新并重启"
     : status==="ready"
       ? deferredReady?"退出后安装":"安装并重启"
       : ["downloading","verifying","installing"].includes(status)
         ? "更新处理中…"
         : status==="checking"
-          ? "正在核验…"
-          : "重新核验";
+          ? "正在获取…"
+          : "重新获取";
   officialNoticeAction.classList.toggle("primary",!available&&!updating&&!securityBlocked);
   officialNoticeAction.disabled=["downloading","verifying","installing"].includes(status);
   officialNoticeAction.textContent=securityBlocked?"退出工具":available?"暂不更新":updating?status==="ready"?"稍后安装":"更新处理中…":"进入工具";

@@ -22,11 +22,11 @@ const PROPOSED_MINING_BALANCE = Object.freeze({ baseHourlyGold: 400, populationH
 const MINING_GRADE_YIELD_MULTIPLIERS = Object.freeze(RESOURCE_GRADES.map((_, index) => 2.8 + index * 0.18));
 
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainPctMin: 0.65, powerGainPctMax: 1.1, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainPctMin: 1, powerGainPctMax: 1.55, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainPctMin: 1.45, powerGainPctMax: 2.2, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainPctMin: 2, powerGainPctMax: 3.1, materialCount: 1, materialChoices: MATERIAL_TIERS }),
-  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainPctMin: 2.8, powerGainPctMax: 4.4, materialCount: 1, materialChoices: MATERIAL_TIERS })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainPctMin: 2.5, powerGainPctMax: 4.5, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainPctMin: 4, powerGainPctMax: 6.5, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainPctMin: 6, powerGainPctMax: 9.5, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainPctMin: 9, powerGainPctMax: 14, materialCount: 1, materialChoices: MATERIAL_TIERS }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainPctMin: 13, powerGainPctMax: 20, materialCount: 1, materialChoices: MATERIAL_TIERS })
 ]);
 
 const BALANCE_BASELINE = Object.freeze({

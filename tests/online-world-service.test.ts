@@ -1113,7 +1113,7 @@ describe("online world platform service", () => {
     expect(instance.applyMapDelta(forged)).toBe(false);
   });
 
-  it("withholds a newly conquered treasure from cultivation until its public claim survives a complete sync", async () => {
+  it("credits a conquered treasure immediately and removes it only if the public claim loses", async () => {
     const identity = generateOnlineWorldIdentity();
     const rivalIdentity = generateOnlineWorldIdentity();
     const now = 1_000_000 + 6 * 60 * 60 * 1000;
@@ -1150,15 +1150,15 @@ describe("online world platform service", () => {
     };
     const instance = makeInstance();
     const cultivation = { type: "cultivate-general", generalId: "general", goldInvestment: 5000, materialId: "white", idempotencyKey: "cultivate" };
-    await expect(instance.submitIntent(cultivation)).rejects.toThrow(/素材不足/);
+    await instance.settleLocalClock();
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
-    expect(instance.world.privatePlayers.player.materials.white).toBe(0);
+    expect(instance.world.privatePlayers.player.materials.white).toBe(1);
     expect(instance.world.generals.general.cultivationCount).toBe(0);
     const own = assembleCommentRecords(comments).records.find((item: any) => item.record.changes?.claimedTreasures?.["treasure-1"]);
     expect(own).toBeTruthy();
     expect(instance.pendingTreasureRewards()).toHaveLength(1);
     instance.reconcileTreasureRewards({ confirmationComplete: false, assembled: { records: [own], incomplete: [] } });
-    expect(instance.world.privatePlayers.player.materials.white).toBe(0);
+    expect(instance.world.privatePlayers.player.materials.white).toBe(1);
     instance.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [own], incomplete: [] } });
     instance.reconcileTreasureRewards({ confirmationComplete: true, assembled: { records: [own], incomplete: [] } });
     expect(instance.world.privatePlayers.player.materials.white).toBe(1);
@@ -1169,6 +1169,7 @@ describe("online world platform service", () => {
     comments.splice(0);
     const loser = makeInstance();
     await loser.settleLocalClock();
+    expect(loser.world.privatePlayers.player.materials.white).toBe(1);
     const loserOwn = assembleCommentRecords(comments).records.find((item: any) => item.record.changes?.claimedTreasures?.["treasure-1"]);
     const competingRecord = signRecord({
       ...loserOwn.record, mapDeltaId: "earlier-rival", actorAccountId: "rival",
@@ -2237,6 +2238,113 @@ describe("online world platform service", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("keeps full deployed-general archives in the owner overlay", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-deployed-archive-"));
+    const cacheFile = path.join(directory, "cache.json");
+    try {
+      const instance = service({ cacheFile, getAccount: () => ({ accountId: "player", username: "player@example" }) });
+      instance.work = { id: "work", authorAccountId: "author" };
+      instance.control = { seasonId: "season", authorityAccountId: "author" };
+      instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+      instance.world.players.player = { accountId: "player", displayName: "玩家", position: { x: 2, y: 2 }, carriedGeneralIds: [] };
+      instance.world.playerEpochs.player = 0;
+      instance.world.cells["2,2"] = { ownerAccountId: "player", soldiers: 10, generalIds: ["guard"] };
+      const guard = createFallbackGeneral({ id: "guard", name: "守将", gender: "female", holderAccountId: "player", power: 320 });
+      guard.status = "deployed";
+      guard.location = { x: 2, y: 2 };
+      instance.world.generals.guard = guard;
+      instance.saveCache();
+      const cached = instance.loadCache("work");
+      expect(cached.world.generals.guard).toMatchObject({ status: "deployed", location: { x: 2, y: 2 } });
+      expect(cached.localOverlay.generals.guard).toMatchObject({ status: "deployed", location: { x: 2, y: 2 } });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unproven public general removal and only recalls after location proof", () => {
+    const identity = generateOnlineWorldIdentity();
+    const diagnostics: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "player@example" }),
+      onDiagnostic: (detail: any) => diagnostics.push(detail)
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", position: { x: 2, y: 2 }, carriedGeneralIds: [] };
+    instance.world.playerEpochs.player = 0;
+    instance.world.cells["2,2"] = { ownerAccountId: "player", soldiers: 10, generalIds: ["guard"] };
+    const guard = createFallbackGeneral({ id: "guard", name: "守将", gender: "female", holderAccountId: "player", power: 320 });
+    guard.status = "deployed";
+    guard.location = { x: 2, y: 2 };
+    instance.world.generals.guard = guard;
+    const record = (mapDeltaId: string, generalTransitions: any, createdAt: number) => {
+      const signed = signRecord({
+        schema: "fyow.map-delta/1", mapDeltaId, gameId: instance.world.gameId, workId: "work", seasonId: "season",
+        actorAccountId: "player", participant: { displayName: "玩家" }, playerEpoch: 0,
+        deviceSigningPublicKey: identity.signingPublicKey, deviceEncryptionPublicKey: identity.encryptionPublicKey,
+        changes: {
+          cells: { "2,2": { ownerAccountId: "player", soldiers: 10, generalIds: [] } },
+          generals: { guard: null }, ...(generalTransitions ? { generalTransitions } : {})
+        }
+      }, identity.signingPrivateKey);
+      return { record: signed, sources: [{ id: `${mapDeltaId}-comment`, account_id: "player", created_at: createdAt }] };
+    };
+    expect(instance.applyMapDelta(record("legacy-remove", null, 1000))).toBe(true);
+    expect(instance.world.generals.guard).toMatchObject({ status: "deployed", location: { x: 2, y: 2 } });
+    expect(diagnostics).toContainEqual(expect.objectContaining({ event: "general-removal-rejected", generalId: "guard" }));
+    expect(instance.applyMapDelta(record("unproved-new-remove", {}, 1500))).toBe(false);
+    expect(instance.world.generals.guard).toMatchObject({ status: "deployed", location: { x: 2, y: 2 } });
+    expect(instance.applyMapDelta(record("proved-recall", {
+      guard: {
+        generalId: "guard", holderAccountId: "player", from: { x: 2, y: 2 },
+        targetStatus: "carried", nextHolderAccountId: "player", reason: "recalled"
+      }
+    }, 2000))).toBe(true);
+    expect(instance.world.generals.guard).toMatchObject({ status: "carried", location: null });
+    expect(instance.world.players.player.carriedGeneralIds).toContain("guard");
+  });
+
+  it("keeps a completed march locally while its public record waits for reconnect", async () => {
+    const identity = generateOnlineWorldIdentity();
+    let online = false;
+    let postSequence = 0;
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        if (!online) throw new Error("connection interrupted");
+        return { id: `posted-${++postSequence}`, account_id: "player", created_at: 2_000_000 + postSequence, ...options.body };
+      },
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", seed: "offline-march", startedAt: 1_000_000 });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = {};
+    instance.world.playerEpochs.player = 0;
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    instance.world.jobs.march = {
+      id: "march", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
+      path: [{ x: 1, y: 1 }, { x: 2, y: 1 }], generalIds: [], activeGeneralIds: [], soldiers: 1_000_000,
+      attack: true, startedAt: 1_000_000, finishAt: 1_500_000
+    };
+    const effects = await instance.settleLocalClock(2_000_000);
+    expect(effects.some((effect: any) => effect.type === "battle-won")).toBe(true);
+    expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+    expect(instance.world.jobs.march).toBeUndefined();
+    expect(instance.pendingIntentTransaction).toMatchObject({ phase: "prepared", intentType: "time-settle" });
+    online = true;
+    await instance.retryPendingIntentTransactionPublish();
+    expect(instance.pendingIntentTransaction.phase).toBe("published");
+    delete instance.world.cells["2,1"];
+    expect(instance.resolvePendingIntentTransaction()).toBe(true);
+    expect(instance.world.cells["2,1"].ownerAccountId).toBe("player");
+    expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
   });
 
   it("ignores a banned player map delta and stale player epoch", () => {

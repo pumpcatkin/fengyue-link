@@ -45,18 +45,41 @@ describe("grid world map task overlays", () => {
     const context: any = { ownAccountId: () => "self" };
     runInNewContext(colorSource, context);
     const colors = [] as string[];
+    const ownedColors = [] as string[];
     for (let y = 0; y < 8; y += 1) for (let x = 0; x < 8; x += 1) {
       colors.push(context.ownerColor(null, (x + y) % 15, 1, x, y));
+      ownedColors.push(context.ownerColor("self", (x + y) % 15, 1, x, y));
     }
     expect(new Set(colors).size).toBeGreaterThan(1);
+    expect(new Set(ownedColors).size).toBeGreaterThan(1);
     const luminance = (hex: string) => {
       const channels = (hex.slice(1).match(/../g) || []).map((value: string) => parseInt(value, 16));
       const [red = 0, green = 0, blue = 0] = channels;
       return red * .2126 + green * .7152 + blue * .0722;
     };
-    const outer = context.ownerColor(null, 7, 1, 11, 17);
-    const core = context.ownerColor(null, 7, 4, 11, 17);
-    expect(luminance(core)).toBeLessThan(luminance(outer));
+    const neutralOuter = context.ownerColor(null, 7, 0, 11, 17);
+    const neutralCore = context.ownerColor(null, 7, 3, 11, 17);
+    const ownedOuter = context.ownerColor("self", 7, 0, 11, 17);
+    const ownedCore = context.ownerColor("self", 7, 3, 11, 17);
+    expect(luminance(neutralCore)).toBeLessThan(luminance(neutralOuter));
+    expect(luminance(ownedCore)).toBeLessThan(luminance(ownedOuter));
+  });
+
+  it("uses a restrained blue palette to distinguish owned territory from green land", () => {
+    const colorSource = source.slice(source.indexOf("function tileColorHash"), source.indexOf("function validMapPosition"));
+    const context: any = { ownAccountId: () => "self" };
+    runInNewContext(colorSource, context);
+    const rgb = (hex: string) => (hex.slice(1).match(/../g) || []).map((value: string) => parseInt(value, 16));
+
+    for (let layer = 0; layer < 4; layer += 1) {
+      const [neutralRed = 0, neutralGreen = 0, neutralBlue = 0] = rgb(context.ownerColor(null, 7, layer, 11, 17));
+      const [ownedRed = 0, ownedGreen = 0, ownedBlue = 0] = rgb(context.ownerColor("self", 7, layer, 11, 17));
+      expect(ownedBlue - ownedRed).toBeGreaterThan(35);
+      expect(neutralGreen - neutralBlue).toBeGreaterThan(15);
+      expect(Math.abs(ownedBlue - neutralBlue) + Math.abs(ownedRed - neutralRed)).toBeGreaterThan(80);
+    }
+
+    expect(css).toMatch(/\.legend \.mine\s*\{\s*background:\s*#6993bd;/);
   });
 
   it("places region actions at the map origin and reveals territory controls only for owned cells", () => {

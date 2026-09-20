@@ -92,7 +92,7 @@ app.whenReady().then(async () => {
       loginVisible: true,
       securityCardAbsent: true,
       officialNoticeVisible: true,
-      officialNoticeTitle: "正在核验最新版本",
+      officialNoticeTitle: "正在获取最新版本信息",
       publicKeyHidden: true,
       authorName: "八爪毛米",
       githubEnabled: true,

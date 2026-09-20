@@ -85,16 +85,29 @@ describe("grid cultivation and integrated talents", () => {
     }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result.durationMs).toBe(0);
     expect(cultivated.result.goldInvestment).toBe(8000);
-    expect(cultivated.result.basePowerGainPercent).toBe(1.1);
+    expect(cultivated.result.basePowerGainPercent).toBe(4.5);
     expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.9);
     expect(cultivated.result.randomFactor).toBeLessThan(1.1);
-    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(0.9);
-    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(1.4);
+    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(3.8);
+    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(5.2);
     expect(cultivated.state.jobs).toEqual({});
     expect(cultivated.state.privatePlayers.a.materials.white).toBe(0);
     expect(cultivated.state.generals.cultivator.cultivationCount).toBe(1);
     expect(cultivated.state.generals.cultivator.power).toBeGreaterThan(before);
     expect(cultivated.state.generals.cultivator.talent.progress).toBeGreaterThan(state.generals.cultivator.talent.progress);
+  });
+
+  it("gives a meaningful first-cultivation gain for a 1500 gold investment", () => {
+    const now = 1_000_000;
+    const state = grant(joined(now), now, "cultivator-1500");
+    state.players.a.gold = 10_000;
+    state.privatePlayers.a.materials.white = 1;
+    state.generals["cultivator-1500"].experience = game.generalExperienceRequirement(state.generals["cultivator-1500"]);
+    const before = state.generals["cultivator-1500"].power;
+    const cultivated = game.applyIntent(state, {
+      type: "cultivate-general", generalId: "cultivator-1500", goldInvestment: 1500, materialId: "white", idempotencyKey: "cultivate-1500"
+    }, { actorAccountId: "a", now });
+    expect(cultivated.state.generals["cultivator-1500"].power - before).toBeGreaterThanOrEqual(7);
   });
 
   it("uses the same five-attempt gold model for the player without consuming materials", () => {

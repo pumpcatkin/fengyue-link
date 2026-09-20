@@ -306,8 +306,8 @@ class ReleaseSecurityGate {
     this.currentArtifact = null;
     this.latestVerification = null;
     this.securityState = this.isPackaged
-      ? this.makeState("required", false, "每次启动都会对照版本号")
-      : this.makeState("development", true, "开发模式不进行版本号对照");
+      ? this.makeState("required", false, "启动时将验证本地程序完整性")
+      : this.makeState("development", true, "开发模式不进行本地完整性验证");
   }
 
   makeState(status, verified, message, extra = {}) {
@@ -413,7 +413,7 @@ class ReleaseSecurityGate {
 
   async verifyBundledRuntime() {
     if (!this.isPackaged) return this.state();
-    this.setState("checking", false, "正在对照版本号…");
+    this.setState("checking", false, "正在验证本地程序完整性…");
     try {
       const manifest = this.readBundledRuntimeProof();
       if (manifest.version !== parseVersion(this.appVersion)?.raw) {
@@ -425,7 +425,7 @@ class ReleaseSecurityGate {
         throw new ReleaseSecurityError("artifact-mismatch", "本地程序文件与官方签名版本不一致，可能已损坏或被修改");
       }
       this.currentArtifact = artifacts;
-      return this.setState("verified", true, `版本号对照完成：v${this.appVersion}`, {
+      return this.setState("verified", true, `本地程序完整性验证完成：v${this.appVersion}`, {
         latestVersion: manifest.version,
         checkedAt: new Date().toISOString(),
         source: "bundled-signed-runtime-proof",
@@ -569,8 +569,8 @@ class ReleaseSecurityGate {
     const publicMessage = issue.code === "update-required"
       ? `发现新版本 v${issue.details?.latestVersion || ""}`.trim()
       : temporaryNetworkIssue
-        ? "版本号对照暂未完成"
-        : "版本号对照未通过";
+        ? "最新版本信息获取暂未完成"
+        : "本地程序完整性验证未通过";
     return this.setState(status, false, publicMessage, {
       errorCode: issue.code,
       latestVersion: issue.details?.latestVersion || null,
@@ -580,7 +580,7 @@ class ReleaseSecurityGate {
 
   async verifyOnline() {
     if (!this.isPackaged) return this.state();
-    this.setState("checking", false, "正在对照版本号…");
+    this.setState("checking", false, "正在获取最新版本信息");
     try {
       const deadlineAt = Date.now() + this.networkTimeoutMs;
       const result = await this.fetchRuntimeVerification(deadlineAt);
@@ -601,7 +601,7 @@ class ReleaseSecurityGate {
       }
       this.currentArtifact = artifacts;
       const checkedAt = new Date().toISOString();
-      const verifiedState = this.setState("verified", true, `版本号对照完成：v${this.appVersion}`, {
+      const verifiedState = this.setState("verified", true, `官方版本与本地程序验证完成：v${this.appVersion}`, {
         latestVersion: result.manifest.version,
         checkedAt,
         source: "startup-github-signed-manifest",
@@ -621,7 +621,7 @@ class ReleaseSecurityGate {
     if (this.securityState.verified) return this.state();
     throw new ReleaseSecurityError(
       this.securityState.errorCode || "verification-failed",
-      this.securityState.message || "版本号对照未通过"
+      this.securityState.message || "本地程序完整性验证未通过"
     );
   }
 }

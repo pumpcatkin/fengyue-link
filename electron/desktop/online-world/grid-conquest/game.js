@@ -530,7 +530,9 @@ function ownerColor(owner, rank, layer, x = 0, y = 0) {
   const palette = !owner
     ? { hue: 78, saturation: 38, lightness: 74 }
     : owner === ownAccountId()
-      ? { hue: 42, saturation: 78, lightness: 75 }
+      // A calm blue keeps owned land distinct from the green world palette on
+      // the blue-yellow axis, which remains useful for common colour-vision deficiencies.
+      ? { hue: 211, saturation: 46, lightness: 58 }
       : { hue: 12, saturation: 58, lightness: 68 };
   const safeRank = Math.max(0, Math.min(14, Math.trunc(Number(rank) || 0)));
   const hash = tileColorHash(x, y);

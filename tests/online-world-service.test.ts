@@ -461,13 +461,13 @@ describe("online world platform service", () => {
     expect(playerContextQualityIssue({ personaSummary: completePersona, appearanceSummary: completeAppearance, speechStyle: completeSpeech, relationshipApproach: completeRelationship })).toBeNull();
     expect(generalGenerationQualityIssue({ ...completeGeneral, coreSetting: "善战。", power: "任意" }, { gender: "female" })).toBeNull();
     expect(generalGenerationQualityIssue(completeGeneral, { gender: "female" })).toBeNull();
-    expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "善战。", power: 999999 }, { gender: "female" })).toMatchObject({ coreSetting: "善战。", power: 300 });
+    expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "善战。", power: 999999 }, { gender: "female" })).toMatchObject({ coreSetting: "善战。", power: 150 });
     const seededPower = normalizeGeneratedGeneral(completeGeneral, {
       gender: "female", generatedSeed: "season-seed", accountId: "player", sourceId: "discovery"
     }).power;
     expect(seededPower).toBe(generatedGeneralPower("season-seed", "player", "discovery"));
-    expect(seededPower).toBeGreaterThanOrEqual(250);
-    expect(seededPower).toBeLessThanOrEqual(350);
+    expect(seededPower).toBeGreaterThanOrEqual(125);
+    expect(seededPower).toBeLessThanOrEqual(175);
     const generatedWorld = createWorld({ seed: "season-seed", seasonId: "season", startedAt: 1, authorityAccountId: "player" });
     generatedWorld.players.player = { accountId: "player", displayName: "玩家", gold: 500, position: { x: 2, y: 2 }, carriedGeneralIds: [] };
     generatedWorld.privatePlayers.player = { orientation: "any", materials: {} };
@@ -476,7 +476,7 @@ describe("online world platform service", () => {
       power: 999999, generated: true, powerSeed: "discovery", discoveryId: "discovery", idempotencyKey: "grant-generated"
     }, { actorAccountId: "player", authorityAccountId: "player", now: 2 });
     expect(committed.state.generals.generated.power).toBe(seededPower);
-    expect(normalizeGeneratedGeneral({ personaSummary: "名为“茂密”的猫亚人，善于领兵。", appearanceSummary: "白发猫耳。" }, { gender: "female" })).toMatchObject({ name: "茂密", appearanceSetting: "白发猫耳。", coreSetting: expect.stringContaining("善于领兵"), power: 300 });
+    expect(normalizeGeneratedGeneral({ personaSummary: "名为“茂密”的猫亚人，善于领兵。", appearanceSummary: "白发猫耳。" }, { gender: "female" })).toMatchObject({ name: "茂密", appearanceSetting: "白发猫耳。", coreSetting: expect.stringContaining("善于领兵"), power: 150 });
     expect(normalizeGeneratedGeneral({ ...completeGeneral, coreSetting: "长设定".repeat(1200) }, { gender: "female" }).coreSetting.length).toBeGreaterThan(800);
   });
 

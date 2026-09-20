@@ -8,6 +8,7 @@ type SimulationModule = {
   miningCooldownMs: (cell: { resourceRank: number }) => number;
   marchCost: (distance: number, soldiers: number, generalCount?: number) => number;
   generatedGeneralPower: (seed: string, accountId: string, sourceId?: string) => number;
+  generatedPlayerPower: (seed: string, accountId: string) => number;
   CENTRAL_LAYER_MULTIPLIERS: readonly number[];
   CULTIVATION_RANGES: readonly any[];
   BALANCE_BASELINE: {
@@ -15,7 +16,9 @@ type SimulationModule = {
     miningCycleSeconds: { min: number; max: number };
     miningCooldownSeconds: { min: number; max: number };
     maxConcurrentMiningJobs: number;
+    playerPower: { min: number; max: number };
     generalPower: { min: number; max: number };
+    training: { costPerSoldier: number; durationBaseSeconds: number; durationPerSoldierSeconds: number; maxGarrisonPct: number };
   };
   PROPOSED_MINING_BALANCE: { baseHourlyGold: number; populationHourlyFactor: number; rankMultiplierPerLevel: number };
 };
@@ -113,16 +116,22 @@ describe("grid balance simulation", () => {
     expect(simulation.marchCost(1, 0, 0)).toBe(1);
     expect(simulation.marchCost(3, 10, 2)).toBe(18);
     expect(simulation.marchCost(2, 11, 1)).toBe(10);
+    const stablePlayerPower = simulation.generatedPlayerPower("grid-balance-2026", "player");
+    expect(stablePlayerPower).toBe(engine.generatedPlayerPower("grid-balance-2026", "player"));
+    expect(stablePlayerPower).toBeGreaterThanOrEqual(80);
+    expect(stablePlayerPower).toBeLessThanOrEqual(120);
     const stablePower = simulation.generatedGeneralPower("grid-balance-2026", "player", "source");
     expect(stablePower).toBe(engine.generatedGeneralPower("grid-balance-2026", "player", "source"));
-    expect(stablePower).toBeGreaterThanOrEqual(250);
-    expect(stablePower).toBeLessThanOrEqual(350);
+    expect(stablePower).toBeGreaterThanOrEqual(125);
+    expect(stablePower).toBeLessThanOrEqual(175);
     expect(simulation.generatedGeneralPower("grid-balance-2026", "player", "source")).toBe(stablePower);
     const sampledPowers = Array.from({ length: 100 }, (_, index) => simulation.generatedGeneralPower("grid-balance-2026", "player", `source-${index}`));
     expect(new Set(sampledPowers).size).toBeGreaterThan(20);
-    expect(sampledPowers.every(power => power >= 250 && power <= 350)).toBe(true);
-    expect(report.players.every((player: any) => player.discovery.initialGeneralPower >= 250 && player.discovery.initialGeneralPower <= 350)).toBe(true);
-    expect(report.players.flatMap((player: any) => player.discovery.discoveredGeneralPowers).every((power: number) => power >= 250 && power <= 350)).toBe(true);
+    expect(sampledPowers.every(power => power >= 125 && power <= 175)).toBe(true);
+    expect(report.players.every((player: any) => player.discovery.initialGeneralPower >= 125 && player.discovery.initialGeneralPower <= 175)).toBe(true);
+    expect(report.players.flatMap((player: any) => player.discovery.discoveredGeneralPowers).every((power: number) => power >= 125 && power <= 175)).toBe(true);
+    expect(report.config.training).toMatchObject({ durationBaseSeconds: 5, durationPerSoldierSeconds: 0.5 });
+    expect(report.formulas.training).toContain("5 + soldiers * 0.5 seconds");
     expect(report.config.miningModel).toBe("actual");
     expect(report.resources.firstCultivationAffordability.mapAffordablePct).toBe(100);
     expect(report.resources.firstCultivationAffordability.timeToAffordHours.median).toBe(0);

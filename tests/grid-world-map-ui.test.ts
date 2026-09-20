@@ -229,6 +229,13 @@ describe("grid world map task overlays", () => {
     expect(source).toContain('const requestId = sendIntent({ type: "march", ...selectedMarchIntent() })');
     expect(source).toContain('requestState?.key?.startsWith("intent:quote-march:")');
     expect(source).toContain('submit.disabled = marchSubmitting || transferPending');
+    expect(source).toContain('if (marchSubmitting && !force) return false;');
+    expect(source).toContain('activeJob && !marchSubmitting');
+    expect(source).toContain('closeMarchConfirmation({ force: true })');
+    expect(source).toContain('panel.inert = !visible || marchSubmitting');
+    expect(source).toContain('note.textContent = "正在处理行军，请勿重复操作。"');
+    expect(css).toMatch(/\.area-facts \.power-crest b\s*\{[^}]*font-size:\s*21px;[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.area-facts \.power-crest\s*\{[^}]*grid-column:\s*1 \/ -1/);
   });
 
   it("uses the same medicine names as the rules proxy", () => {

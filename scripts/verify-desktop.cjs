@@ -366,6 +366,17 @@ if (process.type === "renderer") {
       }
       assert.equal(mapMetrics.label, "1×");
       assert(mapMetrics.visibleColumns >= 11 && mapMetrics.visibleColumns <= 13);
+      const selectedPowerQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        const value=document.querySelector('#cell-power'); const previous=value.textContent;
+        value.textContent='123,456'; const range=document.createRange(); range.selectNodeContents(value);
+        const style=getComputedStyle(value); const crest=value.closest('.power-crest');
+        const result={lineRects:range.getClientRects().length,whiteSpace:style.whiteSpace,fontSize:parseFloat(style.fontSize),fits:crest.scrollWidth<=crest.clientWidth};
+        value.textContent=previous; return result;
+      })()`);
+      assert.equal(selectedPowerQa.lineRects, 1, '选中区域的五位以上守备战力发生换行');
+      assert.equal(selectedPowerQa.whiteSpace, 'nowrap');
+      assert(selectedPowerQa.fontSize >= 20, '守备战力为了避免换行被缩得过小');
+      assert.equal(selectedPowerQa.fits, true, '选中区域的五位以上守备战力横向溢出');
       const zoomed = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');viewport.dispatchEvent(new WheelEvent('wheel',{deltaY:-100,bubbles:true,cancelable:true}));return document.querySelector('#zoom-label').textContent})()`);
       assert.equal(zoomed, "1.25×");
       const panned = await embeddedGameFrame.executeJavaScript(`(()=>{const viewport=document.querySelector('#map-viewport');viewport.scrollTo(1000,1000);viewport.setPointerCapture=()=>{};viewport.hasPointerCapture=()=>false;viewport.dispatchEvent(new PointerEvent('pointerdown',{button:2,pointerId:7,clientX:500,clientY:500,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointermove',{button:2,buttons:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));viewport.dispatchEvent(new PointerEvent('pointerup',{button:2,pointerId:7,clientX:400,clientY:420,bubbles:true}));return viewport.scrollLeft>1000&&viewport.scrollTop>1000})()`);
@@ -563,7 +574,17 @@ if (process.type === "renderer") {
       await embeddedGameFrame.executeJavaScript(`payload.world.players.a.gold = 1000; marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation(); document.querySelector('#march-confirmation-submit').click()`);
       await settle();
       assert(calls.some(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march' && call.args[0]?.soldiers === 30 && call.args[0]?.to?.x === 10 && call.args[0]?.to?.y === 10), '确认弹窗未提交行军行动');
-      await embeddedGameFrame.executeJavaScript(`closeMarchConfirmation()`);
+      const marchPendingLockQa = await embeddedGameFrame.executeJavaScript(`(() => ({
+        closeResult:closeMarchConfirmation(),
+        dialogVisible:!document.querySelector('#march-confirmation').classList.contains('hidden'),
+        closeDisabled:document.querySelector('#march-confirmation-close').disabled,
+        cancelDisabled:document.querySelector('#march-confirmation-cancel').disabled,
+        transferLocked:document.querySelector('#map-army-transfer').inert,
+        busy:document.querySelector('#march-confirmation').getAttribute('aria-busy'),
+        note:document.querySelector('#march-confirmation-note').textContent
+      }))()`);
+      assert.deepEqual(marchPendingLockQa, { closeResult:false, dialogVisible:true, closeDisabled:true, cancelDisabled:true, transferLocked:true, busy:'true', note:'正在处理行军，请勿重复操作。' }, '行军处理中弹窗仍可提前关闭或重复调兵');
+      await embeddedGameFrame.executeJavaScript(`for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId); marchSubmitting=false; closeMarchConfirmation({force:true})`);
       const zeroArmyCallsBefore = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').length;
       const zeroArmyConfirmQa = await embeddedGameFrame.executeJavaScript(`(() => {
         for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId);
@@ -584,7 +605,7 @@ if (process.type === "renderer") {
       await settle();
       const zeroArmyMarchCalls = calls.filter(call => call.name === 'submitOnlineWorldIntent' && call.args[0]?.type === 'march').slice(zeroArmyCallsBefore);
       assert(zeroArmyMarchCalls.some(call => call.args[0]?.soldiers === 0 && call.args[0]?.to?.x === 10 && call.args[0]?.to?.y === 10), '确认后没有提交零兵行军');
-      await embeddedGameFrame.executeJavaScript(`for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId); closeMarchConfirmation(); payload.world.players.a.fieldArmySoldiers=30; selected={x:10,y:10}; renderCell()`);
+      await embeddedGameFrame.executeJavaScript(`for (const [requestId, request] of pendingHostRequests) if (request.key === 'intent:march') finishHostRequest(requestId); marchSubmitting=false; closeMarchConfirmation({force:true}); payload.world.players.a.fieldArmySoldiers=30; selected={x:10,y:10}; renderCell()`);
       const neutralUnderfootQa = await embeddedGameFrame.executeJavaScript(`(() => {
         const owned=payload.world.cells['4,7']; delete payload.world.cells['4,7']; selected={x:4,y:7}; openMarchConfirmation();
         const value={attackHidden:document.querySelector('#march-attack-field').classList.contains('hidden'),cost:document.querySelector('#march-party-cost').textContent,duration:document.querySelector('#march-party-duration').textContent,submitText:document.querySelector('#march-confirmation-submit').textContent,submitDisabled:document.querySelector('#march-confirmation-submit').disabled};

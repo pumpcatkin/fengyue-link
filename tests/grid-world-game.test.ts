@@ -20,12 +20,16 @@ describe("grid conquest rules", () => {
       "养气丹", "聚灵丹", "凝元丹", "紫府丹", "金髓丹", "赤曜丹", "赤曜丹"
     ]);
   });
-  it("grants new players 500 starting gold and 500 base power without changing older progress", () => {
+  it("grants new players a stable 80 to 120 starting power without changing older progress", () => {
     const now = 1_000_000;
     const state = joined(now);
+    const initialPower = game.generatedPlayerPower(state.seed, "a");
     expect(state.players.a.gold).toBe(500);
-    expect(state.players.a.basePower).toBe(500);
-    expect(state.players.a.power).toBe(500);
+    expect(initialPower).toBeGreaterThanOrEqual(80);
+    expect(initialPower).toBeLessThanOrEqual(120);
+    expect(state.players.a.basePower).toBe(initialPower);
+    expect(state.players.a.power).toBe(initialPower);
+    expect(game.generatedPlayerPower(state.seed, "a")).toBe(initialPower);
     state.players.a.gold = 321;
     state.players.a.basePower = 300;
     state.players.a.power = 300;
@@ -103,7 +107,7 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(state, { type: "start-mining", ...positions[3], idempotencyKey: "mine-fourth" }, { actorAccountId: "a", now })).toThrow(/最多同时开采 3 块/);
   });
 
-  it("assigns model-generated generals a stable authoritative power from 250 to 350", () => {
+  it("assigns model-generated generals a stable authoritative power from 125 to 175", () => {
     const now = 1_000_000;
     const state = joined(now);
     const intent = {
@@ -113,8 +117,8 @@ describe("grid conquest rules", () => {
     const granted = game.applyIntent(state, intent, { actorAccountId: "a", authorityAccountId: "a", now });
     const expected = game.generatedGeneralPower(state.seed, "a", "discovery-1");
     expect(granted.state.generals.generated.power).toBe(expected);
-    expect(expected).toBeGreaterThanOrEqual(250);
-    expect(expected).toBeLessThanOrEqual(350);
+    expect(expected).toBeGreaterThanOrEqual(125);
+    expect(expected).toBeLessThanOrEqual(175);
   });
 
   it("stops mining and cancels unfinished training when the territory is lost", () => {
@@ -231,12 +235,13 @@ describe("grid conquest rules", () => {
     const secondCost = game.powerTrainingCost(300, 1, 1);
     expect(secondCost).toBeGreaterThan(firstCost);
     expect(secondCost / firstCost).toBeCloseTo(1.15, 1);
+    const initialPower = state.players.a.basePower;
     const selfTraining = game.applyIntent(state, { type: "power-train", targetType: "player", levels: 2, idempotencyKey: "self-power" }, { actorAccountId: "a", now });
     const selfJob = selfTraining.state.jobs[selfTraining.result.jobId];
-    expect(selfTraining.result.nextPower).toBeGreaterThan(500);
+    expect(selfTraining.result.nextPower).toBeGreaterThan(initialPower);
     state = game.settleWorld(selfTraining.state, selfJob.finishAt).state;
     expect(state.players.a.trainingLevel).toBe(2);
-    expect(state.players.a.power).toBe(game.trainingPower(500, 2));
+    expect(state.players.a.power).toBe(game.trainingPower(initialPower, 2));
 
     state.players.a.gold = 100000;
     state = game.applyIntent(state, { type: "grant-general", generalId: "trainee", name: "青禾", gender: "female", setting: "善守城。", power: 500, discoveryId: "trainee", idempotencyKey: "grant-trainee" }, { actorAccountId: "a", authorityAccountId: "a", now: now + 1 }).state;

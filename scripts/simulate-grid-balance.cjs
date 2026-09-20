@@ -14,8 +14,10 @@ const MINING_DURATION_MS = 10 * 60 * 1000;
 const MINING_COOLDOWN_MIN_MS = 60 * 60 * 1000;
 const MINING_COOLDOWN_MAX_MS = 4 * 60 * 60 * 1000;
 const MAX_CONCURRENT_MINING_JOBS = 3;
-const GENERAL_POWER_MIN = 250;
-const GENERAL_POWER_MAX = 350;
+const PLAYER_POWER_MIN = 80;
+const PLAYER_POWER_MAX = 120;
+const GENERAL_POWER_MIN = 125;
+const GENERAL_POWER_MAX = 175;
 const MATERIAL_PROGRESS = Object.freeze({ white: 8, green: 20, blue: 42, purple: 78, gold: 135, "red-ascend": 0, "red-reroll": 0 });
 const MATERIAL_TIERS = Object.freeze(Object.keys(MATERIAL_PROGRESS));
 const PROPOSED_MINING_BALANCE = Object.freeze({ baseHourlyGold: 400, populationHourlyFactor: 0.09, rankMultiplierPerLevel: 0.08 });
@@ -40,8 +42,9 @@ const BALANCE_BASELINE = Object.freeze({
   miningCooldownSeconds: Object.freeze({ min: 3600, max: 14400 }),
   maxConcurrentMiningJobs: MAX_CONCURRENT_MINING_JOBS,
   miningFormula: "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08) * (2.8 + resourceRank * 0.18)) * 600 / 3600)) gold per run",
+  playerPower: Object.freeze({ min: PLAYER_POWER_MIN, max: PLAYER_POWER_MAX }),
   generalPower: Object.freeze({ min: GENERAL_POWER_MIN, max: GENERAL_POWER_MAX }),
-  training: Object.freeze({ costPerSoldier: 2, durationBaseSeconds: 60, durationPerFiveSoldiersSeconds: 1, maxGarrisonPct: 20 }),
+  training: Object.freeze({ costPerSoldier: 2, durationBaseSeconds: 5, durationPerSoldierSeconds: 0.5, maxGarrisonPct: 20 }),
   cultivationAttempts: 5,
   cultivation: Object.freeze({ firstAttemptGateHours: 0, materialPerAttempt: 1 }),
   simulationStepHours: 6,
@@ -127,6 +130,10 @@ function marchCost(distanceValue, soldiersValue, generalCountValue = 0) {
 
 function generatedGeneralPower(seed, accountId, sourceId = "general") {
   return GENERAL_POWER_MIN + (entropy(String(seed), "generated-general-power", String(accountId), String(sourceId)).readUInt32BE(0) % (GENERAL_POWER_MAX - GENERAL_POWER_MIN + 1));
+}
+
+function generatedPlayerPower(seed, accountId) {
+  return PLAYER_POWER_MIN + (entropy(String(seed), "initial-player-power", String(accountId)).readUInt32BE(0) % (PLAYER_POWER_MAX - PLAYER_POWER_MIN + 1));
 }
 
 function staticCell(seed, x, y) {
@@ -364,7 +371,7 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
       const cost = amount * BALANCE_BASELINE.training.costPerSoldier;
       if (amount > 0 && gold >= cost) {
         trainingSessions += 1;
-        trainingHours += (BALANCE_BASELINE.training.durationBaseSeconds + Math.ceil(amount / 5) * BALANCE_BASELINE.training.durationPerFiveSoldiersSeconds) / 3600;
+        trainingHours += (BALANCE_BASELINE.training.durationBaseSeconds + amount * BALANCE_BASELINE.training.durationPerSoldierSeconds) / 3600;
         trainingGold += cost;
         gold -= cost;
         soldiers += amount;
@@ -384,7 +391,7 @@ function simulatePlayer(random, seed, id, position, cell, days, claimSchedule, m
       battles += 1;
       const target = staticCell(seed, Math.floor(random() * GRID_SIZE), Math.floor(random() * GRID_SIZE));
       const enemy = Math.floor(target.population * 0.2);
-      const attackerPower = force + 500 + initialGeneralPower;
+      const attackerPower = force + generatedPlayerPower(seed, id) + initialGeneralPower;
       if (attackerPower > enemy) {
         battleWins += 1;
         const discoveryPopulation = Math.max(100, Math.min(10000, target.population));
@@ -488,7 +495,16 @@ function runSimulation(options = {}) {
   const totalWins = sumBy(playerRecords, player => player.march.wins);
   return {
     seed,
-    config: { players, days, gridSize: GRID_SIZE, marchSecondsPerCell: BALANCE_BASELINE.marchSecondsPerCell, miningModel },
+    config: {
+      players,
+      days,
+      gridSize: GRID_SIZE,
+      marchSecondsPerCell: BALANCE_BASELINE.marchSecondsPerCell,
+      miningModel,
+      playerPower: BALANCE_BASELINE.playerPower,
+      generalPower: BALANCE_BASELINE.generalPower,
+      training: BALANCE_BASELINE.training
+    },
     players: playerRecords,
     totals: {
       miningGold: totalMiningGold,
@@ -600,8 +616,9 @@ function runSimulation(options = {}) {
       miningYield: miningModel === "actual"
         ? "max(1, round(((400 + populationBase * 0.09) * layerMultiplier * (1 + resourceRank * 0.08) * (2.8 + resourceRank * 0.18)) * 600 / 3600)) gold per run"
         : "max(1, floor(population * (resourceRank + 2) / 180)) gold per cycle (legacy comparison)",
-      generalPower: "250 + stableHash(seed, accountId, sourceId) % 101",
-      training: "cost = soldiers * 2 gold; duration = 60 + ceil(soldiers / 5) seconds, capped at 3600 seconds",
+      playerPower: "80 + stableHash(seed, accountId) % 41",
+      generalPower: "125 + stableHash(seed, accountId, sourceId) % 51",
+      training: "cost = soldiers * 2 gold; duration = 5 + soldiers * 0.5 seconds",
       generalDiscovery: "0.019 + ((population - 100) / 9900) * 0.221 per victorious neutral conquest",
       treasure: "author manually scatters 240 by default; conquering the exact cell claims one; re-scatter replaces unclaimed positions",
       cultivationPower: "linear interpolation from powerGainPctMin to powerGainPctMax using the chosen gold within its attempt range",
@@ -625,6 +642,7 @@ module.exports = {
   miningCooldownMs,
   marchCost,
   generatedGeneralPower,
+  generatedPlayerPower,
   CULTIVATION_RANGES,
   BALANCE_BASELINE,
   PROPOSED_MINING_BALANCE,

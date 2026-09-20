@@ -32,6 +32,11 @@ const TRAINING_BATCH_MAX = 10;
 const MAX_TRAINING_LEVEL = 100;
 const ACTIVE_CARRIED_GENERAL_LIMIT = 2;
 const DEFAULT_PLAYER_BASE_POWER = 500;
+const INITIAL_PLAYER_POWER_MIN = 80;
+const INITIAL_PLAYER_POWER_MAX = 120;
+const DEFAULT_GENERATED_GENERAL_POWER = 150;
+const GENERATED_GENERAL_POWER_MIN = 125;
+const GENERATED_GENERAL_POWER_MAX = 175;
 const STARTING_PLAYER_GOLD = 500;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 const RESOURCE_YIELD_FORMULA_VERSION = 5;
@@ -1279,9 +1284,9 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, heightC
     appearanceSetting: String(appearanceSetting || "").slice(0, 350),
     coreSetting: normalizedCore,
     setting: normalizedCore,
-    basePower: integer(power ?? 300, "将领基础战力", 1, 100000),
+    basePower: integer(power ?? DEFAULT_GENERATED_GENERAL_POWER, "将领基础战力", 1, 100000),
     trainingLevel: 0,
-    power: integer(power ?? 300, "将领战力", 1, 100000),
+    power: integer(power ?? DEFAULT_GENERATED_GENERAL_POWER, "将领战力", 1, 100000),
     cultivationCount: 0,
     experience: 0,
     experienceUpdatedAt: 0,
@@ -1302,7 +1307,13 @@ function createFallbackGeneral({ id = crypto.randomUUID(), name, gender, heightC
 }
 
 function generatedGeneralPower(seed, accountId, sourceId = "general") {
-  return 250 + (entropy(String(seed), "generated-general-power", String(accountId), String(sourceId)).readUInt32BE(0) % 101);
+  const span = GENERATED_GENERAL_POWER_MAX - GENERATED_GENERAL_POWER_MIN + 1;
+  return GENERATED_GENERAL_POWER_MIN + (entropy(String(seed), "generated-general-power", String(accountId), String(sourceId)).readUInt32BE(0) % span);
+}
+
+function generatedPlayerPower(seed, accountId) {
+  const span = INITIAL_PLAYER_POWER_MAX - INITIAL_PLAYER_POWER_MIN + 1;
+  return INITIAL_PLAYER_POWER_MIN + (entropy(String(seed), "initial-player-power", String(accountId)).readUInt32BE(0) % span);
 }
 
 function closeCurrentMaster(general, year) {
@@ -1763,6 +1774,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
     const initialGeneralWish = String(intent.initialGeneralWish || "").trim().slice(0, 500);
     if (!initialGeneralWish) throw new Error("请描述开疆扩土前想遇到的良将");
     const capital = chooseCapital(state, actorAccountId);
+    const initialPower = generatedPlayerPower(state.seed, actorAccountId);
     const info = staticCell(state.seed, capital.x, capital.y);
     const cell = dynamicCell(state, capital.x, capital.y);
     cell.ownerAccountId = actorAccountId;
@@ -1772,10 +1784,10 @@ function applyIntent(inputState, rawIntent, context = {}) {
       accountName: String(context.actorAccountName || intent.accountName || actorAccountId).slice(0, 80),
       displayName: String(intent.displayName || actorAccountId).slice(0, 40),
       gold: STARTING_PLAYER_GOLD,
-      basePower: DEFAULT_PLAYER_BASE_POWER,
+      basePower: initialPower,
       trainingLevel: 0,
       cultivationCount: 0,
-      power: DEFAULT_PLAYER_BASE_POWER,
+      power: initialPower,
       position: capital,
       fieldArmySoldiers: 0,
       carriedGeneralIds: [],
@@ -1803,7 +1815,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       population: info.population,
       resourceGrade: info.resourceGrade
     });
-    result = { capital, gold: STARTING_PLAYER_GOLD, power: DEFAULT_PLAYER_BASE_POWER, soldiers: cell.soldiers };
+    result = { capital, gold: STARTING_PLAYER_GOLD, power: initialPower, soldiers: cell.soldiers };
   } else {
     const player = ensurePlayer(state, actorAccountId);
     if (type === "dismiss-battle-report") {
@@ -2706,6 +2718,7 @@ module.exports = {
   generalDefenseCultivationRate,
   generalDefenseBonusPower,
   ensureGeneralProfile,
+  generatedPlayerPower,
   generatedGeneralPower,
   ensureGeneralTalent,
   talentSummary,

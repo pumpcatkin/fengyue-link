@@ -1141,7 +1141,7 @@ function renderMapArmyTransfer(player, activeMarch = false) {
   placeArmyTransferPanel(inMarchModal);
   shell.classList.toggle("hidden", !visible || inMarchModal);
   panel.classList.toggle("hidden", !visible);
-  panel.inert = !visible || (!inMarchModal && armyTransferCollapsed);
+  panel.inert = !visible || marchSubmitting || (!inMarchModal && armyTransferCollapsed);
   panel.setAttribute("aria-hidden", String(!visible || (!inMarchModal && armyTransferCollapsed)));
   if (!visible) {
     armyTransferContext = "";
@@ -1158,9 +1158,9 @@ function renderMarchConfirmation() {
   const modal = document.querySelector("#march-confirmation");
   if (!marchConfirmationTarget) return;
   const player = ownPlayer();
-  if (!player?.position) { closeMarchConfirmation(); return; }
+  if (!player?.position) { closeMarchConfirmation({ force: true }); return; }
   const activeJob = Object.values(payload?.world?.jobs || {}).find(job => job.accountId === ownAccountId() && job.type === "march");
-  if (activeJob) { closeMarchConfirmation(); return; }
+  if (activeJob && !marchSubmitting) { closeMarchConfirmation({ force: true }); return; }
   renderMapArmyTransfer(player, false);
   const requested = marchAvailable();
   const carried = (player.carriedGeneralIds || []).map(id => allGenerals()[id]).filter(Boolean);
@@ -1193,7 +1193,7 @@ function renderMarchConfirmation() {
   const attackInput = document.querySelector("#march-attack");
   attackField.classList.toggle("hidden", attackUnderfoot);
   if (attackUnderfoot) attackInput.checked = true;
-  attackInput.disabled = attackUnderfoot;
+  attackInput.disabled = attackUnderfoot || marchSubmitting;
   const requestKey = marchQuoteKey();
   const quoteFailed = marchQuoteFailureKey === requestKey;
   const transferPending = pendingHostKeys.has("intent:gather-march") || pendingHostKeys.has("intent:deploy-soldiers");
@@ -1206,7 +1206,8 @@ function renderMarchConfirmation() {
   document.querySelector("#march-party-cost-card").classList.toggle("unaffordable", exactQuote && !affordable);
   const note = document.querySelector("#march-confirmation-note");
   note.classList.remove("error");
-  if (transferPending) note.textContent = "正在同步调兵结果，请稍候。";
+  if (marchSubmitting) note.textContent = "正在处理行军，请勿重复操作。";
+  else if (transferPending) note.textContent = "正在同步调兵结果，请稍候。";
   else if (requested < 1) note.textContent = `当前队伍没有士兵，将由 ${formatNumber(carried.length)} 名随行将领单独行军。`;
   else if (!route && !attackUnderfoot) { note.textContent = "当前没有可通行的路线，请避开他人领地或选择攻打目标。"; note.classList.add("error"); }
   else if (quoteFailed) { note.textContent = "行军耗时与金币核算未完成，请重新核算。"; note.classList.add("error"); }
@@ -1214,7 +1215,12 @@ function renderMarchConfirmation() {
   else if (!affordable) { note.textContent = `金币不足，还差 ${formatNumber(cost - Number(player.gold || 0))} 金币。`; note.classList.add("error"); }
   else note.textContent = `将携带全部 ${formatNumber(requested)} 名士兵与 ${formatNumber(carried.length)} 名随行将领。`;
   const submit = document.querySelector("#march-confirmation-submit");
-  document.querySelector("#march-quote-retry").classList.toggle("hidden", !quoteFailed);
+  const retry = document.querySelector("#march-quote-retry");
+  retry.classList.toggle("hidden", !quoteFailed);
+  retry.disabled = marchSubmitting;
+  document.querySelector("#march-confirmation-close").disabled = marchSubmitting;
+  document.querySelector("#march-confirmation-cancel").disabled = marchSubmitting;
+  modal.setAttribute("aria-busy", String(marchSubmitting));
   submit.disabled = marchSubmitting || transferPending || (!route && !attackUnderfoot) || !exactQuote || !affordable;
   submit.textContent = marchSubmitting ? "正在出征…" : attackUnderfoot ? "确认攻打" : "确认出征";
   modal.classList.remove("hidden");
@@ -1231,7 +1237,8 @@ function openMarchConfirmation() {
   renderMarchConfirmation();
   refreshMarchQuote();
 }
-function closeMarchConfirmation() {
+function closeMarchConfirmation({ force = false } = {}) {
+  if (marchSubmitting && !force) return false;
   clearTimeout(marchQuoteTimer);
   marchConfirmationTarget = null;
   marchSubmitting = false;
@@ -1243,6 +1250,8 @@ function closeMarchConfirmation() {
   renderMapArmyTransfer(ownPlayer(), activeMarch);
   document.querySelector("#zero-army-march-confirmation")?.classList.add("hidden");
   document.querySelector("#march-confirmation")?.classList.add("hidden");
+  document.querySelector("#march-confirmation")?.removeAttribute("aria-busy");
+  return true;
 }
 function dispatchMarch() {
   const submit = document.querySelector("#march-confirmation-submit");
@@ -3148,7 +3157,7 @@ window.addEventListener("message", event => {
     if (event.data.result?.state) {
       applyHostedState(event.data.result.state, false);
       joinSubmitting = false;
-      if (requestState?.key === "intent:march") closeMarchConfirmation();
+      if (requestState?.key === "intent:march") closeMarchConfirmation({ force: true });
       if (requestState?.key === "intent:deploy-general") {
         const deployedName = deployingGeneralName || allGenerals()[deployingGeneralId]?.name || "将领";
         deployingGeneralId = null;

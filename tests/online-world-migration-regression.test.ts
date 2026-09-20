@@ -94,7 +94,12 @@ describe("online world migration regressions", () => {
       origin: "https://aigirlfriend.baby",
       onlineWorldService,
       onlineWorldCardFile: "fixture.json",
-      onlineWorldCards: new Map([["grid-card::A", card]])
+      onlineWorldCards: new Map([["grid-card::A", card]]),
+      persistRefreshedOnlineWorldCard(previous: any, refreshed: any) {
+        this.onlineWorldCards.delete(`${previous.cardId}::${previous.companion.workId}`);
+        this.onlineWorldCards.set(`${refreshed.cardId}::${refreshed.companion.workId}`, refreshed);
+        saves += 1;
+      }
     };
     const rebind = (source: any, workId: string) => ({
       ...source,
@@ -164,7 +169,12 @@ describe("online world migration regressions", () => {
       origin: "https://aigirlfriend.baby",
       onlineWorldService,
       onlineWorldCardFile: "fixture.json",
-      onlineWorldCards: new Map([["grid-card::A", card]])
+      onlineWorldCards: new Map([["grid-card::A", card]]),
+      persistRefreshedOnlineWorldCard(previous: any, refreshed: any) {
+        this.onlineWorldCards.delete(`${previous.cardId}::${previous.companion.workId}`);
+        this.onlineWorldCards.set(`${refreshed.cardId}::${refreshed.companion.workId}`, refreshed);
+        saves += 1;
+      }
     };
     const rebind = (source: any, workId: string) => ({
       ...source,
@@ -240,7 +250,12 @@ describe("online world migration regressions", () => {
       onlineWorldCards: new Map([
         [key(oldCard), oldCard],
         [key(targetCard), targetCard]
-      ])
+      ]),
+      persistRefreshedOnlineWorldCard(previous: any, refreshed: any) {
+        this.onlineWorldCards.delete(key(previous));
+        this.onlineWorldCards.set(key(refreshed), refreshed);
+        saves += 1;
+      }
     };
     const rebind = (source: any, workId: string, origin: string) => ({
       ...source,

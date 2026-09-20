@@ -190,7 +190,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 29,
+    version: 30,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null
@@ -272,6 +272,34 @@ function rebindGameCard(card, workId, origin = null) {
       configurationSha256: configurationDigest(configuration)
     },
     exportedAt: new Date().toISOString()
+  });
+}
+
+function refreshGameCardProgram(card, description, exportedAt = new Date().toISOString()) {
+  const base = validateGameCard(card);
+  const nextDescription = String(description || "");
+  const parsedProgram = parseProgram(nextDescription, base.gameId);
+  if (!parsedProgram) throw new Error("伴生作品详细介绍中没有这张游戏卡的有效程序包");
+  if (base.companion.configuration.app.description === nextDescription
+    && base.program.digest === parsedProgram.digest) return base;
+  const configuration = normalizeConfiguration(base.companion.configuration, base.companion);
+  for (const key of ["desc", "descr", "dsc", "intro", "description"]) {
+    if (Object.hasOwn(configuration, key)) configuration[key] = nextDescription;
+  }
+  configuration.app.description = nextDescription;
+  return finalizeGameCard({
+    ...base,
+    companion: {
+      ...base.companion,
+      configuration,
+      configurationSha256: configurationDigest(configuration)
+    },
+    program: {
+      format: parsedProgram.manifest.format,
+      apiVersion: parsedProgram.manifest.apiVersion,
+      digest: parsedProgram.digest
+    },
+    exportedAt
   });
 }
 
@@ -438,6 +466,7 @@ module.exports = {
   createBundledGridCard,
   validateGameCard,
   createExportedGameCard,
+  refreshGameCardProgram,
   rebindGameCard,
   gameCardLibraryKey,
   summarizeGameCard,

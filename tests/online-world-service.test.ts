@@ -1515,6 +1515,59 @@ describe("online world platform service", () => {
     await expect(instance.initialize()).rejects.toThrow(/只有作品作者/);
   });
 
+  it("loads and stores the current companion-page program for guests and authors through the same endpoint", async () => {
+    const originalCard = createBundledGridCard();
+    const currentWorkId = "b27218e6-80f9-4c0d-91c7-4b8f87d47be8";
+    const cards = [originalCard, rebindGameCard(originalCard, currentWorkId, originalCard.companion.origin)];
+    const latest = packProgram({ gameId: originalCard.gameId, title: "公开新版", html: "<!doctype html><html><body>public latest</body></html>" });
+    for (const [index, card] of cards.entries()) {
+      const consoleEndpoints: string[] = [];
+      const goEndpoints: string[] = [];
+      const accountId = index === 0 ? "player" : card.companion.authorAccountId;
+      const instance = service({
+        getAccount: () => ({ accountId, username: index === 0 ? "玩家" : "服主" }),
+        requestConsole: async (endpoint: string) => {
+          consoleEndpoints.push(endpoint);
+          if (endpoint.startsWith("/installed-apps/")) return {
+            data: {
+              id: card.companion.workId,
+              created_by_account_id: card.companion.authorAccountId,
+              app: { id: card.companion.workId, name: "猎艳疆土" }
+            }
+          };
+          return { data: { items: [] } };
+        },
+        requestGo: async (endpoint: string) => {
+          goEndpoints.push(endpoint);
+          return { data: { apps: { id: card.companion.workId, description: latest.envelope } } };
+        }
+      });
+      const state = await instance.open({ card, displayName: "玩家", orientation: "any" });
+      instance.close();
+      expect(state.program).toMatchObject({ source: "work-description", digest: latest.digest, title: "公开新版" });
+      expect(instance.card?.program.digest).toBe(latest.digest);
+      expect(instance.card?.companion.configuration.app.description).toBe(latest.envelope);
+      expect(consoleEndpoints.some(endpoint => endpoint.includes("/model-config/export"))).toBe(false);
+      expect(goEndpoints).toEqual([`/apps/${card.companion.workId}`]);
+      expect(goEndpoints.some(endpoint => endpoint.startsWith("/apps/config?"))).toBe(false);
+    }
+  });
+
+  it("keeps the signed card program when the current companion page has no valid program", async () => {
+    const card = createBundledGridCard();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      requestConsole: async (endpoint: string) => endpoint.startsWith("/installed-apps/")
+        ? { data: { id: card.companion.workId, created_by_account_id: card.companion.authorAccountId } }
+        : { data: { items: [] } },
+      requestGo: async () => ({ data: { apps: { id: card.companion.workId, description: "普通作品介绍" } } })
+    });
+    const state = await instance.open({ card, displayName: "玩家", orientation: "any" });
+    instance.close();
+    expect(state.program).toMatchObject({ source: "card-package", digest: card.program.digest });
+    expect(instance.card?.packageSha256).toBe(card.packageSha256);
+  });
+
   it("rejects a changed platform author on refresh before writing any comments", async () => {
     const fixture = coverageHarness();
     const instance = fixture.author;
@@ -1538,8 +1591,10 @@ describe("online world platform service", () => {
       ? { id: "work", created_by_account_id: "author", description: program.envelope }
       : requestComments(endpoint, options);
     owner.requestConsole = requestConsole;
+    owner.requestGo = async () => ({ data: { apps: { id: "work", description: program.envelope } } });
     const guest = fixture.create("player");
     guest.requestConsole = requestConsole;
+    guest.requestGo = owner.requestGo;
     let modelCalls = 0;
     owner.requestModel = async () => { modelCalls += 1; throw new Error("unexpected model request"); };
     // Reflect a newly downloaded description while the comment control still names the previous package.
@@ -1597,7 +1652,10 @@ describe("online world platform service", () => {
           return item;
         }
         throw new Error(`unexpected ${endpoint}`);
-      }
+      },
+      requestGo: async (endpoint: string) => endpoint === "/apps/4ac2ab60-67ff-459d-ae9a-6274f1802195"
+        ? { data: { apps: { id: "4ac2ab60-67ff-459d-ae9a-6274f1802195", description: program.envelope } } }
+        : { data: {} }
     });
     await instance.open({ workUrl: "https://aigirlfriend.baby/zh/explore/installed/4ac2ab60-67ff-459d-ae9a-6274f1802195" });
     const state = await instance.initialize();

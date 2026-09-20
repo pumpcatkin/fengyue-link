@@ -655,7 +655,14 @@ class AccountBackend {
     this.onlineWorldCardScanErrors = installedCards.errors;
     for (const [libraryId, card] of installedCards.cards) {
       const current = this.onlineWorldCards.get(libraryId);
-      if (!current || Number(card.version || 0) >= Number(current.version || 0)) this.onlineWorldCards.set(libraryId, card);
+      const currentVersion = Number(current?.version || 0);
+      const nextVersion = Number(card.version || 0);
+      const currentExportedAt = Date.parse(String(current?.exportedAt || "")) || 0;
+      const nextExportedAt = Date.parse(String(card.exportedAt || "")) || 0;
+      if (!current || nextVersion > currentVersion
+        || (nextVersion === currentVersion && nextExportedAt > currentExportedAt)) {
+        this.onlineWorldCards.set(libraryId, card);
+      }
     }
     if (installedCards.cards.size) saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
     this.onlineWorldService = new OnlineWorldService({
@@ -3533,16 +3540,71 @@ class AccountBackend {
 
   async openOnlineWorldCard(options = {}) {
     const card = this.onlineWorldCard(options.libraryId || options.cardId, options.libraryId ? null : options.workId);
-    const state = await this.onlineWorldService.open({
-      card,
-      displayName: options.displayName,
-      orientation: options.orientation
-    });
+    let state;
+    try {
+      state = await this.onlineWorldService.open({
+        card,
+        displayName: options.displayName,
+        orientation: options.orientation
+      });
+    } finally {
+      const refreshedCard = this.onlineWorldService.card;
+      const matchesOpenedCard = refreshedCard?.cardId === card.cardId
+        && refreshedCard?.gameId === card.gameId
+        && refreshedCard?.companion?.workId === card.companion.workId
+        && refreshedCard?.companion?.authorAccountId === card.companion.authorAccountId;
+      if (matchesOpenedCard) this.persistRefreshedOnlineWorldCard(card, refreshedCard);
+    }
+    const activeCard = this.onlineWorldService.card || card;
     if (this.onlineWorldService.migrationDraft && this.onlineWorldService.isAuthority()
       && this.account.accountId === this.onlineWorldService.work?.authorAccountId) {
-      this.scheduleOnlineWorldMigrationResume(card);
+      this.scheduleOnlineWorldMigrationResume(activeCard);
     }
     return state;
+  }
+
+  persistRefreshedOnlineWorldCard(previousCard, nextCard) {
+    const previous = validateGameCard(previousCard);
+    const refreshed = validateGameCard(nextCard);
+    const sameCard = previous.cardId === refreshed.cardId
+      && previous.gameId === refreshed.gameId
+      && previous.companion.authorAccountId === refreshed.companion.authorAccountId
+      && previous.companion.origin === refreshed.companion.origin;
+    if (!sameCard || Number(refreshed.version || 0) < Number(previous.version || 0)) {
+      throw new Error("伴生作品返回的游戏卡身份与当前游戏卡不一致");
+    }
+    if (previous.packageSha256 === refreshed.packageSha256) return false;
+    const previousKey = gameCardLibraryKey(previous);
+    const nextKey = gameCardLibraryKey(refreshed);
+    const sources = new Set(this.onlineWorldCardSources?.get(previousKey) || []);
+    Map.prototype.delete.call(this.onlineWorldCards, previousKey);
+    this.onlineWorldCards.set(nextKey, refreshed);
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    for (const file of sources) {
+      try {
+        atomicWriteFileSync(fs, file, `${JSON.stringify(refreshed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      } catch (error) {
+        this.appendSessionLog("online-world", {
+          event: "game-card-source-refresh-failed",
+          status: "degraded",
+          file,
+          error: error?.message || String(error)
+        });
+      }
+    }
+    if (previousKey !== nextKey) this.onlineWorldCardSources?.delete(previousKey);
+    if (sources.size) this.onlineWorldCardSources?.set(nextKey, sources);
+    const persisted = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    if (persisted.get(nextKey)?.packageSha256 !== refreshed.packageSha256) throw new Error("最新游戏卡程序保存后回读失败");
+    this.onlineWorldCards = persisted;
+    this.appendSessionLog("online-world", {
+      event: "game-card-program-refreshed",
+      workId: refreshed.companion.workId,
+      previousProgramDigest: previous.program.digest,
+      programDigest: refreshed.program.digest,
+      sourceFiles: sources.size
+    });
+    return true;
   }
 
   scheduleOnlineWorldMigrationResume(sourceCard) {
@@ -3744,9 +3806,7 @@ class AccountBackend {
       throw error;
     }
     const migratedCard = this.onlineWorldService.card || card;
-    this.onlineWorldCards.delete(gameCardLibraryKey(sourceCard));
-    this.onlineWorldCards.set(gameCardLibraryKey(migratedCard), migratedCard);
-    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    this.persistRefreshedOnlineWorldCard(sourceCard, migratedCard);
     for (const workId of retiredWorkIds) this.onlineWorldService.clearCacheForWork(workId);
     return next;
   }

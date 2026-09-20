@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 
 
 describe("Electron platform API regressions", () => {
+  it("persists a refreshed companion program into the local card library and installed JSON sources", () => {
+    const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    expect(source).toContain("this.persistRefreshedOnlineWorldCard(card, refreshedCard)");
+    expect(source).toContain("refreshedCard?.companion?.workId === card.companion.workId");
+    expect(source).toContain("this.persistRefreshedOnlineWorldCard(sourceCard, migratedCard)");
+    expect(source).toContain("event: \"game-card-program-refreshed\"");
+    expect(source).toContain("atomicWriteFileSync(fs, file, `${JSON.stringify(refreshed, null, 2)}\\n`");
+  });
   it("never requests the one-based platform message API with page zero", () => {
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     expect(source).not.toMatch(/installed-apps[^`"']*\/messages[^`"']*page=0/);

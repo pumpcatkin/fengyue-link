@@ -18,7 +18,14 @@ const {
 } = require("./online-world-protocol.cjs");
 const { sealJson, openSealedJson } = require("./online-world-crypto.cjs");
 const { parseProgram } = require("./online-world-runtime.cjs");
-const { GRID_GAME_TITLE, builtInGridProgram, validateGameCard, createExportedGameCard, summarizeGameCard } = require("./online-world-card.cjs");
+const {
+  GRID_GAME_TITLE,
+  builtInGridProgram,
+  validateGameCard,
+  createExportedGameCard,
+  refreshGameCardProgram,
+  summarizeGameCard
+} = require("./online-world-card.cjs");
 const {
   GRID_GAME_ID,
   GRID_SIZE,
@@ -102,14 +109,16 @@ function normalizeWorkDetail(payload, fallbackId) {
     || item?.author?.id || item?.creator?.id || item?.owner?.id || item?.created_by?.id || item?.createdBy?.id || "";
   const authorDetail = firstObject(payload, item => matchesWork(item) && Boolean(authorId(item)));
   const namedDetail = firstObject(payload, item => matchesWork(item) && Boolean(item?.name || item?.title || item?.description || item?.desc));
-  const detail = authorDetail || namedDetail || payload?.data?.app || payload?.app || payload?.data || payload;
-  const author = detail?.author || detail?.creator || detail?.owner || detail?.created_by || detail?.createdBy || {};
+  const descriptionDetail = firstObject(payload, item => matchesWork(item) && Boolean(item?.description || item?.desc));
+  const detail = namedDetail || authorDetail || payload?.data?.app || payload?.app || payload?.data || payload;
+  const authority = authorDetail || detail;
+  const author = authority?.author || authority?.creator || authority?.owner || authority?.created_by || authority?.createdBy || {};
   return {
-    id: String(detail?.id || detail?.app_id || detail?.appId || fallbackId),
+    id: String(authority?.id || authority?.app_id || authority?.appId || detail?.id || detail?.app_id || detail?.appId || fallbackId),
     name: String(detail?.name || detail?.title || "在线游戏世界"),
-    description: String(detail?.description || detail?.desc || ""),
-    authorAccountId: String(authorId(detail)),
-    authorName: String(detail?.created_by_account_name || detail?.author_account_name || detail?.creator_account_name || detail?.owner_account_name || author?.name || author?.username || "")
+    description: String(descriptionDetail?.description || descriptionDetail?.desc || detail?.description || detail?.desc || ""),
+    authorAccountId: String(authorId(authority)),
+    authorName: String(authority?.created_by_account_name || authority?.author_account_name || authority?.creator_account_name || authority?.owner_account_name || author?.name || author?.username || "")
   };
 }
 
@@ -1396,6 +1405,27 @@ class OnlineWorldService {
     return this.now();
   }
 
+  async fetchLiveProgramDescription(card, workId) {
+    if (!workId) return null;
+    try {
+      const payload = await this.requestGo(`/apps/${encodeURIComponent(workId)}`, { timeout: 30000 });
+      const description = normalizeWorkDetail(payload, workId).description;
+      if (!parseProgram(description, String(card?.gameId || GRID_GAME_ID))) {
+        throw new Error("当前伴生作品页面没有有效游戏程序包");
+      }
+      return description;
+    } catch (error) {
+      this.diagnostic({
+        event: "work-program-refresh-failed",
+        status: "degraded",
+        source: "companion-work-page",
+        error: error?.message || String(error),
+        workId
+      });
+      return null;
+    }
+  }
+
   async open({ card, workUrl, orientation, displayName, migrationProof = null } = {}) {
     const previousWorkId = String(this.work?.id || "");
     await this.pause();
@@ -1433,6 +1463,7 @@ class OnlineWorldService {
     const cached = this.loadCache(reference.workId);
     const verifiedCachedServer = normalizedCard ? this.verifiedCachedServer(normalizedCard, cached) : null;
     let workDetailError = null;
+    const liveDescriptionPromise = this.fetchLiveProgramDescription(normalizedCard, reference.workId);
     try {
       const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
       this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
@@ -1459,7 +1490,8 @@ class OnlineWorldService {
       throw new Error("迁移目标作品作者与源服务器不一致");
     }
     if (normalizedCard && this.work.name === "在线游戏世界") this.work.name = normalizedCard.companion.name;
-    this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(normalizedCard) || builtInGridProgram();
+    const liveDescription = await liveDescriptionPromise;
+    this.loadWorkProgram(normalizedCard, liveDescription);
     this.mapFactsCache = null;
     this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
     this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
@@ -1615,14 +1647,29 @@ class OnlineWorldService {
     return createExportedGameCard(card, exported);
   }
 
+  loadWorkProgram(card = this.card, pageDescription = null) {
+    const description = String(pageDescription || "");
+    const liveProgram = parseProgram(description, GRID_GAME_ID);
+    if (liveProgram) {
+      this.program = { ...liveProgram, source: "work-description" };
+      if (this.work) this.work.description = description;
+      if (card) this.card = refreshGameCardProgram(card, description);
+      return this.program;
+    }
+    this.program = programFromGameCard(card) || builtInGridProgram();
+    return this.program;
+  }
+
   async refreshWorkProgram() {
     if (!this.work) return null;
-    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`);
+    const [payload, pageDescription] = await Promise.all([
+      this.requestConsole(`/installed-apps/${encodeURIComponent(this.work.id)}`),
+      this.fetchLiveProgramDescription(this.card, this.work.id)
+    ]);
     const detail = normalizeWorkDetail(payload, this.work.id);
     if (this.card?.companion?.authorAccountId && detail.authorAccountId !== this.card.companion.authorAccountId) throw new Error("作品作者已变更，请重新获取游戏卡");
     this.work = { ...detail, url: this.work.url };
-    this.program = parseProgram(this.work.description, GRID_GAME_ID) || programFromGameCard(this.card) || builtInGridProgram();
-    return this.program;
+    return this.loadWorkProgram(this.card, pageDescription);
   }
 
   async initialize() {

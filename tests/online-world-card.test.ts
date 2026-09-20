@@ -13,6 +13,7 @@ const {
   createBundledGridCard,
   normalizeProgramText,
   createExportedGameCard,
+  refreshGameCardProgram,
   validateGameCard,
   rebindGameCard,
   gameCardLibraryKey,
@@ -23,7 +24,7 @@ const {
   scanGameCardDirectory,
   removeGameCardDirectoryFiles
 } = require("../electron/online-world-card.cjs");
-const { parseProgram } = require("../electron/online-world-runtime.cjs");
+const { packProgram, parseProgram } = require("../electron/online-world-runtime.cjs");
 
 const temporaryDirectories: string[] = [];
 afterEach(() => {
@@ -44,7 +45,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(29);
+    expect(card.version).toBe(30);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -117,6 +118,43 @@ describe("online world game cards", () => {
     saveGameCardLibrary(file, cards);
     const loaded = loadGameCardLibrary(file, original);
     expect(loaded.get(exported.cardId).packageSha256).toBe(exported.packageSha256);
+  });
+
+  it("replaces only the embedded program when a companion description is refreshed", () => {
+    const original = createBundledGridCard();
+    const packed = packProgram({
+      gameId: original.gameId,
+      title: "猎艳疆土",
+      html: "<!doctype html><html><body>latest companion program</body></html>"
+    });
+    const refreshed = validateGameCard(refreshGameCardProgram(original, packed.envelope, "2026-09-20T00:00:00.000Z"));
+    expect(refreshed.program.digest).toBe(packed.digest);
+    expect(refreshed.packageSha256).not.toBe(original.packageSha256);
+    expect(refreshed.companion.configuration.app.description).toBe(packed.envelope);
+    expect(refreshed.companion.configuration.pre_prompt).toBe(original.companion.configuration.pre_prompt);
+    expect(refreshed.companion.configuration.world_book).toEqual(original.companion.configuration.world_book);
+    expect(refreshed.exportedAt).toBe("2026-09-20T00:00:00.000Z");
+  });
+
+  it("updates legacy description aliases so a refreshed card survives restart validation", () => {
+    const original = createBundledGridCard();
+    const aliased = createExportedGameCard(original, {
+      ...original.companion.configuration,
+      desc: original.companion.configuration.app.description
+    });
+    const latest = packProgram({
+      gameId: original.gameId,
+      title: "猎艳疆土",
+      html: "<!doctype html><html><body>alias refresh</body></html>"
+    });
+    const refreshed = validateGameCard(refreshGameCardProgram(aliased, latest.envelope));
+    expect(refreshed.companion.configuration.desc).toBe(latest.envelope);
+    const directory = mkdtempSync(join(tmpdir(), "fyow-card-program-refresh-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "cards.json");
+    const libraryId = gameCardLibraryKey(refreshed);
+    saveGameCardLibrary(file, new Map([[libraryId, refreshed]]));
+    expect(loadGameCardLibrary(file, null).get(libraryId)?.program.digest).toBe(latest.digest);
   });
 
   it("starts an external-only library empty and preserves cards imported later", () => {

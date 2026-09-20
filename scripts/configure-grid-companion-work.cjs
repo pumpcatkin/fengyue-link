@@ -914,6 +914,11 @@ async function main() {
           if (!response.ok) throw new Error(`同步接口失败：${endpoint} HTTP ${response.status}`);
           return unwrap(response);
         },
+        requestGo: async (endpoint, options) => {
+          const response = await api(window, `/go/api${endpoint}`, options);
+          if (!response.ok) throw new Error(`作品页面接口失败：${endpoint} HTTP ${response.status}`);
+          return unwrap(response);
+        },
         requestModel: async () => { throw new Error("只读同步校验不应调用模型"); },
         getAccount: () => ({ accountId, username }),
         getIdentity: async () => loadOnlineWorldIdentity(accountId),

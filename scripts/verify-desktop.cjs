@@ -57,6 +57,17 @@ if (process.type === "renderer") {
     if (name === "getOnlineWorldState") return onlineWorldFixture || { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "openOnlineWorld") return onlineWorldFixture;
     if (name === "closeOnlineWorld") return { ...onlineWorldFixture, status: "closed", syncing: false };
+    if (name === "updateOnlineWorldPreferences") {
+      onlineWorldFixture = {
+        ...onlineWorldFixture,
+        localPreferences: {
+          ...(onlineWorldFixture?.localPreferences || {}),
+          orientation: args[0]?.orientation || "any",
+          characterTags: args[0]?.characterTags || []
+        }
+      };
+      return onlineWorldFixture;
+    }
     if (name === "exportOnlineWorldCard") return { canceled: true };
     if (name === "setOrigin") return state;
     if (name === "confirmAction") return true;
@@ -187,6 +198,34 @@ if (process.type === "renderer") {
         return [first,second,third];
       })()`);
       assert.deepEqual(soundClickQa, ['100','0','10'], 'sound knob click should add ten percent and wrap after 100');
+      const preferencesClickQa = await embeddedGameFrame.executeJavaScript(`(() => {
+        document.querySelector('#edit-preferences').click();
+        document.querySelector('#preference-tag-options button').click();
+        document.querySelector('input[name="preference-orientation"][value="women"]').click();
+        const button = document.querySelector('#save-preferences');
+        button.click();
+        return {
+          type: button.type,
+          disabled: button.disabled,
+          text: button.textContent,
+          status: document.querySelector('#preferences-save-status').textContent,
+          modalVisible: !document.querySelector('#preferences-modal').classList.contains('hidden')
+        };
+      })()`);
+      assert.deepEqual(preferencesClickQa, { type: 'button', disabled: true, text: '保存中…', status: '正在保存…', modalVisible: true });
+      await settle();
+      const preferenceCall = calls.filter(call => call.name === 'updateOnlineWorldPreferences').at(-1);
+      assert(preferenceCall, 'preference save button did not dispatch to the desktop host');
+      assert.equal(preferenceCall.args[0]?.orientation, 'women');
+      assert.equal(preferenceCall.args[0]?.characterTags?.length, 1);
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#preferences-modal').classList.contains('hidden')`), true, 'preference modal did not close after a successful save');
+      if (process.env.FYMP_QA_PREFERENCES_ONLY === "1") {
+        assert.deepEqual(errors, []);
+        console.log("Preference save integration QA passed");
+        window.destroy();
+        app.exit(0);
+        return;
+      }
       const ordinaryButtonSoundQa = await embeddedGameFrame.executeJavaScript(`(() => {
         setSoundVolume(60,{persist:false});
         const original=audioTone; const tones=[];
@@ -318,7 +357,7 @@ if (process.type === "renderer") {
       fs.writeFileSync(path.join(outputDir, "map-task-march.png"), (await window.webContents.capturePage()).toPNG());
       await embeddedGameFrame.executeJavaScript(`delete payload.world.jobs.marching; payload.world.players.a.fieldArmySoldiers=30; payload.world.players.a.gold=1000; marchQuoteCache=null; draw()`);
       const previewTip = await hoverTask(8, 8.5);
-      assert(previewTip.text.includes("行军路线预览") && previewTip.text.includes("预计耗时：4分30秒"));
+      assert(previewTip.text.includes("行军路线预览") && previewTip.text.includes("预计耗时：2分15秒"), JSON.stringify(previewTip));
       assert(!previewTip.text.includes("预计消耗") && !previewTip.text.includes("金币不足"));
       const layoutQa = await embeddedGameFrame.executeJavaScript(`(() => {
         renderCell(); switchSocialTab('world');
@@ -347,6 +386,7 @@ if (process.type === "renderer") {
           transferTop:transfer.top,
           transferRight:transfer.right,
           transferParent:document.querySelector('#map-army-transfer').parentElement.className,
+          transferContainer:document.querySelector('#map-army-transfer').closest('.map-card')?.className || '',
           currentMarchArmy:document.querySelector('#current-march-army').textContent,
           floatingParty:document.querySelector('#march-party-panel')
         };
@@ -358,7 +398,8 @@ if (process.type === "renderer") {
       assert.equal(layoutQa.floatingParty, null, '地图右上角仍存在行军队伍面板');
       assert(Math.abs(layoutQa.actionsLeft - layoutQa.mapLeft) < 6 && Math.abs(layoutQa.actionsTop - layoutQa.mapTop) < 6);
       assert.equal(layoutQa.transferHidden, false, '玩家位于自己的领地时没有显示驻军调度面板');
-      assert.equal(layoutQa.transferParent, 'map-card', '驻军调度面板不在地图容器内');
+      assert.equal(layoutQa.transferParent, 'map-corner-shell map-corner-shell-right', '驻军调度面板缺少右上角收起外壳');
+      assert.equal(layoutQa.transferContainer, 'map-card', '驻军调度面板不在地图容器内');
       assert(Math.abs(layoutQa.transferRight - layoutQa.mapRight) < 6 && Math.abs(layoutQa.transferTop - layoutQa.mapTop) < 6, `驻军调度面板没有固定在地图右上角：${JSON.stringify(layoutQa)}`);
       assert.equal(layoutQa.currentMarchArmy, '行军队伍 30 人');
       const foreignPositionTransferQa = await embeddedGameFrame.executeJavaScript(`(() => {
@@ -418,7 +459,7 @@ if (process.type === "renderer") {
         marchQuoteCache={requestKey:marchQuoteKey(),cost:90,durationMs:270000}; renderMarchConfirmation();
         return restored;
       })()`);
-      assert.deepEqual(restoredMapTransferQa, { dialogHidden:true, transferHidden:false, transferParent:'map-card', slotHidden:true }, '关闭行军弹窗后驻军调度没有回到地图右上角');
+      assert.deepEqual(restoredMapTransferQa, { dialogHidden:true, transferHidden:false, transferParent:'map-corner-shell map-corner-shell-right', slotHidden:true }, '关闭行军弹窗后驻军调度没有回到地图右上角');
       const quoteFailureQa = await embeddedGameFrame.executeJavaScript(`(() => {
         marchQuoteFailureKey=marchQuoteKey(); marchQuoteCache=null; renderMarchConfirmation();
         const failed={retryVisible:!document.querySelector('#march-quote-retry').classList.contains('hidden'),submitDisabled:document.querySelector('#march-confirmation-submit').disabled,note:document.querySelector('#march-confirmation-note').textContent};
@@ -650,7 +691,8 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`/同步|修订|签名|重置并迁移/.test(document.querySelector('#online-world-setup').textContent)`), false);
       await evaluate(`renderOnlineWorldCards({cards:[...onlineWorldCards,{cardId:'other-author-game',title:'另一位作者的游戏'}]});document.querySelector('[data-card-id="other-author-game"]').click()`);
       assert.equal(await evaluate(`document.querySelector('#online-world-profile').disabled`), false, "a different game inherited the previous game's bound character");
-      assert.equal(await evaluate(`document.querySelector('[data-card-id="other-author-game"]').parentElement.querySelector('.online-world-author-badge')`), null);
+      const foreignCardMenuQa = await evaluate(`(() => { const item=document.querySelector('[data-card-id="other-author-game"]').parentElement; return { badge:Boolean(item.querySelector('.online-world-author-badge')), remove:Boolean(item.querySelector('.online-world-card-remove')), export:[...item.querySelectorAll('.online-world-author-menu button')].some(button=>button.textContent==='导出游戏卡') }; })()`);
+      assert.deepEqual(foreignCardMenuQa, { badge:true, remove:true, export:false });
       await evaluate(`closeOnlineWorldDetails()`);
       await settle();
       fs.writeFileSync(path.join(outputDir, "library-after-background-sync.png"), (await window.webContents.capturePage()).toPNG());
@@ -750,8 +792,8 @@ if (process.type === "renderer") {
       state = { ...state, releaseSecurity: { status: "update-required", verified: false, message: "发现官方新版本 v9.9.9", currentVersion: version, latestVersion: "9.9.9" } };
       window.webContents.send("qa:onState", state);
       await settle();
-      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "请更新版本");
-      assert.equal(await evaluate(`document.querySelector('#official-notice-action').textContent`), "退出工具");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-title').textContent`), "发现新的官方版本");
+      assert.equal(await evaluate(`document.querySelector('#official-notice-action').textContent`), "暂不更新");
       assert.equal(await evaluate(`/公钥|指纹/.test(document.querySelector('#official-notice-card').textContent)`), false);
       fs.writeFileSync(path.join(outputDir, "official-update-required.png"), (await window.webContents.capturePage()).toPNG());
       assert.deepEqual(errors, []);

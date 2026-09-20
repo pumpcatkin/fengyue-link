@@ -108,6 +108,32 @@ function coverageHarness() {
 }
 
 describe("online world platform service", () => {
+  it("persists updated local preferences into the active player state", async () => {
+    const saveCache = vi.fn();
+    const instance = service({ getAccount: () => ({ accountId: "player" }) });
+    instance.control = { id: "control" };
+    instance.world = createWorld({ seed: "preferences", seasonId: "season", authorityAccountId: "author", startedAt: 1 });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = {};
+    instance.saveCache = saveCache;
+    try {
+      const state = await instance.updateLocalPreferences({
+        orientation: "women",
+        characterTags: [{ tag: "狐耳", note: "蓬松" }, { tag: "高挑", note: "" }]
+      });
+      expect(state.localPreferences).toEqual({
+        orientation: "women",
+        characterProfileId: "",
+        characterTags: ["狐耳｜蓬松", "高挑"]
+      });
+      expect(instance.world.privatePlayers.player).toMatchObject({
+        orientation: "women",
+        characterTags: ["狐耳｜蓬松", "高挑"]
+      });
+      expect(saveCache).toHaveBeenCalledOnce();
+    } finally { instance.close(); }
+  });
+
   it("backs off polling after transport failures instead of retrying every five seconds", async () => {
     vi.useFakeTimers();
     const instance = service({});

@@ -573,6 +573,9 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .preference-button { width: 100%; margin: 0 0 8px; padding: 5px 8px; font-size: 9px; }
 .preferences-modal { width: min(780px, 96vw); }
 .preference-orientation { margin-bottom: 10px; }
+.preferences-save-status { min-height: 18px; color: var(--muted); font-size: 10px; font-weight: 900; }
+.preferences-save-status.success { color: #47723d; }
+.preferences-save-status.error { color: #a42f2c; }
 
 .general-modal { width: min(760px, 96vw); }
 .general-modal header small, .dialogue-modal header small { font-size: 11px; }

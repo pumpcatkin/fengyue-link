@@ -2437,6 +2437,7 @@ function openPreferences() {
   preferenceDraft.orientation = payload?.localPreferences?.orientation || "any";
   preferenceDraft.tags = mapTags(payload?.localPreferences?.characterTags);
   renderPreferenceTags();
+  setPreferencesSaveStatus("");
   document.querySelector("#preferences-modal").classList.remove("hidden");
 }
 function renderJoinWizard() {
@@ -2618,18 +2619,50 @@ document.querySelector("#add-preference-tag").addEventListener("click", () => {
 });
 const preferencesForm = document.querySelector("#preferences-form");
 const savePreferencesButton = document.querySelector("#save-preferences");
-function savePreferences() {
-  if (!preferenceDraft.tags.size) { showToast("请至少添加一个性癖标签"); return; }
-  const requestId = host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, {
-    expectResult: true,
-    key: "preferences",
-    control: savePreferencesButton,
-    timeoutMs: 10000,
-    timeoutMessage: "保存偏好请求超时，请重试"
-  });
-  if (requestId) savePreferencesButton.textContent = "保存中…";
+function setPreferencesSaveStatus(message, kind = "") {
+  const status = document.querySelector("#preferences-save-status");
+  status.textContent = String(message || "");
+  status.classList.toggle("success", kind === "success");
+  status.classList.toggle("error", kind === "error");
 }
-preferencesForm.addEventListener("submit", event => { event.preventDefault(); savePreferences(); });
+function savePreferences(event) {
+  event?.preventDefault();
+  if (pendingHostKeys.has("preferences")) {
+    setPreferencesSaveStatus("正在保存，请稍候");
+    showToast("性癖偏好正在保存，请等待返回");
+    return;
+  }
+  if (!preferenceDraft.tags.size) {
+    setPreferencesSaveStatus("请至少添加一个性癖标签", "error");
+    showToast("请至少添加一个性癖标签");
+    return;
+  }
+  setPreferencesSaveStatus("正在保存…");
+  try {
+    const requestId = host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, {
+      expectResult: true,
+      key: "preferences",
+      control: savePreferencesButton,
+      timeoutMs: 10000,
+      timeoutMessage: "保存偏好请求超时，请重试"
+    });
+    if (requestId) {
+      savePreferencesButton.textContent = "保存中…";
+      setTimeout(() => {
+        const modalOpen = !document.querySelector("#preferences-modal").classList.contains("hidden");
+        const stillWaiting = document.querySelector("#preferences-save-status").textContent === "正在保存…";
+        if (modalOpen && stillWaiting && !pendingHostKeys.has("preferences")) setPreferencesSaveStatus("保存超时，请重试", "error");
+      }, 10050);
+    }
+    else setPreferencesSaveStatus("保存请求未发出，请重试", "error");
+  } catch {
+    setPreferencesSaveStatus("保存请求未发出，请重试", "error");
+    showToast("性癖偏好保存失败，请重试");
+    playSound("error");
+  }
+}
+savePreferencesButton.addEventListener("click", savePreferences);
+preferencesForm.addEventListener("submit", savePreferences);
 for (const category of [...new Set(tagCatalog.map(item => item.category))]) {
   const option = document.createElement("option"); option.value = category; option.textContent = category;
   document.querySelector("#tag-category").append(option);
@@ -3004,6 +3037,7 @@ window.addEventListener("message", event => {
       renderCell();
       if (marchConfirmationTarget) renderMarchConfirmation();
     }
+    if (requestState?.key === "preferences") setPreferencesSaveStatus("保存失败，请重试", "error");
     joinSubmitting = false;
     playSound("error");
     if (requestState?.key === "intent:march" && /金币不足/.test(event.data.message || "")) showMapFeedback("金币不足");
@@ -3087,6 +3121,7 @@ window.addEventListener("message", event => {
       return;
     }
     if (event.data.result?.preferences) {
+      setPreferencesSaveStatus("偏好已保存", "success");
       document.querySelector("#preferences-modal").classList.add("hidden");
       playSound("success");
       showToast("性癖偏好已保存");

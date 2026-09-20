@@ -325,10 +325,12 @@ describe("Electron platform API regressions", () => {
     expect(gridGame).toContain("event.source !== parent");
     expect(gridGame).toContain("pendingHostKeys.has(key)");
     expect(gridGame).toContain('timeoutMessage: "保存偏好请求超时，请重试"');
-    expect(gridGame).toContain('savePreferencesButton.addEventListener("click", savePreferences)');
-    expect(gridHtml).toContain('id="save-preferences" class="primary" type="button"');
+    expect(gridGame).toContain('preferencesForm.addEventListener("submit", event =>');
+    expect(gridHtml).toContain('id="save-preferences" class="primary" type="submit"');
     expect(renderer).toContain('if(onlineWorldInLibrary){if(expectsResult)replyError');
     expect(gridGame).toContain('type: "prepare-join"');
+    expect(gridGame).toContain('openGeneralAction({ type: "recall"');
+    expect(gridGame).toContain('intent = { type: "recall-general", generalId: action.generalId }');
     expect(gridGame).toContain("joinDraft.preview = event.data.result.joinPreview");
     expect(gridGame).toContain('playSound("victory")');
     expect(gridGame).toContain('playSound("letter")');

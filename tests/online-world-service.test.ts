@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
-const { createWorld, createFallbackGeneral, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
+const { createWorld, createFallbackGeneral, applyIntent, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
 
@@ -2111,6 +2111,11 @@ describe("online world platform service", () => {
     world.players.author = { accountId: "author", accountName: "author@example", displayName: "服主", gold: 1000, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
     world.players.target = { accountId: "target", accountName: "target@example", displayName: "目标", gold: 1000, position: { x: 2, y: 2 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
     world.cells["2,2"] = { ownerAccountId: "target", soldiers: 10, generalIds: [] };
+    const targetGeneral = createFallbackGeneral({ id: "target-general", name: "守将", gender: "female", power: 320, holderAccountId: "target", talentSeed: "admin-action" });
+    targetGeneral.status = "deployed";
+    targetGeneral.location = { x: 2, y: 2 };
+    world.generals[targetGeneral.id] = targetGeneral;
+    world.cells["2,2"].generalIds.push(targetGeneral.id);
     const comments: any[] = [];
     let tick = 1;
     const instance = service({
@@ -2127,6 +2132,22 @@ describe("online world platform service", () => {
     instance.work = { id: "work", authorAccountId: "author" };
     instance.control = { seasonId: "season", authorityAccountId: "author", authoritySigningPublicKey: identity.signingPublicKey, authorityEncryptionPublicKey: identity.encryptionPublicKey };
     instance.world = world;
+    const simulated = await instance.administer({
+      type: "simulate-player-intent", targetAccountId: "target",
+      intent: { type: "recall-general", generalId: "target-general" }
+    });
+    expect(simulated.command).toMatchObject({ type: "simulate-player-intent", targetAccountId: "target", intent: { type: "recall-general", generalId: "target-general" } });
+    expect(instance.world.generals["target-general"]).toBeUndefined();
+    expect(instance.world.cells["2,2"].generalIds).not.toContain("target-general");
+    expect(Object.values(instance.world.authorityPlayerActions)).toContainEqual(expect.objectContaining({ targetAccountId: "target" }));
+    const targetInstance = service({ getAccount: () => ({ accountId: "target", username: "target@example" }) });
+    targetInstance.work = instance.work;
+    targetInstance.control = instance.control;
+    targetInstance.world = structuredClone(instance.world);
+    expect(targetInstance.applyAuthorityPlayerActions()).toBe(1);
+    expect(targetInstance.world.generals["target-general"]).toMatchObject({ status: "carried", location: null, holderAccountId: "target" });
+    expect(targetInstance.world.players.target.carriedGeneralIds).toContain("target-general");
+    expect(targetInstance.applyAuthorityPlayerActions()).toBe(0);
     const banned = await instance.administer({ type: "player-ban", targetAccountId: "target" });
     expect(banned.state.world.bans.target).toMatchObject({ displayName: "目标", accountName: "target@example", banned: true });
     expect(comments.map((item: any) => item.content).join("\n")).toContain("FYOW3");
@@ -2140,6 +2161,56 @@ describe("online world platform service", () => {
     const nonAuthor = service({ getAccount: () => ({ accountId: "target", username: "target@example" }), getIdentity: async () => identity });
     nonAuthor.work = instance.work; nonAuthor.control = instance.control; nonAuthor.world = world;
     await expect(nonAuthor.administer({ type: "player-ban", targetAccountId: "author" })).rejects.toThrow(/作者/);
+  });
+
+  it("recovers a recalled general across the public-publish/local-cache crash window", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-intent-transaction-"));
+    const cacheFile = path.join(directory, "cache.json");
+    try {
+      const makeInstance = () => {
+        const instance = service({ cacheFile, getAccount: () => ({ accountId: "player", username: "player@example" }), now: () => 2_000_000 });
+        instance.work = { id: "work", authorAccountId: "author" };
+        instance.control = { seasonId: "season", authorityAccountId: "author" };
+        return instance;
+      };
+      const before = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000_000 });
+      before.players.player = { accountId: "player", displayName: "玩家", gold: 1000, position: { x: 2, y: 2 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+      before.privatePlayers.player = {};
+      before.playerEpochs.player = 0;
+      before.cells["2,2"] = { ownerAccountId: "player", soldiers: 10, generalIds: ["durable-general"] };
+      const general = createFallbackGeneral({ id: "durable-general", name: "江玖鸢", gender: "female", power: 320, holderAccountId: "player", talentSeed: "durable" });
+      general.status = "deployed";
+      general.location = { x: 2, y: 2 };
+      before.generals[general.id] = general;
+      const recalled = applyIntent(before, {
+        type: "recall-general", generalId: general.id, idempotencyKey: "durable-recall"
+      }, { actorAccountId: "player", now: 2_000_000 }).state;
+
+      const preparing = makeInstance();
+      preparing.world = recalled;
+      preparing.prepareIntentTransaction({ beforeWorld: before, mapDeltaId: "durable-map-delta", intentType: "recall-general", eventId: "durable-event" });
+      const cached = preparing.loadCache("work");
+      expect(cached.pendingIntentTransaction.afterOverlay.generals[general.id]).toMatchObject({ status: "carried", location: null });
+
+      const committed = makeInstance();
+      committed.world = structuredClone(before);
+      delete committed.world.generals[general.id];
+      committed.world.cells["2,2"].generalIds = [];
+      committed.pendingIntentTransaction = structuredClone(cached.pendingIntentTransaction);
+      committed.appliedMapDeltaIds.add("durable-map-delta");
+      expect(committed.resolvePendingIntentTransaction()).toBe(true);
+      expect(committed.world.generals[general.id]).toMatchObject({ status: "carried", location: null });
+      expect(committed.world.players.player.carriedGeneralIds).toContain(general.id);
+
+      const rolledBack = makeInstance();
+      rolledBack.world = structuredClone(before);
+      rolledBack.pendingIntentTransaction = structuredClone(cached.pendingIntentTransaction);
+      expect(rolledBack.resolvePendingIntentTransaction()).toBe(true);
+      expect(rolledBack.world.generals[general.id]).toMatchObject({ status: "deployed", location: { x: 2, y: 2 } });
+      expect(rolledBack.world.players.player.carriedGeneralIds).not.toContain(general.id);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("ignores a banned player map delta and stale player epoch", () => {

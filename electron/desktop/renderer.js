@@ -1502,6 +1502,15 @@ window.addEventListener("message",async event=>{
         if(result?.state)renderOnlineWorld(result.state);
         replyResult({...result,admin:true});toast("宝物已重新散落");return;
       }
+      if(command.type==="simulate-player-intent"){
+        const target=onlineWorldState?.world?.players?.[command.targetAccountId];
+        const general=onlineWorldState?.world?.generals?.[command.intent?.generalId];
+        if(!target||!general||general.status!=="deployed"||general.holderAccountId!==command.targetAccountId)throw new Error("请选择目标玩家的一名已部署将领");
+        if(!await confirmAction(`以作品作者身份代 ${target.displayName||"目标玩家"} 召回 ${general.name||"该将领"}？`,{title:"代执行特殊行动",acceptText:"确认代为召回"})){replyResult({cancelled:true});return}
+        const result=await api.administerOnlineWorld(command);
+        if(result?.state)renderOnlineWorld(result.state);
+        replyResult({...result,admin:true});toast("已代目标玩家召回将领");return;
+      }
       if(!["player-reset","player-ban","player-unban"].includes(command.type))throw new Error("未知服主指令");
       const target=onlineWorldState?.world?.players?.[command.targetAccountId]||onlineWorldState?.world?.bans?.[command.targetAccountId];
       if(!target)throw new Error("请选择已存在的玩家");

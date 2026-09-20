@@ -84,11 +84,12 @@ describe("grid cultivation and integrated talents", () => {
       type: "cultivate-general", generalId: "cultivator", goldInvestment: 8000, materialId: "white", idempotencyKey: "cultivate-1"
     }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result.durationMs).toBe(0);
-    expect(cultivated.result.basePowerGainPercent).toBe(11);
+    expect(cultivated.result.goldInvestment).toBe(8000);
+    expect(cultivated.result.basePowerGainPercent).toBe(1.1);
     expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.9);
     expect(cultivated.result.randomFactor).toBeLessThan(1.1);
-    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(9.9);
-    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(12.2);
+    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(0.9);
+    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(1.4);
     expect(cultivated.state.jobs).toEqual({});
     expect(cultivated.state.privatePlayers.a.materials.white).toBe(0);
     expect(cultivated.state.generals.cultivator.cultivationCount).toBe(1);

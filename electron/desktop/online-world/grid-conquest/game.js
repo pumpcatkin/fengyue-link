@@ -81,7 +81,7 @@ function host(type, data = {}, options = {}) {
       control.disabled = true;
       control.classList.add("host-pending");
     }
-    const pending = { key, control, silent: Boolean(options.silent), timeoutId: null };
+    const pending = { key, control, controlText: control?.textContent || "", silent: Boolean(options.silent), timeoutId: null };
     pendingHostRequests.set(requestId, pending);
     if (key) pendingHostKeys.set(key, requestId);
     const timeoutMs = Number(options.timeoutMs || 0);
@@ -106,6 +106,7 @@ function finishHostRequest(requestId) {
   if (pending.key && pendingHostKeys.get(pending.key) === id) pendingHostKeys.delete(pending.key);
   if (pending.control) {
     pending.control.disabled = false;
+    if (pending.controlText) pending.control.textContent = pending.controlText;
     pending.control.classList.remove("host-pending");
   }
   return pending;
@@ -1258,6 +1259,18 @@ function canInteract(general) {
   return general.status === "deployed" && general.location?.x === player.position?.x && general.location?.y === player.position?.y;
 }
 
+function canViewGeneralConversation(general) {
+  return Boolean(general && general.holderAccountId === ownAccountId() && general.status !== "market");
+}
+
+function locateGeneral(general) {
+  if (!general?.location || !Number.isInteger(Number(general.location.x)) || !Number.isInteger(Number(general.location.y))) return;
+  selected = { x: Number(general.location.x), y: Number(general.location.y) };
+  renderCell();
+  draw();
+  centerMap(selected);
+}
+
 function makeButton(text, action, className = "") {
   const button = document.createElement("button");
   button.type = "button"; button.textContent = text; button.className = className;
@@ -1647,7 +1660,7 @@ function renderDeployed(cell) {
     const here = player?.position?.x === selected?.x && player?.position?.y === selected?.y;
     if (here && general.holderAccountId === ownAccountId()) {
       buttons.append(makeButton("交互", () => openDialogue(general.id), "primary"));
-      buttons.append(makeButton("召回", () => sendIntent({ type: "recall-general", generalId: general.id })));
+      buttons.append(makeButton("召回", () => openGeneralAction({ type: "recall", generalId: general.id, generalName: general.name, location: general.location })));
     }
     node.append(info, buttons); target.append(node);
   }
@@ -1879,15 +1892,21 @@ function renderWorldChat() {
 }
 function renderConversations() {
   const list = document.querySelector("#general-conversations"); list.replaceChildren();
-  const generals = Object.values(allGenerals()).filter(general => canInteract(general));
+  const generals = Object.values(allGenerals()).filter(general => canViewGeneralConversation(general));
   list.classList.toggle("hidden", Boolean(dialogueGeneralId && !document.querySelector("#dialogue-modal").classList.contains("hidden")));
   for (const general of generals) {
     const button = makeButton(general.name, () => openDialogue(general.id));
     const hint = document.createElement("small");
-    hint.textContent = general.status === "captured" ? "俘虏交互" : `战力 ${formatNumber(general.power)} · 点击交谈`;
+    hint.textContent = general.status === "captured"
+      ? "俘虏交互"
+      : canInteract(general)
+        ? `战力 ${formatNumber(general.power)} · 点击交谈`
+        : general.location
+          ? `部署于 ${general.location.x},${general.location.y} · 点击定位`
+          : `战力 ${formatNumber(general.power)} · 仅查看记录`;
     button.append(hint); list.append(button);
   }
-  if (!generals.length) list.textContent = "身边还没有可交谈的将领。";
+  if (!generals.length) list.textContent = "还没有将领通讯记录。";
 }
 
 function ownerPlayerEntries() {
@@ -1935,7 +1954,22 @@ function renderOwnerCommands() {
   const entries = ownerPlayerEntries();
   fillOwnerPlayerSelect("#owner-reset-player", entries);
   fillOwnerPlayerSelect("#owner-ban-player", entries);
+  fillOwnerPlayerSelect("#owner-simulate-player", entries);
   document.querySelector("#owner-reset-player-button").disabled = !owner || !payload?.initialized || !entries.length;
+  const simulatePlayer = document.querySelector("#owner-simulate-player");
+  const simulateGeneral = document.querySelector("#owner-simulate-general");
+  const previousGeneral = simulateGeneral.value;
+  const deployedGenerals = Object.values(allGenerals()).filter(general => general.status === "deployed" && general.holderAccountId === simulatePlayer.value);
+  simulateGeneral.replaceChildren();
+  for (const general of deployedGenerals) {
+    const option = document.createElement("option");
+    option.value = general.id;
+    option.textContent = `${general.name} · ${general.location?.x},${general.location?.y}`;
+    simulateGeneral.append(option);
+  }
+  if (deployedGenerals.some(general => general.id === previousGeneral)) simulateGeneral.value = previousGeneral;
+  simulateGeneral.disabled = !owner || !deployedGenerals.length;
+  document.querySelector("#owner-simulate-recall").disabled = !owner || !payload?.initialized || !deployedGenerals.length;
   const banSelect = document.querySelector("#owner-ban-player");
   const selectedEntry = entries.find(item => item.accountId === banSelect.value);
   const banButton = document.querySelector("#owner-ban-player-button");
@@ -2129,14 +2163,18 @@ function openGeneral(id) {
 function renderDialogue() {
   const general = allGenerals()[dialogueGeneralId];
   if (!general) return;
+  const available = canInteract(general);
   document.querySelector("#dialogue-general").textContent = general.name;
-  document.querySelector("#dialogue-mode").textContent = general.status === "captured" ? "俘虏交互" : "将领互动";
+  document.querySelector("#dialogue-mode").textContent = general.status === "captured" ? "俘虏交互" : available ? "将领互动" : "异地部署 · 仅查看";
   const history = document.querySelector("#dialogue-history"); history.replaceChildren();
   const lines = general.interactionHistory || [];
   const outgoing = [...dialogueRequests.values()].filter(item => item.generalId === dialogueGeneralId);
   const sendButton = document.querySelector("#dialogue-send");
+  const input = document.querySelector("#dialogue-input");
   const waiting = outgoing.some(item => item.status === "sending");
-  sendButton.disabled = waiting;
+  sendButton.disabled = waiting || !available;
+  input.disabled = !available;
+  input.placeholder = available ? "想和将领说什么？" : "抵达将领所在区域后可继续交谈";
   sendButton.setAttribute("aria-busy", String(waiting));
   if (!lines.length && !outgoing.length) { const p = document.createElement("p"); p.textContent = "尚无对话记录。"; history.append(p); }
   lines.forEach(item => {
@@ -2196,7 +2234,13 @@ function openGeneralAction(action) {
   const guidanceField = document.querySelector("#general-action-guidance-field");
   guidanceField.classList.toggle("hidden", !(kind === "letter" && action.guidanceRequired));
   document.querySelector("#general-action-guidance").value = "";
-  if (kind === "execution") {
+  if (kind === "recall") {
+    document.querySelector("#general-action-kind").textContent = "召回将领";
+    title.textContent = `召回${action.generalName || "这名将领"}？`;
+    description.textContent = `将从 ${action.location?.x ?? "—"},${action.location?.y ?? "—"} 撤下部署并回到随行将领。`;
+    confirm.textContent = "确认召回";
+    reject.textContent = "取消";
+  } else if (kind === "execution") {
     document.querySelector("#general-action-kind").textContent = "俘虏处置";
     title.textContent = "是否允许写诀别信？";
     description.textContent = (action.generalName || "这名俘虏") + "即将被处死。可以先消耗少量积分生成一封诀别信，或直接处死。";
@@ -2227,7 +2271,9 @@ function resolveGeneralAction(accepted) {
     return;
   }
   let intent;
-  if (action.type === "execution") {
+  if (action.type === "recall") {
+    intent = { type: "recall-general", generalId: action.generalId };
+  } else if (action.type === "execution") {
     intent = { type: "execute-captive", generalId: action.generalId, allowFarewell: true, guidance: document.querySelector("#general-action-guidance").value.trim() };
   } else if (action.type === "appearance") {
     intent = { type: "edit-general-appearance", generalId: action.generalId, note: action.note };
@@ -2271,7 +2317,8 @@ function renderGeneralDiscoveryPrompt() {
 }
 function openDialogue(id) {
   const general = allGenerals()[id];
-  if (!canInteract(general)) { showToast("当前所在位置不支持与这名将领交互"); return; }
+  if (!canViewGeneralConversation(general)) { showToast("这名将领当前不在你的通讯名册中"); return; }
+  if (!canInteract(general)) locateGeneral(general);
   if (typeof clearInvalidBattleDiscussion === "function") clearInvalidBattleDiscussion();
   if (typeof battleDiscussionContext !== "undefined" && battleDiscussionContext && String(battleDiscussionContext.generalId) !== String(id)) {
     const input = document.querySelector("#dialogue-input");
@@ -2285,7 +2332,7 @@ function openDialogue(id) {
   document.querySelector("#general-modal").classList.add("hidden");
   document.querySelector("#dialogue-modal").classList.remove("hidden");
   renderDialogue();
-  document.querySelector("#dialogue-input").focus();
+  if (canInteract(general)) document.querySelector("#dialogue-input").focus();
 }
 
 function renderAll() {
@@ -2302,7 +2349,7 @@ function renderAll() {
     if (allGenerals()[generalDetailId]) openGeneral(generalDetailId); else document.querySelector("#general-modal").classList.add("hidden");
   }
   if (dialogueGeneralId && !document.querySelector("#dialogue-modal").classList.contains("hidden")) {
-    if (canInteract(allGenerals()[dialogueGeneralId])) renderDialogue();
+    if (canViewGeneralConversation(allGenerals()[dialogueGeneralId])) renderDialogue();
     else {
       dialogueGeneralId = null;
       document.querySelector("#dialogue-modal").classList.add("hidden");
@@ -2573,16 +2620,16 @@ const preferencesForm = document.querySelector("#preferences-form");
 const savePreferencesButton = document.querySelector("#save-preferences");
 function savePreferences() {
   if (!preferenceDraft.tags.size) { showToast("请至少添加一个性癖标签"); return; }
-  host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, {
+  const requestId = host("preferences", { preferences: { orientation: preferenceDraft.orientation, characterTags: tagPayload(preferenceDraft.tags) } }, {
     expectResult: true,
     key: "preferences",
     control: savePreferencesButton,
     timeoutMs: 10000,
     timeoutMessage: "保存偏好请求超时，请重试"
   });
+  if (requestId) savePreferencesButton.textContent = "保存中…";
 }
 preferencesForm.addEventListener("submit", event => { event.preventDefault(); savePreferences(); });
-savePreferencesButton.addEventListener("click", savePreferences);
 for (const category of [...new Set(tagCatalog.map(item => item.category))]) {
   const option = document.createElement("option"); option.value = category; option.textContent = category;
   document.querySelector("#tag-category").append(option);
@@ -2717,6 +2764,7 @@ document.querySelector("#general-discovery-confirm").addEventListener("click", (
 document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
 document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
 document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
+document.querySelector("#owner-simulate-player").addEventListener("change", renderOwnerCommands);
 document.querySelector("#owner-open-server").addEventListener("click", () => host("admin", { command: { type: "open-server" } }, { expectResult: true, key: "admin:open-server" }));
 document.querySelector("#owner-scatter-treasures").addEventListener("click", () => host("admin", { command: {
   type: "scatter-treasures",
@@ -2726,6 +2774,11 @@ document.querySelector("#owner-scatter-treasures").addEventListener("click", () 
 } }, { expectResult: true, key: "admin:scatter-treasures" }));
 document.querySelector("#owner-migrate-server").addEventListener("click", () => host("admin", { command: { type: "migrate-server" } }, { expectResult: true, key: "admin:migrate-server" }));
 document.querySelector("#owner-reset-player-button").addEventListener("click", () => host("admin", { command: { type: "player-reset", targetAccountId: document.querySelector("#owner-reset-player").value } }, { expectResult: true, key: "admin:player-reset" }));
+document.querySelector("#owner-simulate-recall").addEventListener("click", () => host("admin", { command: {
+  type: "simulate-player-intent",
+  targetAccountId: document.querySelector("#owner-simulate-player").value,
+  intent: { type: "recall-general", generalId: document.querySelector("#owner-simulate-general").value }
+} }, { expectResult: true, key: "admin:simulate-player-intent" }));
 document.querySelector("#owner-ban-player-button").addEventListener("click", () => {
   const select = document.querySelector("#owner-ban-player");
   const option = select.selectedOptions[0];
@@ -2851,6 +2904,7 @@ function sendDialogue() {
   const input = document.querySelector("#dialogue-input");
   const rawText = input.value.trim();
   if (!rawText || !dialogueGeneralId) return;
+  if (!canInteract(allGenerals()[dialogueGeneralId])) { showToast("抵达将领所在区域后才能发送消息"); return; }
   if (typeof clearInvalidBattleDiscussion === "function") clearInvalidBattleDiscussion();
   const discussion = typeof battleDiscussionContext !== "undefined" && battleDiscussionContext
     && String(battleDiscussionContext.generalId) === String(dialogueGeneralId)

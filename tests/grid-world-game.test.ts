@@ -177,9 +177,10 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(first.state, { type: "train", x: player.position.x, y: player.position.y, amount: 1, idempotencyKey: "train-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/只能同时进行一项练兵/);
   });
 
-  it("caps training discovery rolls at the first 1,000 soldiers and waits for promotion", () => {
-    expect(game.trainingGeneralDiscoveryChance(0)).toBe(0);
-    expect(game.trainingGeneralDiscoveryChance(10_000)).toBe(game.trainingGeneralDiscoveryChance(1_000));
+  it("raises training discovery odds toward the 15,000-soldier guarantee and waits for promotion", () => {
+    expect(game.trainingGeneralDiscoveryChance(0)).toBe(game.TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE);
+    expect(game.trainingGeneralDiscoveryChance(10_000)).toBeGreaterThan(game.trainingGeneralDiscoveryChance(1_000));
+    expect(game.trainingGeneralDiscoveryChance(15_000)).toBe(1);
     const now = 1_000_000;
     const state = joined(now);
     state.privatePlayers.a.pendingGeneralDiscoveries = [{
@@ -298,6 +299,34 @@ describe("grid conquest rules", () => {
     expect(remembered.state.generals.g.memoryText).toContain("言谈：");
     expect(remembered.state.generals.g.memoryText).toContain("经历：");
     expect(remembered.state.generals.g.memoryText.length).toBeLessThanOrEqual(1000);
+  });
+
+  it("keeps a deployed general's dialogue available at the same cell and preserves it when the player leaves", () => {
+    const now = 1_000_000;
+    let state = joined(now);
+    state = game.applyIntent(state, {
+      type: "grant-general", generalId: "deployed-chat", name: "青禾", gender: "female",
+      setting: "善守城，重信义。", power: 500, discoveryId: "deployed-chat", idempotencyKey: "grant-deployed-chat"
+    }, { actorAccountId: "a", authorityAccountId: "a", now }).state;
+    state = game.applyIntent(state, {
+      type: "deploy-general", generalId: "deployed-chat", idempotencyKey: "deploy-chat"
+    }, { actorAccountId: "a", now: now + 1 }).state;
+    const sameCellTalk = game.applyIntent(state, {
+      type: "talk-general", generalId: "deployed-chat", topic: "守备如何？", idempotencyKey: "talk-deployed-same-cell"
+    }, { actorAccountId: "a", now: now + 2 });
+    expect(sameCellTalk.result.modelRequest.input.general.name).toBe("青禾");
+
+    const location = { ...sameCellTalk.state.generals["deployed-chat"].location };
+    sameCellTalk.state.generals["deployed-chat"].interactionHistory.push({
+      accountId: "a", userText: "守备如何？", reply: "城防无虞。", narration: "她按住剑柄，向你颔首。"
+    });
+    sameCellTalk.state.players.a.position = { x: location.x === 63 ? 62 : location.x + 1, y: location.y };
+    const projected = game.projectWorldState(sameCellTalk.state, "a", now + game.DIALOGUE_COOLDOWN_MS + 3);
+    expect(projected.generals["deployed-chat"].interactionHistory.at(-1)).toMatchObject({ reply: "城防无虞。" });
+    expect(projected.generals["deployed-chat"].location).toEqual(location);
+    expect(() => game.applyIntent(sameCellTalk.state, {
+      type: "talk-general", generalId: "deployed-chat", topic: "异地传讯", idempotencyKey: "talk-deployed-away"
+    }, { actorAccountId: "a", now: now + game.DIALOGUE_COOLDOWN_MS + 3 })).toThrow(/当前位置/);
   });
 
   it("keeps platform account identifiers out of every model-facing dialogue and memory payload", () => {

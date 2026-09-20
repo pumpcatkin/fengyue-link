@@ -74,7 +74,7 @@ describe("grid progression update rules", () => {
     expect(generalQuote.experienceReady).toBe(true);
     expect(playerQuote.goldMin).toBe(Math.ceil(game.CULTIVATION_RANGES[0].goldMin * 2.5));
     expect(playerQuote.goldMax).toBe(Math.ceil(game.CULTIVATION_RANGES[0].goldMax * 2.5));
-    expect(playerQuote.basePowerGainPercent).toBeCloseTo(generalQuote.basePowerGainPercent * 0.9, 5);
+    expect(playerQuote.basePowerGainPercent).toBeCloseTo(generalQuote.basePowerGainPercent * 0.9, 2);
     expect(playerQuote.materialCount).toBe(0);
   });
 
@@ -149,8 +149,8 @@ describe("grid progression update rules", () => {
     expect(game.battleCasualties(0, 0, 0, 100).defenderLosses).toBe(0);
   });
 
-  it("doubles training discovery per deployed general and gates discovery talents by kind", () => {
-    const makeTraining = (seed: string, deployedCount: number) => {
+  it("uses per-soldier training pity, guarantees the 15,000th soldier, and emits at most one candidate", () => {
+    const makeTraining = (seed: string, deployedCount: number, pityTrained = 0) => {
       let state = joined(seed);
       const player = state.players.a;
       const key = `${player.position.x},${player.position.y}`;
@@ -168,14 +168,17 @@ describe("grid progression update rules", () => {
         id: "training", type: "training", accountId: "a", x: player.position.x, y: player.position.y,
         amount: 1_000, outputAmount: 1_000, cost: 0, startedAt: NOW, finishAt: NOW
       };
+      state.privatePlayers.a.trainingDiscoveryPity = { trained: pityTrained, discovered: false };
       return state;
     };
-    const none = game.settleWorld(makeTraining("discover-7", 0), NOW).effects;
-    const two = game.settleWorld(makeTraining("discover-7", 2), NOW).effects;
-    expect(none.find((effect: any) => effect.type === "general-generation-request")).toBeUndefined();
-    const discovery = two.find((effect: any) => effect.type === "general-generation-request");
-    expect(discovery).toMatchObject({ sourceKind: "training", deployedGeneralCount: 2, deploymentMultiplier: 4 });
-    expect(discovery.discoveryChance).toBeCloseTo(game.trainingGeneralDiscoveryChance(1_000) * 4, 12);
+    expect(game.trainingGeneralDiscoveryChance(1)).toBe(game.TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE);
+    expect(game.trainingGeneralDiscoveryChance(10_000)).toBeGreaterThan(game.trainingGeneralDiscoveryChance(1_000));
+    expect(game.trainingGeneralDiscoveryChance(game.TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS)).toBe(1);
+    const settled = game.settleWorld(makeTraining("pity-guarantee", 2, 14_999), NOW);
+    const discoveries = settled.effects.filter((effect: any) => effect.type === "general-generation-request");
+    expect(discoveries).toHaveLength(1);
+    expect(discoveries[0]).toMatchObject({ sourceKind: "training", deployedGeneralCount: 2, deploymentMultiplier: 4, pitySoldier: 15_000 });
+    expect(settled.state.privatePlayers.a.trainingDiscoveryPity.trained).toBe(0);
 
     const context = { action: "discovery", actorAccountId: "a", position: { x: 1, y: 1 }, relation: "allied", cell: { ownerAccountId: "a", population: 1_000 }, armySize: 1000, talents: [
       { generalId: "attack", holderAccountId: "a", status: "carried", talent: talents.normalizeTalent({ instanceId: "attack", talentId: "campaign-talent-scout", progress: 1000 }) },

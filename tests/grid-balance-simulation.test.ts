@@ -36,9 +36,9 @@ describe("grid balance simulation", () => {
     expect(simulation.CULTIVATION_RANGES.map((item: any) => item.gateHours)).toEqual([0, 0, 0, 0, 0]);
     expect(simulation.CULTIVATION_RANGES.every((item: any) => item.materialCount === 1)).toBe(true);
     const fifth = simulation.CULTIVATION_RANGES[4];
-    expect(fifth).toMatchObject({ goldMin: 160000, goldMax: 240000, powerGainPctMin: 28, powerGainPctMax: 44 });
+    expect(fifth).toMatchObject({ goldMin: 16000, goldMax: 240000, powerGainPctMin: 2.8, powerGainPctMax: 4.4 });
     expect(fifth.materialChoices).toEqual(["white", "green", "blue", "purple", "gold", "red-ascend", "red-reroll"]);
-    expect(simulation.runSimulation().cultivation.totalGoldRange).toEqual({ min: 277000, max: 411000 });
+    expect(simulation.runSimulation().cultivation.totalGoldRange).toEqual({ min: 27700, max: 411000 });
   });
 
   it("reports resource cycles, two-decimal effects, and bounded talent potency", () => {
@@ -124,8 +124,8 @@ describe("grid balance simulation", () => {
     expect(report.players.every((player: any) => player.discovery.initialGeneralPower >= 250 && player.discovery.initialGeneralPower <= 350)).toBe(true);
     expect(report.players.flatMap((player: any) => player.discovery.discoveredGeneralPowers).every((power: number) => power >= 250 && power <= 350)).toBe(true);
     expect(report.config.miningModel).toBe("actual");
-    expect(report.resources.firstCultivationAffordability.mapAffordablePct).toBe(0);
-    expect(report.resources.firstCultivationAffordability.timeToAffordHours.median).toBeGreaterThan(0);
+    expect(report.resources.firstCultivationAffordability.mapAffordablePct).toBe(100);
+    expect(report.resources.firstCultivationAffordability.timeToAffordHours.median).toBe(0);
     expect(report.resources.yieldPerRunByGrade["S+"].median).toBeGreaterThan(report.resources.yieldPerRunByGrade["D-"].median);
   });
 
@@ -135,7 +135,7 @@ describe("grid balance simulation", () => {
     expect(simulation.BALANCE_BASELINE.miningFormula).toContain("round");
     expect(report.config.miningModel).toBe("legacy");
     expect(report.resources.firstCultivationAffordability).toMatchObject({
-      mapAffordablePct: 0,
+      mapAffordablePct: 100,
       strictlyIncreasesByRankAtSamePopulation: false
     });
     expect(report.resources.goldPerHourByGrade["D-"].median).toBeGreaterThan(report.resources.goldPerHourByGrade["S+"].median * 5);

@@ -10,8 +10,9 @@ const dialogueSubmit = source.slice(
 );
 
 function createHarness() {
+  let available = true;
   const history: any = { children: [], replaceChildren() { this.children = []; }, append(...nodes: any[]) { this.children.push(...nodes); }, scrollTop: 0, scrollHeight: 0 };
-  const input: any = { value: "", listeners: {}, addEventListener(type: string, listener: (event: any) => void) { this.listeners[type] = listener; } };
+  const input: any = { value: "", disabled: false, placeholder: "", listeners: {}, addEventListener(type: string, listener: (event: any) => void) { this.listeners[type] = listener; } };
   const button: any = { click: null, setAttribute() {}, addEventListener(_type: string, listener: () => void) { this.click = listener; } };
   const labels: Record<string, any> = { "#dialogue-history": history, "#dialogue-input": input, "#dialogue-send": button, "#dialogue-general": {}, "#dialogue-mode": {} };
   const general: any = { name: "赤岚·霜牙", status: "carried", interactionHistory: [] };
@@ -24,11 +25,12 @@ function createHarness() {
     ownPlayer: () => ({ displayName: "茂密" }),
     ownAccountId: () => "player-1",
     accountLabel: () => "茂密",
+    canInteract: () => available,
     redactAccountIds: (value: string) => value,
     sendIntent: () => "request-1"
   };
   runInNewContext(`${dialogueFunctions}\n${dialogueSubmit}`, context);
-  return { context, general, requests, input, history, button };
+  return { context, general, requests, input, history, button, setAvailable(value: boolean) { available = value; } };
 }
 
 describe("grid world general chat UI", () => {
@@ -59,5 +61,18 @@ describe("grid world general chat UI", () => {
     ui.button.click();
     expect(ui.input.value).toBe("请回答我");
     expect(ui.requests.size).toBe(0);
+  });
+
+  it("keeps deployed dialogue history visible while disabling messages from another cell", () => {
+    const ui = createHarness();
+    ui.general.status = "deployed";
+    ui.general.location = { x: 8, y: 9 };
+    ui.general.interactionHistory.push({ accountId: "player-1", userText: "守备如何？", reply: "一切安稳。" });
+    ui.setAvailable(false);
+    ui.context.renderDialogue();
+    expect(ui.history.children.map((node: any) => node.textContent)).toEqual(["守备如何？", "一切安稳。"]);
+    expect(ui.input.disabled).toBe(true);
+    expect(ui.input.placeholder).toContain("抵达将领所在区域");
+    expect(ui.button.disabled).toBe(true);
   });
 });

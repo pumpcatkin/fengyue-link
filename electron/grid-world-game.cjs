@@ -52,11 +52,11 @@ const PLAYER_CULTIVATION_POWER_MULTIPLIER = 0.9;
 const GENERAL_BATTLE_EXPERIENCE_MAX_RATE = 0.48;
 const GENERAL_BATTLE_EXPERIENCE_MIN_RATE = 0.1;
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 5000, goldMax: 8000, powerGainMin: 0.065, powerGainMax: 0.11 }),
-  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 12000, goldMax: 18000, powerGainMin: 0.10, powerGainMax: 0.155 }),
-  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 30000, goldMax: 45000, powerGainMin: 0.145, powerGainMax: 0.22 }),
-  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 70000, goldMax: 100000, powerGainMin: 0.20, powerGainMax: 0.31 }),
-  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 160000, goldMax: 240000, powerGainMin: 0.28, powerGainMax: 0.44 })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainMin: 0.0065, powerGainMax: 0.011 }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainMin: 0.010, powerGainMax: 0.0155 }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainMin: 0.0145, powerGainMax: 0.022 }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainMin: 0.020, powerGainMax: 0.031 }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainMin: 0.028, powerGainMax: 0.044 })
 ]);
 const MATERIAL_IDS = Object.freeze(TALENT_MATERIALS.map(item => item.id));
 const CULTIVATION_MATERIAL_IDS = MATERIAL_IDS;
@@ -185,6 +185,7 @@ function createWorld({ seed = crypto.randomBytes(16).toString("hex"), seasonId =
     generals: {},
     marketListings: {},
     marketSales: {},
+    authorityPlayerActions: {},
     jobs: {},
     treasureSpawns: {},
     claimedTreasures: {},
@@ -204,6 +205,7 @@ function resetPlayerState(inputState, targetAccountId, nextEpoch) {
   state.generals ||= {};
   state.marketListings ||= {};
   state.marketSales ||= {};
+  state.authorityPlayerActions ||= {};
   state.jobs ||= {};
   const deployedIds = new Set(Object.entries(state.generals)
     .filter(([, general]) => String(general?.holderAccountId || "") === target)
@@ -223,6 +225,9 @@ function resetPlayerState(inputState, targetAccountId, nextEpoch) {
   }
   for (const [id, sale] of Object.entries(state.marketSales)) {
     if (String(sale?.sellerAccountId || "") === target || String(sale?.buyerAccountId || "") === target) delete state.marketSales[id];
+  }
+  for (const [id, action] of Object.entries(state.authorityPlayerActions)) {
+    if (String(action?.targetAccountId || "") === target) delete state.authorityPlayerActions[id];
   }
   delete state.players[target];
   delete state.privatePlayers[target];
@@ -299,27 +304,32 @@ function generalDiscoveryChance(population) {
   return 0.019 + ((clamp(Number(population), 100, 10000) - 100) / 9900) * 0.221;
 }
 
-// Training discovery is intentionally much rarer than discovering a local
-// notable after a battle. The roll is capped at the first 1,000 trained
-// soldiers and produces at most one candidate for a completed training job.
-const TRAINING_GENERAL_DISCOVERY_PER_SOLDIER = 0.000095;
+const TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE = 0.000001;
+const TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS = 15000;
+const TRAINING_GENERAL_DISCOVERY_CURVE_POWER = 12;
+// Kept as an exported compatibility name for older program consumers.
+const TRAINING_GENERAL_DISCOVERY_PER_SOLDIER = TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE;
 
-function trainingGeneralDiscoveryChance(soldiers) {
-  const count = clamp(Math.trunc(Number(soldiers) || 0), 0, 1000);
-  return 1 - Math.pow(1 - TRAINING_GENERAL_DISCOVERY_PER_SOLDIER, count);
+function trainingGeneralDiscoveryChance(trainedSinceLastDiscovery) {
+  const count = clamp(Math.trunc(Number(trainedSinceLastDiscovery) || 0), 1, TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS);
+  if (count >= TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS) return 1;
+  const progress = count / TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS;
+  return TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE
+    + (1 - TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE) * Math.pow(progress, TRAINING_GENERAL_DISCOVERY_CURVE_POWER);
 }
 
 function normalizeTrainingDiscoveryWindow(privatePlayer) {
   if (!privatePlayer || typeof privatePlayer !== "object") return { trained: 0, discovered: false };
-  const source = privatePlayer.trainingDiscoveryWindow;
+  const source = privatePlayer.trainingDiscoveryPity || privatePlayer.trainingDiscoveryWindow;
   const trained = Number.isSafeInteger(Number(source?.trained))
-    ? clamp(Number(source.trained), 0, 999)
+    ? clamp(Number(source.trained), 0, TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS - 1)
     : 0;
-  privatePlayer.trainingDiscoveryWindow = {
+  privatePlayer.trainingDiscoveryPity = {
     trained,
-    discovered: Boolean(source?.discovered)
+    discovered: false
   };
-  return privatePlayer.trainingDiscoveryWindow;
+  delete privatePlayer.trainingDiscoveryWindow;
+  return privatePlayer.trainingDiscoveryPity;
 }
 
 function maxTrainingInputForRemaining(remainingValue, yieldModifier = 0) {
@@ -1350,19 +1360,17 @@ function settleWorld(inputState, nowValue = Date.now(), options = {}) {
         const deployedCount = deployedGeneralIdsAt(state, job.accountId, job.x, job.y).length;
         const deploymentMultiplier = 2 ** deployedCount;
         const discoveryWindow = normalizeTrainingDiscoveryWindow(privatePlayer);
-        let remaining = accepted;
-        let segment = 0;
-        while (remaining > 0) {
-          const room = 1000 - discoveryWindow.trained;
-          const chunk = Math.min(remaining, room);
+        const talentMultiplier = Math.max(0, 1 + Number(discoveryModifiers.discoveryChance || 0));
+        for (let soldierIndex = 0; soldierIndex < accepted; soldierIndex += 1) {
+          discoveryWindow.trained = Math.min(TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS, discoveryWindow.trained + 1);
           const discoveryChance = clamp(
-            (trainingGeneralDiscoveryChance(chunk) + Number(discoveryModifiers.discoveryChance || 0)) * deploymentMultiplier,
+            trainingGeneralDiscoveryChance(discoveryWindow.trained) * deploymentMultiplier * talentMultiplier,
             0, 1
           );
-          if (!discoveryWindow.discovered
-            && randomUnit(state.seed, "discover-general-training", state.seasonId, job.id, job.x, job.y, segment, discoveryWindow.trained) < discoveryChance) {
+          if (discoveryWindow.trained >= TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS
+            || randomUnit(state.seed, "discover-general-training", state.seasonId, job.id, job.x, job.y, soldierIndex, discoveryWindow.trained) < discoveryChance) {
             const orientation = privatePlayer.orientation || "any";
-            const sourceId = segment ? `${job.id}:${segment}` : job.id;
+            const sourceId = job.id;
             effects.push({
               type: "general-generation-request",
               sourceKind: "training",
@@ -1370,12 +1378,13 @@ function settleWorld(inputState, nowValue = Date.now(), options = {}) {
               accountId: job.accountId,
               x: job.x,
               y: job.y,
-              gender: allowedGeneralGender(orientation, state.seed, job.id, "training", segment),
-              directionTags: selectGeneralDirectionTags(privatePlayer, state.seed, state.seasonId, job.id, job.x, job.y, "training", segment),
+              gender: allowedGeneralGender(orientation, state.seed, job.id, "training", soldierIndex),
+              directionTags: selectGeneralDirectionTags(privatePlayer, state.seed, state.seasonId, job.id, job.x, job.y, "training", soldierIndex),
               initial: false,
               population: info.population,
               resourceGrade: info.resourceGrade,
-              trainedSoldiers: chunk,
+              trainedSoldiers: accepted,
+              pitySoldier: discoveryWindow.trained,
               discoveryChance,
               deployedGeneralCount: deployedCount,
               deploymentMultiplier,
@@ -1384,14 +1393,9 @@ function settleWorld(inputState, nowValue = Date.now(), options = {}) {
             const candidate = effects[effects.length - 1];
             candidate.discoveryId = `training:${sourceId}`;
             queueGeneralDiscovery(state, candidate);
-            discoveryWindow.discovered = true;
-          }
-          discoveryWindow.trained += chunk;
-          remaining -= chunk;
-          segment += 1;
-          if (discoveryWindow.trained >= 1000) {
             discoveryWindow.trained = 0;
             discoveryWindow.discovered = false;
+            break;
           }
         }
       }
@@ -2583,6 +2587,7 @@ function projectWorldState(state, viewerAccountId, nowValue = Date.now()) {
     playerEpochs: clone(state.playerEpochs || {}),
     privatePlayers: viewer && state.privatePlayers?.[viewer] ? { [viewer]: clone(state.privatePlayers[viewer]) } : {},
     generals,
+    authorityPlayerActions: clone(state.authorityPlayerActions || {}),
     marketListings: Object.fromEntries(Object.entries(state.marketListings || {}).map(([id, listing]) => [id, publicMarketListingState(state, listing)])),
     marketSales: clone(state.marketSales || {}),
     jobs: Object.fromEntries(Object.entries(state.jobs || {}).filter(([, job]) => job.accountId === viewer)),
@@ -2624,6 +2629,8 @@ module.exports = {
   MINING_COOLDOWN_MAX_MS,
   DIALOGUE_COOLDOWN_MS,
   TRAINING_GENERAL_DISCOVERY_PER_SOLDIER,
+  TRAINING_GENERAL_DISCOVERY_INITIAL_CHANCE,
+  TRAINING_GENERAL_DISCOVERY_PITY_SOLDIERS,
   keyOf,
   normalizedCenterDistances,
   centralLayer,

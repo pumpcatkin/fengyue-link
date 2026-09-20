@@ -679,6 +679,7 @@ function normalizeWorldState(value) {
   value.generals ||= {};
   value.marketListings ||= {};
   value.marketSales ||= {};
+  value.authorityPlayerActions ||= {};
   value.jobs ||= {};
   value.processedIntents ||= [];
   for (const player of Object.values(value.players)) ensurePowerProgress(player, 300);
@@ -813,6 +814,7 @@ class OnlineWorldService {
     this.mapFactsCache = null;
     this.experienceSessionStartedAt = null;
     this.localDeployedGeneralProgress = {};
+    this.pendingIntentTransaction = null;
   }
 
   account() {
@@ -982,18 +984,18 @@ class OnlineWorldService {
     if (this.localEvents.length > 2000) this.localEvents.splice(0, this.localEvents.length - 2000);
   }
 
-  captureLocalOverlay() {
-    if (!this.world) return null;
+  captureLocalOverlay(sourceWorld = this.world) {
+    if (!sourceWorld) return null;
     const accountId = this.account().accountId;
     const allowed = candidate => String(candidate) === accountId;
     const deployedGeneralProgress = {
-      ...deployedGeneralProgressFor(this.world, accountId),
+      ...deployedGeneralProgressFor(sourceWorld, accountId),
       ...this.localDeployedGeneralProgress
     };
     return {
-      playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0))),
-      privatePlayers: Object.fromEntries(Object.entries(this.world.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
-      players: Object.fromEntries(Object.entries(this.world.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
+      playerEpoch: Math.max(0, Math.trunc(Number(sourceWorld.playerEpochs?.[accountId] || 0))),
+      privatePlayers: Object.fromEntries(Object.entries(sourceWorld.privatePlayers || {}).filter(([id]) => allowed(id)).map(([id, value]) => [id, cloneJson(value)])),
+      players: Object.fromEntries(Object.entries(sourceWorld.players || {}).filter(([id]) => allowed(id)).map(([id, player]) => [id, {
         ...(finiteStoredNumber(player.gold) ? { gold: Number(player.gold) } : {}),
         ...(finiteStoredNumber(player.basePower) ? { basePower: Number(player.basePower) } : {}),
         ...(finiteStoredNumber(player.trainingLevel) ? { trainingLevel: Number(player.trainingLevel) } : {}),
@@ -1004,11 +1006,85 @@ class OnlineWorldService {
         ...(validRetreatPath(player.retreatPath, player.position) ? { retreatPath: player.retreatPath.map(point => ({ x: Number(point.x), y: Number(point.y) })) } : {}),
         ...(finiteStoredNumber(player.joinedAt) ? { joinedAt: Number(player.joinedAt) } : {})
       }])),
-      generals: Object.fromEntries(Object.entries(this.world.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
+      generals: Object.fromEntries(Object.entries(sourceWorld.generals || {}).filter(([, general]) => general.status !== "deployed" && allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
       deployedGeneralProgress,
-      jobs: Object.fromEntries(Object.entries(this.world.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
-      processedIntents: [...(this.world.processedIntents || [])]
+      jobs: Object.fromEntries(Object.entries(sourceWorld.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
+      processedIntents: [...(sourceWorld.processedIntents || [])]
     };
+  }
+
+  replaceLocalOverlay(overlay) {
+    if (!this.world || !overlay) return false;
+    normalizeWorldState(this.world);
+    const accountId = this.account().accountId;
+    const currentEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0)));
+    if (!accountId || Math.max(0, Math.trunc(Number(overlay.playerEpoch || 0))) !== currentEpoch) return false;
+    for (const [id, general] of Object.entries(this.world.generals || {})) {
+      if (general?.status !== "deployed" && String(general?.holderAccountId || "") === accountId) delete this.world.generals[id];
+    }
+    for (const [id, job] of Object.entries(this.world.jobs || {})) {
+      if (String(job?.accountId || "") === accountId) delete this.world.jobs[id];
+    }
+    delete this.world.privatePlayers[accountId];
+    const player = this.world.players?.[accountId];
+    if (player) {
+      for (const field of ["gold", "basePower", "trainingLevel", "power", "fieldArmySoldiers", "carriedGeneralIds", "position", "retreatPath", "joinedAt"]) delete player[field];
+      Object.assign(player, cloneJson(overlay.players?.[accountId] || {}));
+    }
+    if (overlay.privatePlayers?.[accountId]) this.world.privatePlayers[accountId] = cloneJson(overlay.privatePlayers[accountId]);
+    Object.assign(this.world.generals, cloneJson(overlay.generals || {}));
+    Object.assign(this.world.jobs, cloneJson(overlay.jobs || {}));
+    this.world.processedIntents = [...new Set(overlay.processedIntents || [])].slice(-1000);
+    this.localDeployedGeneralProgress = cloneJson(overlay.deployedGeneralProgress || {});
+    this.applyLocalDeployedGeneralProgress();
+    this.recoverOwnLocalPlayerState();
+    this.pruneForeignPrivateState();
+    this.reconcileMarketSales();
+    return true;
+  }
+
+  prepareIntentTransaction({ beforeWorld, mapDeltaId, intentType, eventId }) {
+    this.pendingIntentTransaction = {
+      version: 1,
+      transactionId: crypto.randomUUID(),
+      mapDeltaId: String(mapDeltaId),
+      workId: String(this.work?.id || ""),
+      seasonId: String(this.control?.seasonId || ""),
+      accountId: this.account().accountId,
+      playerEpoch: Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[this.account().accountId] || 0))),
+      intentType: String(intentType || "unknown").slice(0, 80),
+      eventId: String(eventId || ""),
+      beforeOverlay: this.captureLocalOverlay(beforeWorld),
+      afterOverlay: this.captureLocalOverlay(this.world),
+      phase: "prepared",
+      createdAt: this.now()
+    };
+    this.saveCache();
+    return this.pendingIntentTransaction;
+  }
+
+  resolvePendingIntentTransaction() {
+    const transaction = this.pendingIntentTransaction;
+    if (!transaction || !this.world) return false;
+    const validSession = String(transaction.workId || "") === String(this.work?.id || "")
+      && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
+      && String(transaction.accountId || "") === this.account().accountId
+      && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0)));
+    const published = validSession && (transaction.phase === "published" || this.appliedMapDeltaIds.has(String(transaction.mapDeltaId || "")));
+    const overlay = validSession ? (published ? transaction.afterOverlay : transaction.beforeOverlay) : null;
+    if (overlay) this.replaceLocalOverlay(overlay);
+    if (validSession && !published && transaction.eventId) {
+      this.localEvents = this.localEvents.filter(event => String(event?.eventId || "") !== String(transaction.eventId));
+    }
+    this.diagnostic({
+      event: "intent-transaction-recovered",
+      status: published ? "committed" : validSession ? "rolled-back" : "discarded",
+      transactionId: transaction.transactionId,
+      mapDeltaId: transaction.mapDeltaId,
+      intentType: transaction.intentType
+    });
+    this.pendingIntentTransaction = null;
+    return true;
   }
 
   captureLedgerRuntimeState() {
@@ -1092,6 +1168,7 @@ class OnlineWorldService {
       this.world.privatePlayers[accountId].initialGeneralWish = this.localPreferences.initialGeneralWish;
       this.world.privatePlayers[accountId].playerContext = cloneJson(this.localPreferences.playerContext);
     }
+    this.applyAuthorityPlayerActions();
     this.recoverOwnLocalPlayerState();
     this.pruneForeignPrivateState();
     this.reconcileMarketSales();
@@ -1291,6 +1368,7 @@ class OnlineWorldService {
       localPreferences: cloneJson(this.localPreferences),
       seenDirectMessageIds: [...this.seenDirectMessageIds].slice(-500),
       pendingModelEffects: cloneJson(this.pendingModelEffects.slice(-50)),
+      pendingIntentTransaction: this.pendingIntentTransaction ? cloneJson(this.pendingIntentTransaction) : null,
       migrationDraft: this.migrationDraft ? cloneJson(this.migrationDraft) : null,
       modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
       modelUsageSequence: this.modelUsageSequence,
@@ -1435,6 +1513,7 @@ class OnlineWorldService {
     // The cache loaded below is scoped to the referenced work. Drop the
     // previous session's experience overlay before restoring that cache.
     this.localDeployedGeneralProgress = {};
+    this.pendingIntentTransaction = null;
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
     const origin = String(this.getOrigin?.() || "").replace(/\/$/, "");
@@ -1505,6 +1584,9 @@ class OnlineWorldService {
     this.worldChatCursor = cached?.worldChatCursor && typeof cached.worldChatCursor === "object"
       ? cloneJson(cached.worldChatCursor) : null;
     this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
+    this.pendingIntentTransaction = cached?.pendingIntentTransaction && typeof cached.pendingIntentTransaction === "object"
+      ? cloneJson(cached.pendingIntentTransaction)
+      : null;
     this.migrationDraft = cached?.migrationDraft && typeof cached.migrationDraft === "object"
       ? cloneJson(cached.migrationDraft) : null;
     if (this.migrationDraft
@@ -2360,6 +2442,17 @@ class OnlineWorldService {
       return Object.entries(spawns).every(([id, spawn]) => spawn && spawn.id === id && validPosition(spawn)
         && Number.isSafeInteger(spawn.epoch) && spawn.epoch > 0 && spawn.epoch <= record.treasureEpoch && MATERIAL_BY_ID[String(spawn.materialId || "")]);
     }
+    if (record.type === "simulate-player-intent") {
+      const targetAccountId = String(record.targetAccountId || "");
+      const intent = record.intent;
+      const general = record.general;
+      if (!targetAccountId || !intent || typeof intent !== "object" || Array.isArray(intent)) return false;
+      if (String(intent.type || "") !== "recall-general" || !general || typeof general !== "object" || Array.isArray(general)) return false;
+      if (String(intent.generalId || "") !== String(general.id || "") || String(general.holderAccountId || "") !== targetAccountId) return false;
+      if (general.status !== "deployed" || !validPosition(general.location) || JSON.stringify(general).length > 30000) return false;
+      const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[targetAccountId] || 0)));
+      return Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) === currentEpoch;
+    }
     if (!["player-reset", "player-ban", "player-unban"].includes(String(record.type || ""))) return false;
     return Boolean(String(record.targetAccountId || "").trim());
   }
@@ -2375,6 +2468,41 @@ class OnlineWorldService {
     this.pendingJoinPreview = null;
   }
 
+  applyAuthorityPlayerActions() {
+    if (!this.world) return 0;
+    normalizeWorldState(this.world);
+    const accountId = this.account().accountId;
+    const player = this.world.players?.[accountId];
+    if (!accountId || !player) return 0;
+    const privatePlayer = this.world.privatePlayers[accountId] ||= {};
+    privatePlayer.appliedAuthorityPlayerActions ||= [];
+    const applied = new Set(privatePlayer.appliedAuthorityPlayerActions.map(String));
+    let count = 0;
+    const actions = Object.values(this.world.authorityPlayerActions || {})
+      .filter(action => String(action?.targetAccountId || "") === accountId)
+      .sort((left, right) => Number(left?.issuedAt || 0) - Number(right?.issuedAt || 0));
+    for (const action of actions) {
+      const actionId = String(action?.authorityId || "");
+      if (!actionId || applied.has(actionId)) continue;
+      const currentEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0)));
+      if (Math.max(0, Math.trunc(Number(action.playerEpoch || 0))) !== currentEpoch) continue;
+      if (String(action.intent?.type || "") === "recall-general") {
+        const archive = cloneJson(action.general);
+        if (!archive || String(archive.holderAccountId || "") !== accountId || String(archive.id || "") !== String(action.intent.generalId || "")) continue;
+        archive.status = "carried";
+        archive.location = null;
+        archive.experienceUpdatedAt = Math.max(Number(archive.experienceUpdatedAt || 0), Number(action.issuedAt || 0));
+        ensureGeneralProfile(archive);
+        this.world.generals[archive.id] = archive;
+        player.carriedGeneralIds = [...new Set([...(player.carriedGeneralIds || []).map(String), String(archive.id)])];
+      } else continue;
+      applied.add(actionId);
+      count += 1;
+    }
+    privatePlayer.appliedAuthorityPlayerActions = [...applied].slice(-500);
+    return count;
+  }
+
   applyAuthorityDirective(item) {
     if (!this.validAuthorityDirective(item)) return false;
     const record = item.record;
@@ -2383,7 +2511,11 @@ class OnlineWorldService {
     if (!id || this.appliedAuthorityIds.has(id) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     normalizeWorldState(this.world);
     const target = String(record.targetAccountId || "");
-    const authorityKey = record.type === "treasure-scatter" ? "treasure-scatter" : `${record.type === "player-reset" ? "reset" : "ban"}:${target}`;
+    const authorityKey = record.type === "treasure-scatter"
+      ? "treasure-scatter"
+      : record.type === "simulate-player-intent"
+        ? `simulate:${id}`
+        : `${record.type === "player-reset" ? "reset" : "ban"}:${target}`;
     if (compareOrderValue(order, this.publicAuthorityOrders[authorityKey] || this.publicMapBaselineOrder) <= 0) return false;
     if (record.type === "treasure-scatter") {
       if (record.treasureEpoch < this.world.treasureEpoch) return false;
@@ -2391,6 +2523,32 @@ class OnlineWorldService {
       this.rememberTreasureSources(record.treasureSpawns, order, record.treasureEpoch);
       this.world.treasureEpoch = record.treasureEpoch;
       this.world.treasureSpawns = Object.fromEntries(Object.entries(record.treasureSpawns).filter(([treasureId]) => !this.world.claimedTreasures[treasureId]).map(([treasureId, spawn]) => [treasureId, cloneJson(spawn)]));
+    } else if (record.type === "simulate-player-intent") {
+      const action = {
+        authorityId: id,
+        targetAccountId: target,
+        playerEpoch: Math.max(0, Math.trunc(Number(record.playerEpoch || 0))),
+        intent: cloneJson(record.intent),
+        general: cloneJson(record.general),
+        issuedAt: Number(record.issuedAt || 0)
+      };
+      this.world.authorityPlayerActions[id] = action;
+      const generalId = String(record.intent.generalId || "");
+      const location = record.general.location;
+      const locationKey = `${location.x},${location.y}`;
+      const cell = this.world.cells?.[locationKey];
+      if (cell && String(cell.ownerAccountId || "") === target) {
+        cell.generalIds = (cell.generalIds || []).filter(candidate => String(candidate) !== generalId);
+        this.publicCellOrders[locationKey] = order;
+      }
+      delete this.world.generals[generalId];
+      delete this.localDeployedGeneralProgress[generalId];
+      this.publicGeneralOrders[generalId] = order;
+      const retained = Object.entries(this.world.authorityPlayerActions)
+        .sort(([, left], [, right]) => Number(right?.issuedAt || 0) - Number(left?.issuedAt || 0))
+        .slice(0, 500);
+      this.world.authorityPlayerActions = Object.fromEntries(retained);
+      this.applyAuthorityPlayerActions();
     } else if (record.type === "player-reset") {
       const targetEpoch = Number(record.playerEpoch);
       if (Number.isSafeInteger(targetEpoch) && targetEpoch <= Number(this.world.playerEpochs[target] || 0)) {
@@ -2865,6 +3023,8 @@ class OnlineWorldService {
         if (this.world) {
           this.collectTreasureSources(history.assembled.records);
           this.applyPublicLedger(history.assembled.records);
+          this.resolvePendingIntentTransaction();
+          this.applyAuthorityPlayerActions();
           this.reconcileMarketSales();
           if (history.completeThrough && compareOrderValue(history.completeThrough, this.publicHistoryOrder) > 0) this.publicHistoryOrder = { ...history.completeThrough };
         }
@@ -2991,6 +3151,11 @@ class OnlineWorldService {
     }
     if (this.migrationActive) throw new Error("游戏服务器正在搬迁，请稍后再试");
     if (this.pendingMigration?.workId && this.pendingMigration.workId !== this.work?.id) throw new Error("游戏服务器正在搬迁，请等待自动转入新服务器");
+    if (this.pendingIntentTransaction) {
+      try { await this.sync(true); }
+      catch (error) { throw actionConnectionError(error); }
+      if (this.pendingIntentTransaction) throw new Error("上一项行动正在核对提交结果，请稍后再试");
+    }
     if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏暂时未连接，请稍后再试");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
@@ -3066,12 +3231,12 @@ class OnlineWorldService {
     return event;
   }
 
-  async publishMapChanges(changes, identity) {
+  async publishMapChanges(changes, identity, options = {}) {
     if (!hasPublicMapChanges(changes)) return null;
     const actor = this.world.players?.[this.account().accountId];
     const record = signRecord({
       schema: FYOW_SCHEMAS.mapDelta,
-      mapDeltaId: crypto.randomUUID(),
+      mapDeltaId: String(options.mapDeltaId || crypto.randomUUID()),
       gameId: GRID_GAME_ID,
       workId: this.work.id,
       seasonId: this.control.seasonId,
@@ -3140,6 +3305,7 @@ class OnlineWorldService {
     const localEventStart = this.localEvents.length;
     this.recordLocalEvent(localEvent);
     let mapDelta = null;
+    let transactionMapDeltaId = "";
     try {
       let dialogue = null;
       let deferredEffects = [];
@@ -3192,7 +3358,19 @@ class OnlineWorldService {
         await this.applyLocalIntent({ type: "execute-captive", generalId: intent.generalId, allowFarewell: false, idempotencyKey: `execute-after-farewell:${intent.idempotencyKey}` }, actorAccountId, { internal: true });
       }
       const changes = createPublicMapChanges(beforeWorld, this.world, outcome.effects, actorAccountId);
-      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity);
+      transactionMapDeltaId = !options.internal && hasPublicMapChanges(changes) ? crypto.randomUUID() : "";
+      if (transactionMapDeltaId) this.prepareIntentTransaction({
+        beforeWorld,
+        mapDeltaId: transactionMapDeltaId,
+        intentType: intent.type,
+        eventId: localEvent?.eventId
+      });
+      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId });
+      if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
+        this.pendingIntentTransaction.phase = "published";
+        this.pendingIntentTransaction.publishedAt = this.now();
+        this.saveCache();
+      }
       if (intent.type !== "join" && !effectsHandledEarly) {
         const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: Boolean(mapDelta) });
         deferredEffects = handled.deferred;
@@ -3202,6 +3380,7 @@ class OnlineWorldService {
         try { await this.publishSnapshot(); } catch (error) { snapshotWarning = String(error?.message || error || "公共地图快照整理失败"); }
       }
       if (!options.internal) {
+        if (!transactionMapDeltaId || this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) this.pendingIntentTransaction = null;
         this.saveCache();
         this.notify();
       }
@@ -3247,9 +3426,24 @@ class OnlineWorldService {
     this.recordLocalEvent(event);
     const identity = await this.getIdentity();
     let mapDelta = null;
+    let transactionMapDeltaId = "";
     try {
-      mapDelta = await this.publishMapChanges(createPublicMapChanges(beforeWorld, this.world, settled.effects, this.account().accountId), identity);
+      const changes = createPublicMapChanges(beforeWorld, this.world, settled.effects, this.account().accountId);
+      transactionMapDeltaId = hasPublicMapChanges(changes) ? crypto.randomUUID() : "";
+      if (transactionMapDeltaId) this.prepareIntentTransaction({
+        beforeWorld,
+        mapDeltaId: transactionMapDeltaId,
+        intentType: "time-settle",
+        eventId: event.eventId
+      });
+      mapDelta = await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId });
+      if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
+        this.pendingIntentTransaction.phase = "published";
+        this.pendingIntentTransaction.publishedAt = this.now();
+        this.saveCache();
+      }
       await this.handleEffects(settled.effects, identity, { deferOnFailure: Boolean(mapDelta) });
+      if (!transactionMapDeltaId || this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) this.pendingIntentTransaction = null;
       this.saveCache();
       return settled.effects;
     } catch (error) {
@@ -3470,6 +3664,40 @@ class OnlineWorldService {
       this.saveCache();
       this.notify();
       return { command: { type: "scatter-treasures", authorityId: record?.authorityId || null }, state: this.state() };
+    }
+    if (type === "simulate-player-intent") {
+      const targetAccountId = String(command.targetAccountId || "").trim();
+      const intent = command.intent && typeof command.intent === "object" && !Array.isArray(command.intent) ? cloneJson(command.intent) : {};
+      if (!targetAccountId || !this.world.players?.[targetAccountId]) throw new Error("请选择已经加入本局的目标玩家");
+      if (String(intent.type || "") !== "recall-general") throw new Error("这项特殊行动暂不支持代执行");
+      const generalId = String(intent.generalId || "").trim();
+      const general = this.world.generals?.[generalId];
+      if (!general || general.status !== "deployed" || String(general.holderAccountId || "") !== targetAccountId || !validPosition(general.location)) throw new Error("目标玩家没有这名已部署将领");
+      const cell = this.world.cells?.[`${general.location.x},${general.location.y}`];
+      if (!cell || !(cell.generalIds || []).map(String).includes(generalId)) throw new Error("将领部署记录与所在区域不一致");
+      const identity = await this.getIdentity();
+      if (identity.signingPublicKey !== this.control.authoritySigningPublicKey) throw new Error("当前设备不是本赛季登记的作者设备");
+      const authorityId = crypto.randomUUID();
+      const record = signRecord({
+        schema: FYOW_SCHEMAS.authority,
+        authorityId,
+        gameId: GRID_GAME_ID,
+        workId: this.work.id,
+        seasonId: this.control.seasonId,
+        authorityAccountId: account.accountId,
+        type,
+        targetAccountId,
+        playerEpoch: Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[targetAccountId] || 0))),
+        intent: { type: "recall-general", generalId },
+        general: publicGeneralState(general),
+        issuedAt: this.now()
+      }, identity.signingPrivateKey);
+      const sources = await this.postRecord(record);
+      if (!this.applyAuthorityDirective({ record, sources })) throw new Error("代执行记录发布后未通过作者身份与时间戳校验");
+      await this.publishSnapshot();
+      this.saveCache();
+      this.notify();
+      return { command: { type, targetAccountId, intent: cloneJson(record.intent), authorityId }, state: this.state() };
     }
     if (!["player-reset", "player-ban", "player-unban"].includes(type)) throw new Error("未知服主指令");
     const targetAccountId = String(command.targetAccountId || "").trim();

@@ -214,7 +214,7 @@
         <div id="preference-tags" class="selected-tags"></div>
         <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
         <div id="preference-tag-options" class="tag-options"></div>
-        <footer><span></span><button id="save-preferences" class="primary" type="button">保存偏好</button></footer>
+        <footer><span></span><button id="save-preferences" class="primary" type="submit">保存偏好</button></footer>
       </form>
     </section>
 
@@ -343,6 +343,11 @@
           <h2>玩家数据</h2>
           <p>重置后清除该玩家的领地、部署将领与角色进度。该玩家下次进入时需要重新创建角色。</p>
           <div class="owner-command-row"><select id="owner-reset-player" aria-label="选择需要重置的玩家"></select><button id="owner-reset-player-button" type="button">重置玩家数据</button></div>
+        </section>
+        <section class="owner-command-section">
+          <h2>代执行特殊行动</h2>
+          <p>以作品作者签名代目标玩家执行受支持的公开行动。</p>
+          <div class="owner-command-row"><select id="owner-simulate-player" aria-label="选择代执行目标玩家"></select><select id="owner-simulate-general" aria-label="选择需要召回的部署将领"></select><button id="owner-simulate-recall" type="button">代为召回</button></div>
         </section>
         <section class="owner-command-section">
           <h2>封禁管理</h2>

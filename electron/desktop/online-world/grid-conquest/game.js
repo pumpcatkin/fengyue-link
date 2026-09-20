@@ -170,9 +170,11 @@ function showMapFeedback(text, anchor = document.querySelector("#march")) {
   floatingFeedbackTimer = setTimeout(() => node.classList.add("hidden"), 1800);
 }
 function generalExperienceLabel(general) {
-  const required = Math.max(0, Math.trunc(Number(general?.experienceRequired) || 0));
-  const experience = Math.max(0, Math.trunc(Number(general?.experience) || 0));
-  return required > 0 ? `${formatNumber(Math.min(experience, required))} / ${formatNumber(required)}` : "修炼圆满";
+  const fallback = [100, 300, 800, 1800, 3600][Number(general?.cultivationCount || 0)] || 0;
+  const required = Math.max(0, Math.trunc(Number(general?.experienceRequired ?? fallback) || 0));
+  const raw = Number(general?.experience);
+  const experience = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+  return `${experience.toLocaleString("zh-CN", { maximumFractionDigits: 3 })} / ${formatNumber(required)}`;
 }
 function battleReportMarker(report) {
   const target = report?.target || {};
@@ -992,7 +994,7 @@ function powerTrainingTargets() {
   return [
     { value: `player:${ownAccountId()}`, type: "player", id: ownAccountId(), name: `${player.displayName}（自己）`, entity: player },
     ...Object.values(allGenerals())
-      .filter(general => general.holderAccountId === ownAccountId() && ["carried", "waiting"].includes(general.status))
+      .filter(general => general.holderAccountId === ownAccountId() && general.status === "carried" && (player.carriedGeneralIds || []).includes(general.id))
       .map(general => ({ value: `general:${general.id}`, type: "general", id: general.id, name: `${general.name}（将领）`, entity: general }))
   ];
 }
@@ -1013,13 +1015,13 @@ function renderPowerTraining() {
   renderMaterials();
   select.disabled = !target;
   button.disabled = !target;
-  if (!target) { preview.textContent = "加入游戏后可以闭关修炼自己与未部署将领"; document.querySelector("#training-level").textContent = "0 / 5 次"; return; }
+  if (!target) { preview.textContent = ""; document.querySelector("#training-level").textContent = "0 / 5 次"; return; }
   const quote = target.entity.cultivationQuote;
   const count = Number(target.entity.cultivationCount || 0);
   document.querySelector("#training-level").textContent = `${count} / 5 次`;
   if (!quote || !quote.remaining) {
-    preview.textContent = count >= 5 ? "五次闭关修炼已完成。" : "暂时还不能闭关修炼，请稍后再试。";
-    button.disabled = true; button.textContent = count >= 5 ? "修炼圆满" : "暂不可用"; return;
+    preview.textContent = isGeneral ? `经验 ${generalExperienceLabel(target.entity)}` : "";
+    button.disabled = true; button.textContent = count >= 5 ? "已完成修炼" : "暂不可用"; return;
   }
   const gold = document.querySelector("#cultivation-gold");
   gold.min = String(quote.goldMin); gold.max = String(quote.goldMax);
@@ -1031,15 +1033,10 @@ function renderPowerTraining() {
   const validInvestment = String(gold.value).trim() !== "" && Number.isSafeInteger(cost) && cost >= quote.goldMin && cost <= quote.goldMax;
   const material = document.querySelector("#cultivation-material").value;
   const materialCount = isGeneral ? Number(ownPlayer()?.materials?.[material] || 0) : Number.POSITIVE_INFINITY;
-  const materialText = isGeneral ? " + 1 件天材地宝；材料只改变将领天赋" : "；玩家闭关不使用天材地宝";
   const experienceReady = !isGeneral || (quote.experienceReady === true
     && Number.isFinite(Number(quote.experience)) && Number(quote.experienceRequired) > 0
     && Number(quote.experience) >= Number(quote.experienceRequired));
-  const experienceText = isGeneral
-    ? `经验 ${formatNumber(quote.experience)} / ${formatNumber(quote.experienceRequired)}。`
-    : "玩家闭关无需经验。";
-  const lockText = unlocked ? "" : `第 ${quote.attempt} 次闭关修炼尚未开放，剩余 ${formatDuration(Number(quote.unlockAt || 0) - hostTime())}。`;
-  preview.textContent = `第 ${quote.attempt} 次 · ${experienceText}可投入 ${formatNumber(quote.goldMin)}—${formatNumber(quote.goldMax)} 金币。实际消耗 ${formatNumber(cost)} 金币${materialText}。金币越多，战力增幅越高（含随机浮动）。${lockText}`;
+  preview.textContent = isGeneral ? `经验 ${generalExperienceLabel({ ...target.entity, experience: quote.experience, experienceRequired: quote.experienceRequired })}` : "";
   button.disabled = !unlocked || !experienceReady || !validInvestment || quote.eligible === false || materialCount < 1 || Number(ownPlayer()?.gold || 0) < cost;
   button.textContent = !unlocked ? "尚未开放" : !experienceReady ? "经验不足" : !validInvestment ? "请输入有效金币" : quote.eligible === false ? "当前不可修炼" : materialCount < 1 ? "尚无材料" : "闭关一次";
 }
@@ -1181,6 +1178,7 @@ function renderMarchConfirmation() {
     node.textContent = general.name || "未命名将领";
     const status = document.createElement("small");
     status.textContent = index < 2 ? `生效 · ${formatNumber(trainingPower(general))} 战力` : "随行";
+    status.textContent += ` · 经验 ${generalExperienceLabel(general)}`;
     node.append(status);
     generalList.append(node);
   });
@@ -1442,7 +1440,7 @@ function renderMarketSellChoices() {
     const option = document.createElement("option");
     const cooldown = marketCooldownUntil(general);
     option.value = String(general.id);
-    option.textContent = `${general.name || "无名将领"} · 战力 ${formatNumber(trainingPower(general))} · ${marketCooldownText(general)}`;
+    option.textContent = `${general.name || "无名将领"} · 战力 ${formatNumber(trainingPower(general))} · 经验 ${generalExperienceLabel(general)} · ${marketCooldownText(general)}`;
     option.disabled = cooldown > hostTime();
     if (!option.disabled) available += 1;
     select.append(option);
@@ -1545,7 +1543,7 @@ function renderMarket() {
     const price = document.createElement("strong"); price.className = "market-price"; price.textContent = `${formatNumber(listing.price)} 金币`;
     header.append(title, price); card.append(header);
     const stats = document.createElement("dl");
-    const rows = [["战力", formatNumber(trainingPower(general))], ["修炼", `${Number(general.cultivationCount || 0)} 次`], ["天赋", general.talentSummary?.text || general.talentSummary?.name || "—"]];
+    const rows = [["战力", formatNumber(trainingPower(general))], ["经验", generalExperienceLabel(general)], ["修炼", `${Number(general.cultivationCount || 0)} 次`], ["天赋", general.talentSummary?.text || general.talentSummary?.name || "—"]];
     for (const [label, value] of rows) { const block = document.createElement("div"); const dt = document.createElement("dt"); dt.textContent = label; const dd = document.createElement("dd"); dd.textContent = value; block.append(dt, dd); stats.append(block); }
     card.append(stats);
     const setting = document.createElement("div"); setting.className = "market-copy"; setting.textContent = `外观：${general.appearanceSetting || "—"}\n设定：${general.coreSetting || general.setting || "—"}`; card.append(setting);
@@ -1919,6 +1917,7 @@ function renderConversations() {
         : general.location
           ? `部署于 ${general.location.x},${general.location.y} · 点击定位`
           : `战力 ${formatNumber(general.power)} · 仅查看记录`;
+    hint.textContent += ` · 经验 ${generalExperienceLabel(general)}`;
     button.append(hint); list.append(button);
   }
   if (!generals.length) list.textContent = "还没有将领通讯记录。";
@@ -1979,7 +1978,7 @@ function renderOwnerCommands() {
   for (const general of deployedGenerals) {
     const option = document.createElement("option");
     option.value = general.id;
-    option.textContent = `${general.name} · ${general.location?.x},${general.location?.y}`;
+    option.textContent = `${general.name} · ${general.location?.x},${general.location?.y} · 经验 ${generalExperienceLabel(general)}`;
     simulateGeneral.append(option);
   }
   if (deployedGenerals.some(general => general.id === previousGeneral)) simulateGeneral.value = previousGeneral;
@@ -2039,7 +2038,7 @@ function renderBattleReportGeneralPicker(report) {
   for (const general of candidates) {
     const button = makeButton(general.name, () => discussBattleReportWithGeneral(report.id, general.id));
     const detail = document.createElement("small");
-    detail.textContent = `${general.status === "captured" ? "俘虏" : general.status === "deployed" ? "驻守" : "随行"} · 战力 ${formatNumber(general.power)}`;
+    detail.textContent = `${general.status === "captured" ? "俘虏" : general.status === "deployed" ? "驻守" : "随行"} · 战力 ${formatNumber(general.power)} · 经验 ${generalExperienceLabel(general)}`;
     button.append(detail); target.append(button);
   }
 }
@@ -2522,6 +2521,7 @@ function renderInitialGeneralPreview() {
   root.dataset.previewId = preview.previewId;
   document.querySelector("#join-general-name").value = general.name || "";
   document.querySelector("#join-general-gender").textContent = general.gender === "male" ? "男" : "女";
+  document.querySelector("#join-general-experience").textContent = generalExperienceLabel(general);
   document.querySelector("#join-general-height").value = general.heightCm ?? "";
   document.querySelector("#join-general-weight").value = general.weightKg ?? "";
   document.querySelector("#join-general-chest").value = general.measurements?.chestCm ?? "";

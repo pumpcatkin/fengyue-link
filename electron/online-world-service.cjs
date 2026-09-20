@@ -156,6 +156,13 @@ function commentPageRootCount(comments) {
   return Number.isSafeInteger(comments?.rootCount) ? comments.rootCount : commentPageRoots(comments).length;
 }
 
+async function completeReadBatch(requests) {
+  const results = await Promise.allSettled(requests);
+  const failed = results.find(result => result.status === "rejected");
+  if (failed) throw failed.reason;
+  return results.map(result => result.value);
+}
+
 function commentTimestamp(value) {
   const raw = value?.created_at ?? value?.createdAt ?? value?.create_time ?? value?.createTime
     ?? value?.published_at ?? value?.publishedAt ?? value?.timestamp ?? null;
@@ -545,6 +552,9 @@ function normalizeGeneratedGeneral(value, effect = {}, edits = null) {
     },
     appearanceSetting: text("appearanceSetting", gender === "female" ? "她衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。" : "他衣着利落，神态沉着，带着常年行走乱世养成的警觉气质。", 350),
     coreSetting: text("coreSetting", wish || "此人出身乱世，具备成为良将的才能与抱负，愿追随拥有慧眼的主公开疆扩土。", MAX_GENERAL_CORE_SETTING_LENGTH),
+    cultivationCount: 0,
+    experience: 0,
+    experienceRequired: generalExperienceRequirement(0),
     power: effect.generatedPower ?? (effect.generatedSeed
       ? generatedGeneralPower(effect.generatedSeed, effect.accountId, effect.sourceId || effect.discoveryId || "general")
       : DEFAULT_GENERATED_GENERAL_POWER)
@@ -822,6 +832,8 @@ class OnlineWorldService {
     this.status = "closed";
     this.syncing = false;
     this.syncInFlight = null;
+    this.commentReadSession = null;
+    this.loadProgress = null;
     this.error = null;
     this.lastSyncAt = null;
     this.knownCommentIds = new Set();
@@ -960,6 +972,7 @@ class OnlineWorldService {
       revision: Number(this.world?.revision || 0),
       lastSyncAt: this.lastSyncAt,
       history: { ...this.history },
+      loadProgress: this.loadProgress ? { ...this.loadProgress } : null,
       migration: this.pendingMigration ? { ...this.pendingMigration } : null,
       directInboxCount: this.directInbox.length,
       directMessageCount: this.directHistory.length,
@@ -1006,6 +1019,27 @@ class OnlineWorldService {
 
   notify() {
     try { this.onChange(this.state()); } catch {}
+  }
+
+  updateLoadProgress(patch = {}) {
+    if (!this.loadProgress?.active) return;
+    this.loadProgress = { ...this.loadProgress, ...patch };
+    this.notify();
+  }
+
+  trackReadComments(comments) {
+    const session = this.commentReadSession;
+    if (!session || !this.loadProgress?.active) return;
+    for (const comment of comments) {
+      const id = commentId(comment);
+      if (id) session.comments.set(id, comment);
+    }
+    const roots = commentPageRoots([...session.comments.values()]).length;
+    const unreadRoots = Math.max(0, (session.totalRoots || roots) - roots);
+    this.updateLoadProgress({
+      phase: this.loadProgress.phase === "validating" ? "validating" : "reading", readComments: session.comments.size,
+      totalComments: session.totalRoots == null ? null : session.comments.size + unreadRoots
+    });
   }
 
   diagnostic(detail) {
@@ -1561,10 +1595,12 @@ class OnlineWorldService {
   }
 
   async pause() {
+    this.loadProgress = null;
     this.close();
     await Promise.allSettled([this.syncInFlight, this.intentInFlight, this.joinInFlight, this.migrationInFlight].filter(Boolean));
     this.saveCache();
     this.status = "closed";
+    this.loadProgress = null;
     this.notify();
     return this.state();
   }
@@ -1651,6 +1687,7 @@ class OnlineWorldService {
     const reference = workReference(fixedWorkUrl, origin);
     if (normalizedCard && reference.workId !== normalizedCard.companion.workId) throw new Error("游戏卡绑定的伴生作品编号不一致");
     this.status = "opening";
+    this.loadProgress = { schema: "fyow.load-progress/1", active: true, phase: "preparing", readComments: 0, totalComments: null };
     this.error = null;
     this.pendingJoinPreview = null;
     // Never project the previous server while a different work is being
@@ -1768,7 +1805,7 @@ class OnlineWorldService {
       characterProfile: cached?.localPreferences?.characterProfile ? normalizeCharacterProfile(cached.localPreferences.characterProfile) : null,
       playerContext: cached?.localPreferences?.playerContext && typeof cached.localPreferences.playerContext === "object" ? cloneJson(cached.localPreferences.playerContext) : null
     };
-    if (cached?.publicArchivesRequireRefresh) {
+    {
       this.appliedMapDeltaIds.clear();
       this.appliedAuthorityIds.clear();
       this.publicDeltaCountSinceSnapshot = 0;
@@ -1808,8 +1845,8 @@ class OnlineWorldService {
     try {
       await this.sync(true);
     } catch (error) {
-      if (!verifiedCachedServer || this.migrationProof) throw error;
-      syncError = error;
+      this.updateLoadProgress({ phase: "error", error: error?.message || String(error) });
+      throw error;
     }
     this.assertSyncActive();
     if (this.pendingMigration) {
@@ -1994,9 +2031,23 @@ class OnlineWorldService {
     throw lastError;
   }
 
-  async readHistoryPage(page) {
+  async readHistoryPage(page, { fresh = false } = {}) {
+    const session = this.commentReadSession;
+    if (!session || fresh) return this.fetchHistoryPage(page);
+    const key = `${this.work.id}:${page}`;
+    if (!session.pages.has(key)) {
+      const pending = this.fetchHistoryPage(page).catch(error => {
+        session.pages.delete(key);
+        throw error;
+      });
+      session.pages.set(key, pending);
+    }
+    return session.pages.get(key);
+  }
+
+  async fetchHistoryPage(page) {
     this.assertSyncActive();
-    const endpoint = `/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=desc&filter_type=all`;
+    const endpoint = `/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=created_at_desc&filter_type=all`;
     let payload;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -2013,6 +2064,7 @@ class OnlineWorldService {
     }
     this.assertSyncActive();
     const comments = extractCommentItems(payload);
+    this.trackReadComments(comments);
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
     if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
     return comments;
@@ -2021,7 +2073,10 @@ class OnlineWorldService {
   async probeMigrationReset() {
     try {
       const comments = await this.readHistoryPage(1);
-      const hydrated = await this.hydrateCommentReplies(comments, assembleCommentRecords(comments), new Set());
+      const assembled = assembleCommentRecords(comments);
+      const hydrated = await this.hydrateCommentReplies(comments, {
+        ...assembled, incomplete: assembled.incomplete.filter(item => item.kind === "RESET")
+      }, new Set());
       return this.verifiedResetsWithoutControl(assembleCommentRecords(hydrated).records)[0] || null;
     } catch (error) {
       if (this.syncPaused) throw error;
@@ -2031,6 +2086,14 @@ class OnlineWorldService {
   }
 
   async readCommentBranches(rootCommentId, maxPages = REPLY_PAGE_LIMIT, options = {}) {
+    const session = this.commentReadSession;
+    const key = `${this.work?.id || ""}:${rootCommentId}:${maxPages}`;
+    if (!session) return this.fetchCommentBranches(rootCommentId, maxPages, options);
+    if (!session.branches.has(key)) session.branches.set(key, this.fetchCommentBranches(rootCommentId, maxPages, options));
+    return session.branches.get(key);
+  }
+
+  async fetchCommentBranches(rootCommentId, maxPages = REPLY_PAGE_LIMIT, options = {}) {
     const rootId = String(rootCommentId || "");
     if (!rootId) return [];
     const result = [];
@@ -2047,6 +2110,7 @@ class OnlineWorldService {
         this.assertSyncActive();
       } catch (error) {
         if (this.syncPaused) throw error;
+        this.commentReadSession?.failedRoots.set(rootId, error);
         this.diagnostic({
           event: "comment-branch-read-failed", rootCommentId: rootId, page,
           error: error?.message || String(error)
@@ -2070,6 +2134,7 @@ class OnlineWorldService {
           || Number(meta.total_pages ?? meta.totalPages ?? 0) > page)
         : commentPageRootCount(items) >= HISTORY_PAGE_SIZE;
       if (!hasMore || !commentPageRootCount(items) || seen.size === beforeCount) break;
+      if (page === maxPages) this.commentReadSession?.failedRoots.set(rootId, new Error("评论回复分页超过读取上限，请重试同步"));
       page += 1;
     }
     const expectedRoot = options.rootComment;
@@ -2101,6 +2166,7 @@ class OnlineWorldService {
         break;
       }
     }
+    this.trackReadComments(result);
     return result;
   }
 
@@ -2122,9 +2188,18 @@ class OnlineWorldService {
     }
     const expanded = [...base];
     const seen = new Set(base.map(commentId).filter(Boolean));
-    for (const rootId of roots.slice(0, 200)) {
-      fetchedRoots.add(rootId);
-      const replies = await this.readCommentBranches(rootId, REPLY_PAGE_LIMIT, { rootComment: base.find(comment => commentId(comment) === rootId) });
+    let cursor = 0;
+    const rootById = new Map(base.map(comment => [commentId(comment), comment]));
+    const repliesByRoot = new Map();
+    await completeReadBatch(Array.from({ length: Math.min(4, roots.length) }, async () => {
+      while (cursor < roots.length) {
+        const rootId = roots[cursor++];
+        fetchedRoots.add(rootId);
+        repliesByRoot.set(rootId, await this.readCommentBranches(rootId, REPLY_PAGE_LIMIT, { rootComment: rootById.get(rootId) }));
+      }
+    }));
+    for (const rootId of roots) {
+      const replies = repliesByRoot.get(rootId) || [];
       for (const reply of replies) {
         const id = commentId(reply);
         if (id && !seen.has(id)) {
@@ -2233,11 +2308,15 @@ class OnlineWorldService {
     this.historyTailPage = tailPage;
     const firstPageComments = await readPage(1);
     const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
+    if (this.commentReadSession) {
+      this.commentReadSession.totalRoots = (tailPage - 1) * HISTORY_PAGE_SIZE + commentPageRootCount(tailPageComments);
+      this.trackReadComments([]);
+    }
     const timestamps = comments => commentPageRoots(comments).map(commentTimestamp).filter(Boolean);
     const monotonic = (values, ascending) => values.every((value, index) => !index || (ascending ? values[index - 1] <= value : values[index - 1] >= value));
     const firstTimes = timestamps(firstPageComments);
     const tailTimes = timestamps(tailPageComments);
-    // Comment order may be relevance-ranked even when order=desc is requested.
+    // Pinned comments or platform changes can still break chronology.
     // A snapshot is only an early-stop boundary when page chronology is proven.
     const oldestFirst = tailPage > 1 && firstTimes.length && tailTimes.length
       && monotonic(firstTimes, true) && monotonic(tailTimes, true)
@@ -2250,9 +2329,9 @@ class OnlineWorldService {
     const scanPages = pageOrder === "newest-first"
       ? Array.from({ length: tailPage }, (_, index) => index + 1)
       : Array.from({ length: tailPage }, (_, index) => tailPage - index);
-    if (pageOrder === "mixed") {
+    if (fullScan || pageOrder === "mixed") {
       for (let index = 0; index < scanPages.length; index += 4) {
-        await Promise.all(scanPages.slice(index, index + 4).map(readPage));
+        await completeReadBatch(scanPages.slice(index, index + 4).map(readPage));
       }
     }
     for (const page of scanPages) {
@@ -2263,6 +2342,7 @@ class OnlineWorldService {
         seen.add(id);
         all.push(comment);
       }
+      if (fullScan || pageOrder === "mixed") continue;
       const expanded = await this.hydrateCommentReplies(all, assembleCommentRecords(all), fetchedRoots);
       for (const comment of expanded) {
         const id = commentId(comment);
@@ -2302,6 +2382,35 @@ class OnlineWorldService {
     const hydrated = await this.hydrateCommentReplies(all, assembleCommentRecords(all), fetchedRoots);
     const assembled = assembleCommentRecords(hydrated);
     const hitHistoryCap = tailPage === MAX_HISTORY_PAGES && commentPageRootCount(tailPageComments) >= HISTORY_PAGE_SIZE;
+    if (hitHistoryCap) throw new Error("评论分页尚未读取完整，请重试同步");
+    for (const partial of assembled.incomplete) {
+      for (const source of partial.sources || []) {
+        const error = this.commentReadSession?.failedRoots.get(commentId(source));
+        if (error) throw new Error(`评论分片读取中断，请重试同步：${error.message}`);
+      }
+    }
+    if (this.loadProgress?.active) {
+      this.updateLoadProgress({ phase: "validating", pendingRecords: assembled.incomplete.length });
+      // Verify the cloud page boundaries before using this entry snapshot.
+      // A concurrent insert or deletion must trigger another full read.
+      const signature = items => canonicalJson(items.map(item => [commentId(item), String(item.content || "")]).sort((a, b) => a[0].localeCompare(b[0])));
+      for (let start = 1; start <= tailPage; start += 4) {
+        const pageNumbers = Array.from({ length: Math.min(4, tailPage - start + 1) }, (_, offset) => start + offset);
+        const checked = await completeReadBatch(pageNumbers.map(async page => ({ page, comments: await this.readHistoryPage(page, { fresh: true }) })));
+        if (checked.some(({ page, comments }) => signature(comments) !== signature(pages.get(page) || []))) {
+          const error = new Error("云端评论在读取期间发生变化，正在重新读取");
+          error.code = "FYOW_HISTORY_CHANGED";
+          throw error;
+        }
+      }
+      if (commentPageRootCount(tailPageComments) === HISTORY_PAGE_SIZE
+        && commentPageRootCount(await this.readHistoryPage(tailPage + 1, { fresh: true }))) {
+        const error = new Error("云端评论分页在读取期间增加，正在重新读取");
+        error.code = "FYOW_HISTORY_CHANGED";
+        throw error;
+      }
+      this.updateLoadProgress({ phase: "validating" });
+    }
     if ((!stoppedBy || pageOrder === "mixed") && !hitHistoryCap) reachedCoverage = true;
     const newestRootTime = commentPageRoots(hydrated).reduce((maximum, comment) => Math.max(maximum, commentTimestamp(comment)), 0);
     let completeThrough = { timestamp: Math.max(0, newestRootTime - 1), commentId: "" };
@@ -3215,6 +3324,7 @@ class OnlineWorldService {
     const previousControlId = String(this.control?.id || "");
     const previousDirectSession = this.directSession();
     this.syncing = true;
+    this.commentReadSession = { pages: new Map(), branches: new Map(), comments: new Map(), failedRoots: new Map(), totalRoots: null };
     this.error = null;
     this.notify();
     try {
@@ -3236,7 +3346,17 @@ class OnlineWorldService {
       }
       let history;
       try {
-        history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+            break;
+          } catch (error) {
+            if (error.code !== "FYOW_HISTORY_CHANGED" || attempt === 2) throw error;
+            this.commentReadSession = { pages: new Map(), branches: new Map(), comments: new Map(), failedRoots: new Map(), totalRoots: null };
+            this.historyTailPage = 1;
+            this.updateLoadProgress({ phase: "reading", readComments: 0, totalComments: null });
+          }
+        }
       } catch (error) {
         if (!this.syncPaused && this.world && this.control) {
           try { await this.settleLocalClock(this.now(), { localOnly: true }); }
@@ -3292,9 +3412,11 @@ class OnlineWorldService {
           return this.state();
         }
         if (!this.pendingMigration?.requiresPublish) this.pendingMigration = null;
+        if (this.loadProgress?.active && !controls.length) throw new Error("云端控制记录尚未读取完整，请重试同步");
         const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;
+        if (this.loadProgress?.active && !snapshot) throw new Error("云端状态记录尚未读取完整，请重试同步");
         if (this.migrationProof) {
           const proof = this.migrationProof;
           const anchorControl = proof.targetControlId
@@ -3355,6 +3477,7 @@ class OnlineWorldService {
             const chatHistory = await this.readWorldChatHistory(history);
             this.applyWorldChatRecords(chatHistory.assembled.records);
           } catch (error) {
+            if (this.loadProgress?.active) throw error;
             this.diagnostic({ event: "world-chat-sync-deferred", error: error?.message || String(error) });
           }
           this.assertSyncActive();
@@ -3370,11 +3493,18 @@ class OnlineWorldService {
           try { await this.publishSnapshot(); }
           catch (error) { this.diagnostic({ event: "snapshot-compaction-deferred", error: error?.message || String(error) }); }
         }
-        await this.receiveDirectWakes().catch(() => []);
+        await this.receiveDirectWakes().catch(error => {
+          if (this.loadProgress?.active) throw error;
+          return [];
+        });
         this.assertSyncActive();
         if (this.pendingIntentTransaction?.phase === "prepared") throw new Error("行动结果已保存在本机，等待同步，请重试连接");
       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
+      this.updateLoadProgress({
+        phase: "complete", active: false,
+        totalComments: this.loadProgress?.readComments || 0
+      });
       this.lastSyncAt = this.now();
       this.saveCache();
       if (fullScan || previousControlId !== String(this.control?.id || "")) {
@@ -3388,12 +3518,14 @@ class OnlineWorldService {
         return this.state();
       }
       this.error = error?.message || String(error);
+      this.updateLoadProgress({ phase: "error", error: this.error });
       this.status = this.world ? "degraded" : "error";
       this.diagnostic({ event: "sync-failed", fullScan: Boolean(fullScan), status: this.status, error: this.error, history: { ...this.history } });
       this.notify();
       throw error;
     } finally {
       this.syncing = false;
+      this.commentReadSession = null;
       this.notify();
     }
   }
@@ -3562,7 +3694,11 @@ class OnlineWorldService {
 
   sanitizedEvent(event) {
     if (event.type === "talk-general") return { ...event, result: { generalId: event.result.generalId, modelRequested: true } };
-    if (event.type === "grant-general") return { ...event, result: { generalGranted: true } };
+    if (event.type === "grant-general") return { ...event, result: {
+      generalGranted: true, generalId: event.result.generalId,
+      experience: event.result.experience, experienceRequired: event.result.experienceRequired,
+      cultivationCount: event.result.cultivationCount
+    } };
     return event;
   }
 

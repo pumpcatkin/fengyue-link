@@ -83,10 +83,11 @@ describe("grid conquest rules", () => {
     }, { actorAccountId: "a", now: job.finishAt })).toThrow(/冷却/);
   });
 
-  it("scales completed mining cooldowns from one to four hours by resource rank", () => {
-    expect(game.miningCooldownMs({ resourceRank: 0 })).toBe(game.HOUR);
-    expect(game.miningCooldownMs({ resourceRank: game.RESOURCE_GRADES.length - 1 })).toBe(4 * game.HOUR);
+  it("reduces every resource grade cooldown by ten percent", () => {
+    expect(game.miningCooldownMs({ resourceRank: 0 })).toBe(0.9 * game.HOUR);
+    expect(game.miningCooldownMs({ resourceRank: game.RESOURCE_GRADES.length - 1 })).toBe(3.6 * game.HOUR);
     const values = game.RESOURCE_GRADES.map((_: string, resourceRank: number) => game.miningCooldownMs({ resourceRank }));
+    values.forEach((value: number, index: number) => expect(value).toBeCloseTo(0.9 * (game.HOUR + index / 14 * 3 * game.HOUR), 0));
     expect(values).toEqual([...values].sort((left, right) => left - right));
   });
 
@@ -138,6 +139,31 @@ describe("grid conquest rules", () => {
     expect(trainingSettlement.state.cells[key].soldiers).toBe(soldiersBefore);
     expect(trainingSettlement.state.jobs[trainingJob.id]).toBeUndefined();
     expect(trainingSettlement.effects).toContainEqual(expect.objectContaining({ type: "training-cancelled", reason: "territory-lost" }));
+  });
+
+  it.each([[0, 5000], [1, 5500], [2, 6000], [10, 10000], [100, 55000], [1000, 505000], [10000, 5005000]])(
+    "uses five seconds plus half a second per soldier for a batch of %i",
+    (amount, duration) => expect(game.trainDurationMs(amount)).toBe(duration)
+  );
+
+  it("schedules the new training duration without rewriting existing job deadlines", () => {
+    const now = 1_000_000;
+    const state = joined(now);
+    const position = state.players.a.position;
+    const key = `${position.x},${position.y}`;
+    state.cells[key].soldiers = 0;
+    const trained = game.applyIntent(state, {
+      type: "train", ...position, amount: 10, idempotencyKey: "new-training-duration"
+    }, { actorAccountId: "a", now });
+    expect(trained.result).toMatchObject({ amount: 10, durationMs: 10000, finishAt: now + 10000 });
+    expect(game.settleWorld(trained.state, now + 9999).state.jobs[trained.result.jobId]).toBeDefined();
+    expect(game.settleWorld(trained.state, now + 10000).state.cells[key].soldiers).toBe(10);
+
+    const oldDeadline = now + 62000;
+    trained.state.jobs[trained.result.jobId].finishAt = oldDeadline;
+    const restored = game.settleWorld(trained.state, now + 10000).state;
+    expect(restored.jobs[trained.result.jobId].finishAt).toBe(oldDeadline);
+    expect(restored.cells[key].soldiers).toBe(0);
   });
 
   it("rejects training above the fixed twenty-percent garrison cap", () => {

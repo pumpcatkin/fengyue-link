@@ -30,6 +30,49 @@ function deploy(state: any, id = "general", now = NOW) {
 }
 
 describe("grid progression update rules", () => {
+  it("starts an initial general at zero experience regardless of supplied progression fields", () => {
+    const result = game.applyIntent(joined(), {
+      type: "grant-general", generalId: "initial", name: "初始将领", gender: "female",
+      initial: true, experience: 99_999, cultivationCount: 5, experienceUpdatedAt: NOW - game.HOUR,
+      power: 99_999, idempotencyKey: "initial"
+    }, { actorAccountId: "a", authorityAccountId: "a", now: NOW });
+    expect(result.state.generals.initial).toMatchObject({ experience: 0, cultivationCount: 0, experienceUpdatedAt: 0 });
+    expect(result.result).toMatchObject({ experience: 0, experienceRequired: 100, cultivationCount: 0 });
+  });
+
+  it("reconciles two victories and three journeys to their exact fractional experience", () => {
+    const general = { cultivationCount: 0, experience: 0 };
+    for (const [source, value] of [["march", 6], ["battle", 839], ["march", 6], ["march", 5], ["battle", 639]] as const) {
+      const amount = source === "march" ? game.generalMarchExperienceGain(general, value) : game.generalBattleExperienceGain(general, value);
+      game.grantGeneralExperience(general, amount);
+    }
+    expect(general.experience).toBe(24.659);
+    expect(game.generalExperienceRequirement(general)).toBe(100);
+  });
+
+  it.each([false, true])("settles a journey once and gives no untravelled experience when blocked=%s", blocked => {
+    let state = grant(joined(), "traveller");
+    state.generals.traveller.basePower = 330;
+    state.generals.traveller.power = 330;
+    state.players.a.position = { x: 0, y: 0 };
+    state.players.a.basePower = 500;
+    state.players.a.power = 500;
+    state.cells["6,0"] = { ownerAccountId: "b", soldiers: 0, generalIds: [] };
+    if (blocked) state.cells["3,0"] = { ownerAccountId: "b", soldiers: 0, generalIds: [] };
+    state.jobs.journey = {
+      id: "journey", type: "march", accountId: "a", from: { x: 0, y: 0 }, to: { x: 6, y: 0 },
+      path: Array.from({ length: 6 }, (_, index) => ({ x: index + 1, y: 0 })),
+      soldiers: 10, generalIds: ["traveller"], activeGeneralIds: ["traveller"], attack: true,
+      startedAt: NOW, finishAt: NOW + 90_000
+    };
+    const first = game.settleWorld(state, NOW + 90_000, { activeAccountId: "a", experienceSince: NOW });
+    expect(first.state.generals.traveller.experience).toBe(blocked ? 0 : 11.069);
+    expect(first.effects.filter((effect: any) => effect.type === "general-experience-gained").every((effect: any) => effect.jobId === "journey")).toBe(true);
+    const repeated = game.settleWorld(first.state, NOW + 180_000, { activeAccountId: "a", experienceSince: NOW });
+    expect(repeated.state.generals.traveller.experience).toBe(first.state.generals.traveller.experience);
+    expect(repeated.effects.some((effect: any) => effect.type === "general-experience-gained")).toBe(false);
+  });
+
   it("rejects general ID collisions without replacing the original archive or roster", () => {
     const state = grant(joined(), "first");
     state.generals.first.interactionHistory = [{ userText: "old", reply: "retained" }];

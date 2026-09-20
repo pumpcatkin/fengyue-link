@@ -108,6 +108,94 @@ function coverageHarness() {
 }
 
 describe("online world platform service", () => {
+  it("ignores model-supplied and edited experience when previewing a new general", () => {
+    const forged = { ...completeGeneral, experience: 100, experienceRequired: 0, cultivationCount: 5 };
+    const general = normalizeGeneratedGeneral(forged, { gender: "female" }, forged);
+    expect(general).toMatchObject({ experience: 0, experienceRequired: 100, cultivationCount: 0 });
+  });
+  it("shares reads only within a cloud sync and reads new records on the next sync", async () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    const request = reader.requestConsole;
+    const endpoints: string[] = [];
+    reader.requestConsole = async (endpoint: string, options: any) => {
+      endpoints.push(endpoint);
+      return request(endpoint, options);
+    };
+    await reader.sync(true);
+    expect(endpoints.filter(endpoint => endpoint.includes("?page=1&"))).toHaveLength(1);
+    expect(reader.commentReadSession).toBeNull();
+    fixture.map("player", 20, { cells: { "3,3": { ownerAccountId: "player", soldiers: 8, generalIds: [] } } });
+    await reader.sync(true);
+    expect(endpoints.filter(endpoint => endpoint.includes("?page=1&"))).toHaveLength(2);
+    expect(reader.world.cells["3,3"].soldiers).toBe(8);
+  });
+
+  it("restarts an entry read if cloud page boundaries change and completes progress only after verification", async () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    reader.loadProgress = { schema: "fyow.load-progress/1", active: true, phase: "preparing", readComments: 0, totalComments: null };
+    const events: any[] = [];
+    reader.onChange = (state: any) => { if (state.loadProgress) events.push(state.loadProgress); };
+    const request = reader.requestConsole;
+    let firstPageReads = 0;
+    reader.requestConsole = async (endpoint: string, options: any) => {
+      if (endpoint.includes("?page=1&") && ++firstPageReads === 2) {
+        fixture.map("player", 21, { cells: { "3,3": { ownerAccountId: "player", soldiers: 11, generalIds: [] } } });
+      }
+      return request(endpoint, options);
+    };
+    await reader.sync(true);
+    expect(firstPageReads).toBe(4);
+    expect(reader.world.cells["3,3"].soldiers).toBe(11);
+    expect(events.some(event => event.phase === "validating" && event.active)).toBe(true);
+    expect(reader.summary().loadProgress).toMatchObject({ active: false, phase: "complete" });
+    expect(reader.loadProgress.readComments).toBe(reader.loadProgress.totalComments);
+  });
+
+  it("fails entry on a missing branch transport response without clearing the local archive", async () => {
+    const fixture = coverageHarness();
+    const pending = fixture.map("player", 25, { cells: {} }, { padding: crypto.randomBytes(3000).toString("hex") });
+    pending.root.children = [];
+    const reader = fixture.create("player");
+    const request = reader.requestConsole;
+    reader.requestConsole = async (endpoint: string, options: any) => {
+      if (endpoint.startsWith("/comments/branches/")) throw new Error("503 missing branch");
+      return request(endpoint, options);
+    };
+    reader.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
+    reader.world = structuredClone(fixture.author.world);
+    reader.world.privatePlayers.player = { preserved: "private archive" };
+    await expect(reader.sync(true)).rejects.toThrow(/分片读取中断/);
+    expect(reader.world.privatePlayers.player.preserved).toBe("private archive");
+    expect(reader.loadProgress.phase).toBe("error");
+    expect(reader.commentReadSession).toBeNull();
+  });
+
+  it("hydrates more than two hundred roots with at most four concurrent branch reads", async () => {
+    const instance = service({});
+    let active = 0;
+    let maximum = 0;
+    const roots: any[] = [];
+    const replies = new Map();
+    for (let index = 0; index < 205; index += 1) {
+      const chunks = encodeCommentRecord({ schema: "fyow.event/3", eventId: `large-${index}`, padding: crypto.randomBytes(600).toString("hex") });
+      expect(chunks.length).toBeGreaterThan(1);
+      roots.push({ id: `root-${index}`, account_id: "author", content: chunks[0] });
+      replies.set(`root-${index}`, chunks.slice(1).map((content: string, part: number) => ({ id: `reply-${index}-${part}`, account_id: "author", content, parent_id: `root-${index}` })));
+    }
+    instance.readCommentBranches = async (id: string) => {
+      maximum = Math.max(maximum, ++active);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      active -= 1;
+      return replies.get(id);
+    };
+    const assembled = assembleCommentRecords(await instance.hydrateCommentReplies(roots));
+    expect(assembled.records).toHaveLength(205);
+    expect(assembled.incomplete).toHaveLength(0);
+    expect(maximum).toBe(4);
+  });
+
   it("keeps all three existing generals and dialogue after generating a fourth, then restoring the cache overlay", async () => {
     const { author: instance } = coverageHarness();
     instance.world.players.author = { accountId: "author", displayName: "yuoa333", position: { x: 16, y: 0 }, carriedGeneralIds: ["first", "second", "third"], fieldArmySoldiers: 0, gold: 100 };
@@ -694,7 +782,7 @@ describe("online world platform service", () => {
     const bareRoot = { ...root, children: [] };
     const hydrated = await instance.hydrateCommentReplies([bareRoot]);
     expect(assembleCommentRecords(hydrated).records[0].record).toEqual(record);
-    expect(endpoints).toEqual(["/comments/branches/root", "/comments/work/1?page=4&limit=50&order=desc&filter_type=all"]);
+    expect(endpoints).toEqual(["/comments/branches/root", "/comments/work/1?page=4&limit=50&order=created_at_desc&filter_type=all"]);
   });
 
   it("does not locally apply truncated or mismatched-author posting responses", async () => {
@@ -862,8 +950,8 @@ describe("online world platform service", () => {
     instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });
     instance.world.players.player = { accountId: "player", displayName: "晴岚" };
     const history = await instance.readHistory(true);
-    expect(instance.history.stoppedBy).toBe("covered-by-snapshot");
-    expect(history.assembled.records.filter((item: any) => item.record.schema === "fyow.world-chat/1")).toHaveLength(0);
+    expect(instance.history.stoppedBy).toBe("oldest-page");
+    expect(history.assembled.records.filter((item: any) => item.record.schema === "fyow.world-chat/1")).toHaveLength(65);
     const chats = await instance.readWorldChatHistory(history);
     instance.applyWorldChatRecords(chats.assembled.records, { replace: true });
     expect(instance.state().worldChat).toHaveLength(50);
@@ -1493,7 +1581,7 @@ describe("online world platform service", () => {
     const reader = fixture.create("player");
     await reader.sync(true);
     expect(reader.history.tailPage).toBe(5);
-    expect(reader.history.stoppedBy).toBe("covered-by-snapshot");
+    expect(reader.history.stoppedBy).toBe("oldest-page");
     expect(reader.world.cells["7,7"].ownerAccountId).toBe("player");
     expect(reader.publicMapBaselineOrder.timestamp).toBe(fixture.base + 100);
   });
@@ -1582,7 +1670,7 @@ describe("online world platform service", () => {
     expect(state.work.authorAccountId).toBe(authorAccountId);
   });
 
-  it("opens a signed cached server and preserves its owner identity during a platform 503", async () => {
+  it("rejects entry during a platform 503 while preserving the owner's private archive", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-offline-open-"));
     const cacheFile = path.join(directory, "cache.json");
     const card = createBundledGridCard();
@@ -1632,15 +1720,17 @@ describe("online world platform service", () => {
       onDiagnostic: (detail: any) => diagnostics.push(detail)
     });
     try {
-      const state = await offline.open({ card, displayName: "服主", orientation: "any" });
-      expect(state).toMatchObject({
+      await expect(offline.open({ card, displayName: "服主", orientation: "any" })).rejects.toThrow("503");
+      expect(offline.state()).toMatchObject({
         initialized: true,
         isAuthor: true,
         isServerOwner: true,
         status: "degraded",
         error: "平台请求失败：503",
+        loadProgress: { active: true, phase: "error" },
         work: { id: card.companion.workId, authorAccountId: accountId }
       });
+      expect(offline.world.players[accountId].position).toEqual({ x: 2, y: 2 });
       expect(await offline.isGameCardAuthor(card)).toBe(true);
       expect(diagnostics.map(item => item.event)).toEqual(expect.arrayContaining([
         "work-detail-cache-fallback",

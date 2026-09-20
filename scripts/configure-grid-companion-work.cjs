@@ -903,8 +903,8 @@ async function main() {
         const hits = [];
         for (const url of [...new Set([...document.scripts].map(script => script.src).filter(Boolean))]) {
           const source = await fetch(url).then(response => response.text()).catch(() => '');
-          if (!source.includes('"sendAppComment"')) continue;
-          for (const needle of ['O=','function O(','bodyStringify','645141,e=>']) {
+          if (!source.includes('AppComment') && !source.includes('getComments') && !source.includes('fetchComments')) continue;
+          for (const needle of ['AppComment','getComments','fetchComments']) {
             let from = 0;
             for (let count = 0; count < 5; count++) {
               const index = source.indexOf(needle,from);
@@ -917,6 +917,35 @@ async function main() {
         return hits;
       })()`, true);
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_INSPECT_HISTORY === "1") {
+      const requests = [];
+      const service = new OnlineWorldService({
+        requestConsole: async (endpoint, options) => {
+          requests.push(endpoint);
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        getAccount: () => ({}), getOrigin: () => ORIGIN, cacheFile: null, onChange: () => {}
+      });
+      service.work = { id: workId, authorAccountId: card.companion.authorAccountId };
+      service.commentReadSession = { pages: new Map(), branches: new Map(), comments: new Map(), failedRoots: new Map(), totalRoots: null };
+      service.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
+      const startedAt = Date.now();
+      const history = await service.readHistory(true);
+      const control = service.verifiedControls(history.assembled.records)[0]?.record;
+      process.stdout.write(`${JSON.stringify({
+        history: service.history, requests: requests.length, elapsedMs: Date.now() - startedAt, progress: service.loadProgress,
+        incomplete: history.assembled.incomplete.map(item => ({ kind: item.kind, id: item.id, received: item.received, total: item.total,
+          createdAt: item.sources[0]?.created_at })),
+        invalid: history.assembled.invalid,
+        snapshots: service.verifiedSnapshots(history.assembled.records, control).slice(0, 3).map(item => ({
+          id: item.id, order: recordPlatformOrder(item), through: item.record.ledgerCoverage?.through,
+          pendingIncluded: history.assembled.incomplete.filter(partial => item.record.ledgerCoverage?.appliedMapDeltaIds?.includes(partial.id)).map(partial => partial.id)
+        }))
+      }, null, 2)}\n`);
       return;
     }
     if (process.env.FYOW_PROBE_SEGMENTS === "1") {
@@ -1092,16 +1121,22 @@ async function main() {
     }
     if (process.env.FYOW_INSPECT_COMMENT_PAGES === "1") {
       const pages = [];
-      for (const [order, page] of [["desc", 1], ["asc", 1], ["desc", 2], ["desc", 3]]) {
+      for (const [order, page] of [["created_at_desc", 1], ["created_at_desc", 2]]) {
         const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1?page=${page}&limit=50&order=${order}&filter_type=all`);
         const payload = unwrap(response);
         const items = extractCommentItems(payload);
+        const roots = items.filter(item => !item._fyowRootId);
+        const times = roots.map(item => Number(item.created_at || 0));
         pages.push({
           order,
           page,
           ok: response.ok,
           status: response.status,
           itemCount: items.length,
+          rootCount: roots.length,
+          descending: times.every((value, index) => !index || times[index - 1] >= value),
+          ascending: times.every((value, index) => !index || times[index - 1] <= value),
+          rootTimes: times,
           firstCreatedAt: items[0]?.created_at || null,
           lastCreatedAt: items.at(-1)?.created_at || null,
           newestCreatedAt: Math.max(0, ...items.map(item => Number(item?.created_at || 0))),

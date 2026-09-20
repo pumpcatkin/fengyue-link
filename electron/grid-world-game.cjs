@@ -37,8 +37,8 @@ const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 const RESOURCE_YIELD_FORMULA_VERSION = 5;
 const MINING_DURATION_MS = 10 * MINUTE;
 const MAX_CONCURRENT_MINING_JOBS = 3;
-const MINING_COOLDOWN_MIN_MS = HOUR;
-const MINING_COOLDOWN_MAX_MS = 4 * HOUR;
+const MINING_COOLDOWN_MIN_MS = 0.9 * HOUR;
+const MINING_COOLDOWN_MAX_MS = 3.6 * HOUR;
 const MARCH_MS_PER_CELL = 15 * 1000;
 const MINING_GRADE_YIELD_MULTIPLIERS = Object.freeze(
   RESOURCE_GRADES.map((_, index) => 2.8 + index * 0.18)
@@ -52,11 +52,11 @@ const PLAYER_CULTIVATION_POWER_MULTIPLIER = 0.9;
 const GENERAL_BATTLE_EXPERIENCE_MAX_RATE = 0.48;
 const GENERAL_BATTLE_EXPERIENCE_MIN_RATE = 0.1;
 const CULTIVATION_RANGES = Object.freeze([
-  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainMin: 0.025, powerGainMax: 0.045 }),
-  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainMin: 0.040, powerGainMax: 0.065 }),
-  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainMin: 0.060, powerGainMax: 0.095 }),
-  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainMin: 0.090, powerGainMax: 0.140 }),
-  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainMin: 0.130, powerGainMax: 0.200 })
+  Object.freeze({ attempt: 1, gateHours: 0, goldMin: 500, goldMax: 8000, powerGainMin: 0.05, powerGainMax: 1 }),
+  Object.freeze({ attempt: 2, gateHours: 0, goldMin: 1200, goldMax: 18000, powerGainMin: 0.05, powerGainMax: 1 }),
+  Object.freeze({ attempt: 3, gateHours: 0, goldMin: 3000, goldMax: 45000, powerGainMin: 0.05, powerGainMax: 1 }),
+  Object.freeze({ attempt: 4, gateHours: 0, goldMin: 7000, goldMax: 100000, powerGainMin: 0.05, powerGainMax: 1 }),
+  Object.freeze({ attempt: 5, gateHours: 0, goldMin: 16000, goldMax: 240000, powerGainMin: 0.05, powerGainMax: 1 })
 ]);
 const MATERIAL_IDS = Object.freeze(TALENT_MATERIALS.map(item => item.id));
 const CULTIVATION_MATERIAL_IDS = MATERIAL_IDS;
@@ -377,7 +377,7 @@ function resourceYield(cell) {
 }
 
 function trainDurationMs(amount) {
-  return clamp(MINUTE + Math.ceil(Number(amount) / 5) * 1000, MINUTE, HOUR);
+  return 5000 + clamp(Math.trunc(Number(amount) || 0), 0, 10000) * 500;
 }
 
 function trainingPower(basePowerValue, levelValue) {
@@ -641,6 +641,7 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
     ensureGeneralTalent(target, state?.seed);
     if (target.status === "deployed") throw new Error("部署中的将领不能修炼");
     if (target.status === "captured") throw new Error("俘虏不能修炼");
+    if (target.status !== "carried") throw new Error("仅随行将领可以修炼");
   }
   const cultivationCount = clamp(Math.trunc(Number(target.cultivationCount) || 0), 0, CULTIVATION_RANGES.length);
   if (cultivationCount >= CULTIVATION_RANGES.length) throw new Error(`${targetType === "player" ? "玩家" : "该将领"}已经完成五次修炼`);
@@ -664,8 +665,8 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
   const baseGain = (range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin))
     * targetPowerMultiplier / Math.max(0.55, 1 + modifiers.cultivationCost);
   const targetKey = String(target.id || target.accountId || player.accountId || targetType);
-  const randomFactor = 0.9 + randomUnit(String(options.seed ?? state?.seed ?? "cultivation"), "cultivation-power", targetKey, range.attempt) * 0.2;
-  const powerGainFraction = Math.min(0.75, baseGain * randomFactor * (1 + modifiers.cultivationPower));
+  const randomFactor = 0.5 + randomUnit(String(options.seed ?? state?.seed ?? "cultivation"), "cultivation-power", targetKey, range.attempt);
+  const powerGainFraction = baseGain * randomFactor * (1 + modifiers.cultivationPower);
   const currentPower = generalPower(target);
   const targetPower = currentPower + Math.max(1, Math.round(currentPower * powerGainFraction));
   const currentBasePower = clamp(Math.trunc(Number(target.basePower || target.power || 1)), 1, 100000);
@@ -696,6 +697,7 @@ function cultivationActionQuote(state, accountId, generalId, goldInvestment, mat
   const general = state.generals?.[String(generalId)];
   if (!general || String(general.holderAccountId) !== String(accountId)) throw new Error("只能修炼自己的将领");
   const quote = cultivationQuote(general, player, nowValue, { state, goldInvestment: integer(goldInvestment, "修炼投入", 1, 1000000000), materialId });
+  if (!(player.carriedGeneralIds || []).includes(general.id)) throw new Error("仅随行将领可以修炼");
   if (!quote.unlocked) throw new Error(`第${quote.attempt}次修炼尚未开放`);
   if (!quote.experienceReady) throw new Error(`将领经验不足，需要 ${quote.experienceRequired} 经验才能修炼`);
   return quote;
@@ -1057,7 +1059,7 @@ function grantMarchExperience(state, job, distance, effects) {
     const general = state.generals?.[generalId];
     if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
     const gained = grantGeneralExperience(general, generalMarchExperienceGain(general, distance));
-    if (gained > 0) effects.push({ type: "general-experience-gained", source: "march", generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general) });
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "march", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general) });
   }
 }
 
@@ -1067,7 +1069,7 @@ function grantBattleExperience(state, job, activeGeneralIds, attackerPower, defe
     const general = state.generals?.[generalId];
     if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
     const gained = grantGeneralExperience(general, generalBattleExperienceGain(general, difference));
-    if (gained > 0) effects.push({ type: "general-experience-gained", source: "battle", generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), powerDifference: difference });
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "battle", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), powerDifference: difference });
   }
 }
 
@@ -1492,7 +1494,6 @@ function resolveMarch(state, job, effects, now) {
   const player = state.players[job.accountId];
   if (!player) return;
   const path = storedMarchPath(job.path) || pathBetween(job.from, job.to);
-  grantMarchExperience(state, job, path.length, effects);
   const blocked = path.find(point => {
     const owner = dynamicCell(state, point.x, point.y).ownerAccountId;
     return owner && owner !== job.accountId;
@@ -1504,6 +1505,7 @@ function resolveMarch(state, job, effects, now) {
     effects.push({ type: "march-blocked", jobId: job.id, accountId: job.accountId, at: blocked, returnedTo: job.from });
     return;
   }
+  grantMarchExperience(state, job, path.length, effects);
   const targetInfo = staticCell(state.seed, job.to.x, job.to.y);
   const target = dynamicCell(state, job.to.x, job.to.y);
   const activeGeneralIds = Array.isArray(job.activeGeneralIds)
@@ -2271,7 +2273,11 @@ function applyIntent(inputState, rawIntent, context = {}) {
           report.discoveredGeneralName = general.name;
         }
       }
-      result = { generalId: general.id, name: general.name, status: general.status, location: general.location };
+      result = {
+        generalId: general.id, name: general.name, status: general.status, location: general.location,
+        cultivationCount: general.cultivationCount, experience: general.experience,
+        experienceRequired: generalExperienceRequirement(general)
+      };
     } else throw new Error(`未知游戏行动：${type}`);
   }
 
@@ -2527,9 +2533,10 @@ function projectedCultivationQuote(state, general, player, now) {
   if (count >= CULTIVATION_RANGES.length) return { attempt: null, remaining: 0, unlocked: false, disabledReason: "completed" };
   const status = general.status;
   try {
-    const quoteGeneral = status === "deployed" || status === "captured" ? { ...general, status: "waiting" } : general;
+    const quoteGeneral = { ...general, status: "carried" };
     const quote = cultivationQuote(quoteGeneral, player, now, { state });
-    return { ...quote, eligible: status !== "deployed" && status !== "captured", disabledReason: status === "deployed" ? "deployed" : status === "captured" ? "captured" : null };
+    const eligible = status === "carried" && (player.carriedGeneralIds || []).includes(general.id);
+    return { ...quote, eligible, disabledReason: eligible ? null : status };
   } catch (error) {
     return { attempt: count + 1, remaining: CULTIVATION_RANGES.length - count, unlocked: false, eligible: false, disabledReason: String(error?.message || error) };
   }
@@ -2579,6 +2586,10 @@ function projectWorldState(state, viewerAccountId, nowValue = Date.now()) {
   for (const [id, general] of Object.entries(state.generals || {})) {
     if (general.status === "deployed") generals[id] = publicGeneralState(general);
     else if (general.holderAccountId === viewer) generals[id] = clone(general);
+    if (generals[id]) {
+      ensureGeneralExperience(generals[id]);
+      generals[id].experienceRequired = generalExperienceRequirement(generals[id]);
+    }
     if (generals[id] && String(general.holderAccountId) === viewer) {
       ensureGeneralTalent(generals[id], state.seed);
       generals[id].talentSummary = talentSummary(generals[id], state.seed);

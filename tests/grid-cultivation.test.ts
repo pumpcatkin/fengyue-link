@@ -25,6 +25,50 @@ function adjacent(position: any) {
 }
 
 describe("grid cultivation and integrated talents", () => {
+  it.each([0, 1, 2, 3, 4])("scales stage %i from five to one hundred percent before stable 0.5-1.5 variation", count => {
+    const state = grant(joined(), 1_000_000, "range");
+    const general = state.generals.range;
+    general.cultivationCount = count;
+    const range = game.CULTIVATION_RANGES[count];
+    const options = { seed: "range" };
+    const low = game.cultivationQuote(general, state.players.a, 1_000_000, { ...options, goldInvestment: range.goldMin });
+    const high = game.cultivationQuote(general, state.players.a, 1_000_000, { ...options, goldInvestment: range.goldMax });
+    const middle = game.cultivationQuote(general, state.players.a, 1_000_000, { ...options, goldInvestment: (range.goldMin + range.goldMax) / 2 });
+    expect(low.basePowerGainPercent).toBe(5);
+    expect(high.basePowerGainPercent).toBe(100);
+    expect(middle.basePowerGainPercent).toBe(52.5);
+    expect(low.randomFactor).toBe(high.randomFactor);
+    expect(low.randomFactor).toBeGreaterThanOrEqual(0.5);
+    expect(high.randomFactor).toBeLessThanOrEqual(1.5);
+    expect(high.powerGain).toBeGreaterThan(middle.powerGain);
+    expect(middle.powerGain).toBeGreaterThan(low.powerGain);
+  });
+
+  it.each(["waiting", "market", "deployed", "captured"])("rejects a %s general even when experience and budget are sufficient", status => {
+    const state = grant(joined(), 1_000_000, "not-carried");
+    state.players.a.gold = 100_000;
+    state.privatePlayers.a.materials.white = 1;
+    state.generals["not-carried"].experience = 100;
+    state.generals["not-carried"].status = status;
+    const before = structuredClone(state);
+    expect(() => game.applyIntent(state, {
+      type: "cultivate-general", generalId: "not-carried", goldInvestment: 8000, materialId: "white", idempotencyKey: status
+    }, { actorAccountId: "a", now: 1_000_000 })).toThrow();
+    expect(state).toEqual(before);
+    expect(game.projectWorldState(state, "a", 1_000_000).generals["not-carried"].cultivationQuote.eligible).toBe(false);
+  });
+
+  it("projects numeric experience without changing the stored fractional progress", () => {
+    const state = grant(joined(), 1_000_000, "xp");
+    state.generals.xp.experience = 24.659;
+    delete state.generals.xp.experienceRequired;
+    const projection = game.projectWorldState(state, "a", 1_000_000);
+    expect(projection.generals.xp).toMatchObject({ experience: 24.659, experienceRequired: 100 });
+    expect(state.generals.xp.experience).toBe(24.659);
+    state.generals.xp.cultivationCount = 5;
+    expect(game.projectWorldState(state, "a").generals.xp).toMatchObject({ experience: 0, experienceRequired: 0 });
+  });
+
   it("uses fixed ten-minute runs for every resource grade without hourly rank inversions", () => {
     const population = 4000;
     let previousHourly = 0;
@@ -85,11 +129,11 @@ describe("grid cultivation and integrated talents", () => {
     }, { actorAccountId: "a", now: joinedAt });
     expect(cultivated.result.durationMs).toBe(0);
     expect(cultivated.result.goldInvestment).toBe(8000);
-    expect(cultivated.result.basePowerGainPercent).toBe(4.5);
-    expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.9);
-    expect(cultivated.result.randomFactor).toBeLessThan(1.1);
-    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(3.8);
-    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(5.2);
+    expect(cultivated.result.basePowerGainPercent).toBe(100);
+    expect(cultivated.result.randomFactor).toBeGreaterThanOrEqual(0.5);
+    expect(cultivated.result.randomFactor).toBeLessThanOrEqual(1.5);
+    expect(cultivated.result.powerGainPercent).toBeGreaterThanOrEqual(50);
+    expect(cultivated.result.powerGainPercent).toBeLessThanOrEqual(150);
     expect(cultivated.state.jobs).toEqual({});
     expect(cultivated.state.privatePlayers.a.materials.white).toBe(0);
     expect(cultivated.state.generals.cultivator.cultivationCount).toBe(1);

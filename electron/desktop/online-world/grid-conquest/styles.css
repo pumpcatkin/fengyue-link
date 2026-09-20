@@ -451,6 +451,7 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .training-grid label { display: grid; gap: 3px; color: var(--muted); font-size: 8px; font-weight: 900; }
 .training-grid select, .training-grid input { min-width: 0; border: 2px solid var(--line); border-radius: 7px; background: #fff6dc; color: var(--ink); padding: 7px; }
 .training-preview { grid-column: 1 / -1; border: 2px dashed var(--line); border-radius: 8px; background: #fff0c8; padding: 8px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.training-preview:empty { display: none; }
 .training-preview b { color: var(--red-dark); }
 .training-grid > button { grid-column: 1 / -1; }
 .cell-panel header b { color: var(--muted); font-size: 11px; font-weight: 700; }

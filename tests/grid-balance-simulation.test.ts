@@ -96,8 +96,8 @@ describe("grid balance simulation", () => {
     expect(engine.marchDurationMs(8)).toBe(8 * 15_000);
     expect(report.resources.cycleSecondsRange).toEqual({ min: 600, max: 600 });
     expect(engine.resourceCycleMs({ resourceRank: 0 })).toBe(10 * 60_000);
-    expect(engine.miningCooldownMs({ resourceRank: 0 })).toBe(60 * 60_000);
-    expect(engine.miningCooldownMs({ resourceRank: 14 })).toBe(4 * 60 * 60_000);
+    expect(engine.miningCooldownMs({ resourceRank: 0 })).toBe(54 * 60_000);
+    expect(engine.miningCooldownMs({ resourceRank: 14 })).toBe(216 * 60_000);
     for (const [x, y] of [[0, 0], [7, 11], [31, 47], [63, 63]] as Array<[number, number]>) {
       const expected = engine.staticCell("grid-balance-2026", x, y);
       expect(simulation.staticCell("grid-balance-2026", x, y)).toMatchObject({

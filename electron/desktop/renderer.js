@@ -201,6 +201,7 @@ let selectedOnlineWorldCardId = null;
 let onlineWorldSearchQuery = "";
 let onlineWorldEnteredProfileId = null;
 let onlineWorldInLibrary = true;
+let onlineWorldOpening = false;
 let onlineWorldFrameReady = false;
 let onlineWorldProgramHash = "builtin-preview";
 let onlineWorldProgramUrl = null;
@@ -751,7 +752,7 @@ function renderOnlineWorldProfileChoices(){
   }
   const ownPlayer=selectedActiveCard&&onlineWorldState?.world?.players?.[onlineWorldState?.account?.accountId];
   select.disabled=Boolean(ownPlayer);
-  document.querySelector("#online-world-open").disabled=!items.length||!selectedOnlineWorldCardId;
+  document.querySelector("#online-world-open").disabled=onlineWorldOpening||!items.length||!selectedOnlineWorldCardId;
 }
 
 function showOnlineWorldDetails(card){
@@ -925,7 +926,18 @@ function renderOnlineWorld(next){
   onlineWorldState=next;
   const serverOwner=Boolean(next?.isServerOwner||next?.isAuthor);
   const initialized=Boolean(next?.initialized);
-  const gameVisible=(initialized||serverOwner)&&!onlineWorldInLibrary;
+  const loading=next?.loadProgress;
+  const loadingVisible=Boolean(loading?.active&&next?.status!=="closed"&&next?.status!=="migrating");
+  document.querySelector("#online-world-loading").classList.toggle("hidden",!loadingVisible);
+  const progress=document.querySelector("#online-world-loading-progress");
+  const read=Math.max(0,Number(loading?.readComments)||0);
+  const total=loading?.totalComments;
+  if(loading?.phase==="complete")progress.value=100;
+  else if(Number.isFinite(total)&&total>0)progress.value=Math.min(99,read/total*100);
+  else progress.removeAttribute("value");
+  document.querySelector("#online-world-loading-title").textContent=loading?.phase==="error"?"同步尚未完成":loading?.phase==="validating"?"正在校验云端数据":"正在读取云端数据";
+  document.querySelector("#online-world-loading-count").textContent=Number.isFinite(total)?`${read.toLocaleString()} / ${total.toLocaleString()} 条评论`:`已读取 ${read.toLocaleString()} 条评论`;
+  const gameVisible=(initialized||serverOwner)&&!onlineWorldInLibrary&&!loadingVisible;
   if(gameVisible)loadOnlineWorldProgram(next);else unloadOnlineWorldProgram();
   onlineWorldPage.classList.toggle("game-active",gameVisible);
   settingsToggle.classList.toggle("hidden",gameVisible);
@@ -1453,11 +1465,13 @@ document.querySelector("#online-world-back").addEventListener("click",async()=>{
 });
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();
+  if(onlineWorldOpening)return;
   const card=onlineWorldGalleryCards().find(item=>(item.libraryId||item.cardId)===selectedOnlineWorldCardId);
   const profile=selectedOnlineWorldProfile();
   if(!card||!profile){toast("请先选择游戏卡和角色设定");return}
   if(card.demo){toast("这张展示游戏卡尚未附带可运行程序");return}
   onlineWorldEnteredProfileId=profile.id;
+  onlineWorldOpening=true;
   const button=document.querySelector("#online-world-open");button.disabled=true;button.textContent="正在开始…";
   renderOnlineWorldProfileChoices();
   try{
@@ -1468,7 +1482,7 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
     onlineWorldInLibrary=!next?.initialized&&!next?.isServerOwner&&!migrating;renderOnlineWorld(next);
     if(onlineWorldInLibrary){await returnToOnlineWorldLibrary();toast("游戏尚未开服，请稍后再来")}
   }catch(error){onlineWorldEnteredProfileId=null;await returnToOnlineWorldLibrary();toast(friendlyError(error))}
-  finally{button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
+  finally{onlineWorldOpening=false;button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
 });
 window.addEventListener("message",async event=>{
   if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest"||event.data?.protocol!==ONLINE_WORLD_HOST_PROTOCOL)return;

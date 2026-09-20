@@ -160,6 +160,21 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`document.querySelector('#online-world-initialize, #online-world-activate-program, #online-world-migrate, #online-world-status')`), null);
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
       fs.writeFileSync(path.join(outputDir, "online-world-details.png"), (await window.webContents.capturePage()).toPNG());
+      window.webContents.send("qa:onOnlineWorldState", { status: "opening", initialized: true, isServerOwner: true,
+        loadProgress: { schema: "fyow.load-progress/1", active: true, phase: "reading", readComments: 120, totalComments: 480 } });
+      await settle();
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading').classList.contains('hidden')`), false);
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-progress').value`), 25);
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-count').textContent`), "120 / 480 条评论");
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-loading-title')).color`), "rgb(238, 242, 244)");
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading').textContent.includes('猎艳疆土')`), false);
+      assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
+      fs.writeFileSync(path.join(outputDir, "cloud-comment-progress.png"), (await window.webContents.capturePage()).toPNG());
+      window.webContents.send("qa:onOnlineWorldState", { status: "opening", initialized: true, isServerOwner: true,
+        loadProgress: { schema: "fyow.load-progress/1", active: true, phase: "validating", readComments: 480, totalComments: 480 } });
+      await settle();
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-progress').value`), 99);
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-title').textContent`), "正在校验云端数据");
       const mapFacts = Array.from({ length: 4096 }, (_, index) => ({ x: index % 64, y: Math.floor(index / 64), population: 100 + index % 9901, resourceGrade: ["D-", "C", "B", "A", "S+"][index % 5], resourceRank: index % 15, garrisonCap: 20 + index % 1980, neutralPower: 20 + index % 1980 }));
       const runtime = require(path.join(root, "electron/online-world-runtime.cjs"));
       const gameDirectory = path.join(root, "electron/desktop/online-world/grid-conquest");
@@ -169,6 +184,8 @@ if (process.type === "renderer") {
       await settle();
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true, "background updates unexpectedly navigated away from the library");
       onlineWorldFixture = await evaluate(`onlineWorldState`);
+      onlineWorldFixture.world.generals.g1.experience = 24.659;
+      onlineWorldFixture.world.generals.g1.cultivationCount = 0;
       await evaluate(`document.querySelector('#online-world-open-form').requestSubmit()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
@@ -178,6 +195,12 @@ if (process.type === "renderer") {
       assert(embeddedGameFrame, "missing sandboxed online-world frame");
       for (let attempt = 0; attempt < 20 && await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').classList.contains('hidden')`); attempt += 1) await settle();
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').classList.contains('hidden')`), false);
+      await embeddedGameFrame.executeJavaScript(`openGeneral('g1')`);
+      await settle();
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#general-experience').textContent`), "24.659 / 100");
+      assert.equal(await embeddedGameFrame.executeJavaScript(`getComputedStyle(document.querySelector('#training-preview')).display`), "none");
+      fs.writeFileSync(path.join(outputDir, "general-experience.png"), (await window.webContents.capturePage()).toPNG());
+      await embeddedGameFrame.executeJavaScript(`document.querySelector('#close-general').click()`);
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#toggle-social').getAttribute('aria-expanded')`), "false");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#social-sidebar').inert`), true);
       window.webContents.send("qa:onOnlineWorldState", { ...onlineWorldFixture, status: "ready", program: { source: "work-description", digest: "fixture-description" } });

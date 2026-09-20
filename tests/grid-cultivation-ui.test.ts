@@ -23,7 +23,8 @@ function harness() {
     ownPlayer: () => ({ gold: 100_000, materials: { white: 10 } }), formatNumber: (value: any) => String(value),
     formatDuration: String, sendIntent: vi.fn(), host: vi.fn(), pendingHostKeys: new Map(), payload: { status: "degraded" }
   };
-  runInNewContext(source.slice(source.indexOf("function renderPowerTraining()"), source.indexOf("function marchAvailable()"))
+  runInNewContext(source.slice(source.indexOf("function generalExperienceLabel("), source.indexOf("function battleReportMarker("))
+    + source.slice(source.indexOf("function renderPowerTraining()"), source.indexOf("function marchAvailable()"))
     + source.slice(source.indexOf("function renderConnectionNotice()"), source.indexOf("function renderAll()"))
     + source.slice(source.indexOf('document.querySelector("#training-target").addEventListener'),
       source.indexOf('document.querySelector("#start-mining").addEventListener')), context);
@@ -32,6 +33,12 @@ function harness() {
 }
 
 describe("cultivation controls", () => {
+  it("renders fractional experience for legacy fields and numbers for the completed stage", () => {
+    const { context } = harness();
+    expect(context.generalExperienceLabel({ experience: 24.659, cultivationCount: 0 })).toBe("24.659 / 100");
+    expect(context.generalExperienceLabel({ experience: 27, cultivationCount: 3 })).toBe("27 / 1800");
+    expect(context.generalExperienceLabel({ experience: 0, cultivationCount: 5 })).toBe("0 / 0");
+  });
   it("keeps a partial draft during sync and sends the exact completed budget", () => {
     const { context, labels } = harness();
     const input = labels["#cultivation-gold"];
@@ -44,7 +51,8 @@ describe("cultivation controls", () => {
     input.listeners.input();
     context.renderPowerTraining();
     expect(input.value).toBe("1500");
-    expect(labels["#training-preview"].textContent).toContain("实际消耗 1500 金币");
+    expect(labels["#training-preview"].textContent).toBe("经验 100 / 100");
+    expect(labels["#training-preview"].textContent).not.toContain("实际消耗");
     labels["#start-power-training"].listeners.click();
     expect(context.sendIntent).toHaveBeenCalledWith({ type: "cultivate-general", generalId: "g", goldInvestment: 1500, materialId: "white" });
   });

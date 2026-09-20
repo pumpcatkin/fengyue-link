@@ -267,7 +267,8 @@ describe("grid world map task overlays", () => {
     expect(html).not.toContain('id="training-levels"');
     expect(source).toContain('document.querySelector("#cultivation-material-field").classList.toggle("hidden", !isGeneral)');
     expect(source).toContain('sendIntent({ type: "cultivate-player"');
-    expect(source).toContain('玩家闭关不使用天材地宝');
+    expect(source).not.toContain('玩家闭关不使用天材地宝');
+    expect(source).toContain('generalExperienceLabel({ ...target.entity');
   });
 
   it("animates the left sidebar and bottom region bar while honoring reduced motion", () => {

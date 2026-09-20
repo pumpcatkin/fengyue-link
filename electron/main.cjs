@@ -48,7 +48,7 @@ const {
 } = require("./release-security.cjs");
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
-const { orderLoginCandidates } = require("./login-failover.cjs");
+const { orderLoginCandidates, loginError, assertLoginActive, waitForLoginTask, pauseLogin, platformLoginError, runLoginFailover } = require("./login-failover.cjs");
 const {
   OFFICIAL_DOMAIN_DIRECTORY_URLS,
   FALLBACK_PLATFORM_ORIGINS,
@@ -401,6 +401,7 @@ function parseInviteWork(value, origin = DEFAULT_ORIGIN) {
 
 let domainStatusCache = null;
 let domainStatusCacheAt = 0;
+let domainDiscoveryInFlight = null;
 let defaultProxyState = { mode: "system", route: null, error: null };
 
 async function configureSystemProxy(targetSession, label = "platform") {
@@ -509,6 +510,14 @@ function currentDomainCandidates(selectedOrigin = null) {
 
 async function discoverDomainStatuses(force = false) {
   if (!force && domainStatusCache && Date.now() - domainStatusCacheAt < 60_000) return domainStatusCache;
+  if (domainDiscoveryInFlight) return domainDiscoveryInFlight;
+  const running = refreshDomainStatuses();
+  domainDiscoveryInFlight = running;
+  try { return await running; }
+  finally { if (domainDiscoveryInFlight === running) domainDiscoveryInFlight = null; }
+}
+
+async function refreshDomainStatuses() {
   const directorySources = await Promise.all(DOMAIN_DIRECTORY_URLS.map(async url => {
     try {
       const response = await net.fetch(url, { redirect: "follow", signal: AbortSignal.timeout(4_000) });
@@ -633,6 +642,9 @@ class AccountBackend {
     this.diagnosticExportBusy = false;
     this.diagnosticGlobalShortcutRegistered = false;
     this.loginInProgress = false;
+    this.loginController = null;
+    this.loginProgress = null;
+    this.loginDetectionPaused = false;
     this.authSessionRevision = 0;
     this.authFailureStreak = 0;
     this.authFailureSince = 0;
@@ -642,6 +654,8 @@ class AccountBackend {
     this.oauthPollBusy = false;
     this.loginPageWarmOrigin = null;
     this.loginPageWarmPromise = null;
+    this.loginPageWarmReady = false;
+    this.loginPageWarmController = null;
     this.accountRefreshPromise = null;
     this.account = { username: null, email: null, points: null, level: null, accountId: null, updatedAt: null };
     this.autoModelJobs = new Map();
@@ -777,6 +791,8 @@ class AccountBackend {
       mode: this.mode,
       loggedIn: this.loggedIn,
       loginInProgress: this.loginInProgress,
+      loginProgress: this.loginProgress,
+      loginCancellable: Boolean((this.loginController && !this.loginController.signal.aborted) || this.oauthWindow),
       origin: this.origin,
       domainSelected: this.domainSelected,
       originLocked: this.originLocked,
@@ -2038,6 +2054,8 @@ class AccountBackend {
       if (!anchor.isDestroyed()) void anchor.reload();
     });
     anchor.on("closed", () => {
+      if (this.anchor !== anchor) return;
+      this.anchor = null;
       if (!this.destroying) {
         this.anchor = this.createAnchorWindow();
         if (this.domainSelected && this.anchorNavigationArmed) void this.anchor.loadURL(`${this.origin}/zh/chats`);
@@ -2764,6 +2782,11 @@ class AccountBackend {
     const origin = this.origin;
     if (this.loginPageWarmOrigin === origin && this.loginPageWarmPromise) return this.loginPageWarmPromise;
     this.loginPageWarmOrigin = origin;
+    this.loginPageWarmReady = false;
+    this.loginPageWarmController?.abort();
+    const controller = new AbortController();
+    this.loginPageWarmController = controller;
+    const timer = setTimeout(() => controller.abort(), 12000);
     const task = (async () => {
       const anchor = await this.ensureAnchor();
       try {
@@ -2771,15 +2794,75 @@ class AccountBackend {
         if (current.origin === origin && /\/(?:zh\/)?signin\/?$/i.test(current.pathname) && !anchor.webContents.isLoading()) return true;
       } catch {}
       try {
-        await this.loadSurfaceUrl(anchor, platformUrlForOrigin(origin, "/zh/signin").href, "账号登录页", 12000);
+        await this.loadLoginPage(anchor, origin, controller.signal);
+        this.loginPageWarmReady = this.origin === origin;
         return this.origin === origin;
       } catch (error) {
         this.appendSessionLog("login", { event: "page-warm-failed", origin, error: error?.message || String(error) });
         return false;
       }
-    })();
+    })().finally(() => {
+      clearTimeout(timer);
+      if (this.loginPageWarmController === controller) this.loginPageWarmController = null;
+    });
     this.loginPageWarmPromise = task;
     return task;
+  }
+
+  async loadLoginPage(anchor, origin, signal) {
+    await waitForLoginTask(this.networkReady, signal);
+    assertLoginActive(signal);
+    const contents = anchor.webContents;
+    const url = platformUrlForOrigin(origin, "/zh/signin").href;
+    let ready;
+    const domReady = new Promise(resolve => {
+      ready = () => {
+        try { if (new URL(contents.getURL()).origin === origin) resolve(true); } catch {}
+      };
+      contents.on("dom-ready", ready);
+    });
+    try {
+      await waitForLoginTask(Promise.race([domReady, contents.loadURL(url)]), signal);
+      assertLoginActive(signal);
+    } finally {
+      if (!contents.isDestroyed()) contents.removeListener("dom-ready", ready);
+    }
+  }
+
+  stopLoginPage(anchor = this.anchor) {
+    if (!anchor || this.anchor === anchor) {
+      this.anchorNavigationArmed = false;
+      this.loginPageWarmController?.abort();
+      this.loginPageWarmController = null;
+      this.loginPageWarmOrigin = null;
+      this.loginPageWarmPromise = null;
+      this.loginPageWarmReady = false;
+      this.anchor = null;
+    }
+    if (anchor && !anchor.isDestroyed()) anchor.destroy();
+  }
+
+  cancelLogin() {
+    const controller = this.loginController;
+    if (!controller && this.oauthWindow) {
+      this.authSessionRevision += 1;
+      this.loginDetectionPaused = true;
+      this.closeOAuthWindows();
+      this.loginInProgress = false;
+      this.loginProgress = null;
+      this.mode = "login";
+      this.emit();
+      return true;
+    }
+    if (!controller || controller.signal.aborted) return false;
+    this.authSessionRevision += 1;
+    this.loginDetectionPaused = true;
+    controller.abort(loginError("LOGIN_CANCELLED", "登录已取消"));
+    this.stopLoginPage();
+    this.loginProgress = { phase: "cancelled" };
+    this.appendSessionLog("login", { event: "cancelled" });
+    this.emit();
+    return true;
   }
 
   async setOrigin(value) {
@@ -2919,12 +3002,13 @@ class AccountBackend {
     return confirmed;
   }
 
-  async readAccountSnapshot({ includeDetails = true, webContents = null } = {}) {
+  async readAccountSnapshot({ includeDetails = true, webContents = null, allowSubresourceLoading = false } = {}) {
     if (!this.domainSelected) return null;
     const target = webContents || (await this.ensureAnchor()).webContents;
-    if (!target || target.isDestroyed() || target.isLoading()) return null;
+    if (!target || target.isDestroyed() || (!allowSubresourceLoading && target.isLoading())) return null;
     try {
-      return await target.executeJavaScript(`(async () => {
+      const executor = allowSubresourceLoading ? target.mainFrame : target;
+      return await executor.executeJavaScript(`(async () => {
         const includeDetails = ${JSON.stringify(Boolean(includeDetails))};
         const token = localStorage.getItem('console_token') || '';
         // Current Aiero nodes authenticate the web page with an HttpOnly
@@ -2987,12 +3071,12 @@ class AccountBackend {
   }
 
   async refreshAccount(force = false) {
-    if (!this.domainSelected) return;
+    if (!this.domainSelected || this.loginInProgress || this.loginDetectionPaused) return;
     if (this.accountRefreshPromise) return this.accountRefreshPromise;
     const authSessionRevision = this.authSessionRevision;
     this.accountRefreshPromise = (async () => {
       const snapshot = await this.readAccountSnapshot();
-      if (!snapshot || authSessionRevision !== this.authSessionRevision) return;
+      if (!snapshot || authSessionRevision !== this.authSessionRevision || this.loginInProgress || this.loginDetectionPaused) return;
       const previous = accountSignature(this.account);
       const previousLoggedIn = this.loggedIn;
       if (snapshot.authenticated == null) return;
@@ -3019,6 +3103,7 @@ class AccountBackend {
         this.account = { ...nextAccount, updatedAt: changed ? Date.now() : this.account.updatedAt };
       } else {
         if (!await this.allowDetectedAuthenticatedSession()) return;
+        if (authSessionRevision !== this.authSessionRevision || this.loginInProgress || this.loginDetectionPaused) return;
         this.clearAuthenticationFailures("account-refresh");
         this.loggedIn = true;
         this.originLocked = true;
@@ -3043,17 +3128,18 @@ class AccountBackend {
   }
 
   async refreshLoginState(force = false) {
-    if (!this.domainSelected) return;
+    if (!this.domainSelected || this.loginInProgress || this.loginDetectionPaused) return;
     const authSessionRevision = this.authSessionRevision;
     const anchor = await this.ensureAnchor();
     if (anchor.webContents.isLoading()) return;
     const snapshot = await this.readAccountSnapshot({ includeDetails: false });
-    if (authSessionRevision !== this.authSessionRevision) return;
+    if (authSessionRevision !== this.authSessionRevision || this.loginInProgress || this.loginDetectionPaused) return;
     if (!snapshot) return;
     if (snapshot.authenticated == null) return;
     let next = this.loggedIn;
     if (snapshot.authenticated) {
       if (!await this.allowDetectedAuthenticatedSession()) return;
+      if (authSessionRevision !== this.authSessionRevision || this.loginInProgress || this.loginDetectionPaused) return;
       this.clearAuthenticationFailures("status-refresh");
       next = true;
     } else if (!this.loggedIn) {
@@ -3111,19 +3197,20 @@ class AccountBackend {
   }
 
   async login({ account, password, remember, autoLogin = false }) {
-    account = String(account || "").trim();
-    password = String(password || "");
-    remember = Boolean(remember || autoLogin);
-    if (!this.domainSelected) throw new Error("请先从域名列表选择一个可用节点");
-    if (!account || !password) throw new Error("请输入账号和密码");
-    if (account.length > 320 || password.length > 1024) throw new Error("账号或密码长度超过安全上限");
-    await this.verifyOfficialRelease();
+    return this.loginWithFailover({ account, password, remember, autoLogin, preferSelected: true });
+  }
+
+  async loginAtOrigin({ account, password, remember, autoLogin }, signal) {
     const startedAt = Date.now();
     this.authSessionRevision += 1;
     this.clearAuthenticationFailures("login-started");
-    this.anchorNavigationArmed = true;
-    const anchor = await this.ensureAnchor();
-    this.loginInProgress = true;
+    this.anchorNavigationArmed = false;
+    this.loginPageWarmController?.abort();
+    const anchor = await waitForLoginTask(this.ensureAnchor(), signal);
+    assertLoginActive(signal);
+    const origin = this.origin;
+    const cancelPage = () => this.stopLoginPage(anchor);
+    signal.addEventListener("abort", cancelPage, { once: true });
     this.mode = "login";
     this.emit();
     this.appendSessionLog("login", { event: "started", origin: this.origin });
@@ -3131,14 +3218,14 @@ class AccountBackend {
       let reuseLoginPage = false;
       try {
         const current = new URL(anchor.webContents.getURL());
-        reuseLoginPage = current.origin === this.origin && /\/(?:zh\/)?signin\/?$/i.test(current.pathname) && !anchor.webContents.isLoading();
+        reuseLoginPage = current.origin === origin && /\/(?:zh\/)?signin\/?$/i.test(current.pathname)
+          && (!anchor.webContents.isLoadingMainFrame() || (this.loginPageWarmOrigin === origin && this.loginPageWarmReady));
       } catch {}
-      if (!reuseLoginPage && this.loginPageWarmOrigin === this.origin && this.loginPageWarmPromise) {
-        reuseLoginPage = Boolean(await this.loginPageWarmPromise);
-      }
-      if (!reuseLoginPage) await this.loadSurfaceUrl(anchor, platformUrlForOrigin(this.origin, "/zh/signin").href, "账号登录页", 12000);
+      if (!reuseLoginPage) await this.loadLoginPage(anchor, origin, signal);
+      assertLoginActive(signal);
       this.appendSessionLog("login", { event: "page-ready", elapsedMs: Date.now() - startedAt, reused: reuseLoginPage });
-      const fillLoginForm = () => anchor.webContents.executeJavaScript(`(async () => {
+      const fillLoginForm = () => anchor.webContents.mainFrame.executeJavaScript(`(async () => {
+        if (location.origin !== ${JSON.stringify(origin)}) return { ok:false, message:"登录页节点发生变化" };
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         const roots = () => {
           const found = [document];
@@ -3154,16 +3241,11 @@ class AccountBackend {
         const first = selector => roots().map(root => root.querySelector?.(selector)).find(Boolean) || null;
         let accountElement = null;
         let password = null;
-        for (let attempt = 0; attempt < 150 && (!accountElement || !password); attempt += 1) {
+        while (!accountElement || !password) {
           accountElement = first('#email,input[name="email"],input[name="username"],input[autocomplete="email"],input[autocomplete="username"],input[type="email"],input[placeholder*="邮箱"],input[placeholder*="用户名"],input[placeholder*="账号"],input[placeholder*="email" i],input[placeholder*="user" i]');
           password = first('#password,input[name="password"],input[autocomplete="current-password"],input[type="password"],input[placeholder*="密码"]');
-          if (!accountElement || !password) await sleep(200);
+          if (!accountElement || !password) await sleep(150);
         }
-        if (!accountElement || !password) return {
-          ok:false,
-          message:"找不到平台登录输入框",
-          diagnostic:{ url:location.href, readyState:document.readyState, inputs:roots().reduce((count,root)=>count+(root.querySelectorAll?.('input')?.length||0),0) }
-        };
         const setValue = (element,value) => {
           const Input = element?.ownerDocument?.defaultView?.HTMLInputElement || HTMLInputElement;
           const descriptor = Object.getOwnPropertyDescriptor(Input.prototype,"value");
@@ -3173,7 +3255,7 @@ class AccountBackend {
         };
         setValue(accountElement, ${JSON.stringify(account)});
         setValue(password, ${JSON.stringify(password)});
-        await sleep(150);
+        await sleep(50);
         const form = password.closest('form') || accountElement.closest('form');
         const submit = form?.querySelector('button[type="submit"],input[type="submit"]')
           || roots().flatMap(root => [...(root.querySelectorAll?.('button') || [])]).find(button => /^(登录|登錄|Sign in|Log in)$/i.test((button.textContent || '').trim()));
@@ -3183,23 +3265,19 @@ class AccountBackend {
         submit.click();
         return { ok:true };
       })()`, true);
-      let result = await fillLoginForm();
-      if (!result?.ok) {
-        this.appendSessionLog("login", { event: "form-not-found-reloading", elapsedMs: Date.now() - startedAt, origin: this.origin, diagnostic: result?.diagnostic || null });
-        await this.loadSurfaceUrl(anchor, platformUrlForOrigin(this.origin, "/zh/signin").href, "账号登录页", 20000);
-        result = await fillLoginForm();
-      }
+      const result = await waitForLoginTask(fillLoginForm(), signal);
+      assertLoginActive(signal);
       if (!result?.ok) {
         this.appendSessionLog("login", { event: "form-not-found", elapsedMs: Date.now() - startedAt, origin: this.origin, diagnostic: result?.diagnostic || null });
         throw new Error(result?.message || "登录提交失败");
       }
       this.appendSessionLog("login", { event: "submitted", elapsedMs: Date.now() - startedAt });
+      this.loginProgress = { ...this.loginProgress, phase: "verifying", origin };
+      this.emit();
       let authenticatedSnapshot = null;
-      const authenticationDeadline = Date.now() + 15000;
-      while (Date.now() < authenticationDeadline) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        if (anchor.webContents.isLoading()) continue;
-        const pageStatus = await anchor.webContents.executeJavaScript(`(() => {
+      while (!authenticatedSnapshot) {
+        assertLoginActive(signal);
+        const pageStatus = await waitForLoginTask(anchor.webContents.mainFrame.executeJavaScript(`(() => {
           const token = localStorage.getItem('console_token') || '';
           const visible = element => {
             const style = getComputedStyle(element);
@@ -3210,16 +3288,20 @@ class AccountBackend {
             .map(element => (element.textContent || '').replace(/\\s+/g, ' ').trim())
             .filter(text => text && text.length <= 240 && /错误|失败|无效|不存在|密码|频繁|验证|error|invalid|failed/i.test(text));
           return { hasToken:Boolean(token), error:errors[0] || null };
-        })()`, true).catch(() => ({ hasToken: false, error: null }));
-        const snapshot = await this.readAccountSnapshot({ includeDetails: false });
+        })()`, true).catch(() => ({ hasToken: false, error: null })), signal);
+        if (pageStatus?.error && !pageStatus?.hasToken) throw platformLoginError(pageStatus.error);
+        const snapshot = await waitForLoginTask(this.readAccountSnapshot({ includeDetails: false, webContents: anchor.webContents, allowSubresourceLoading: true }), signal);
+        assertLoginActive(signal);
         if (snapshot?.authenticated) {
           authenticatedSnapshot = snapshot;
           break;
         }
-        if (pageStatus?.error && !pageStatus?.hasToken) throw new Error(`平台登录失败：${pageStatus.error}`);
+        await pauseLogin(250, signal);
       }
-      if (!authenticatedSnapshot) throw new Error("登录验证超时；当前节点响应较慢或连接不稳定，请重试或在设置中切换节点");
+      assertLoginActive(signal);
       this.loggedIn = true;
+      this.loginDetectionPaused = false;
+      this.anchorNavigationArmed = true;
       this.clearAuthenticationFailures("login-succeeded");
       this.originLocked = true;
       this.mode = "lobby";
@@ -3247,31 +3329,61 @@ class AccountBackend {
       this.appendSessionLog("login", { event: "failed", elapsedMs: Date.now() - startedAt, origin: this.origin, error: error?.message || String(error) });
       throw error;
     } finally {
-      this.loginInProgress = false;
-      this.emit();
+      signal.removeEventListener("abort", cancelPage);
+      if (!this.loggedIn) this.stopLoginPage(anchor);
     }
   }
 
-  async loginWithFailover({ account, password, remember = true, autoLogin = true }) {
+  async loginWithFailover({ account, password, remember = true, autoLogin = true, preferSelected = false }) {
     if (this.loggedIn) return true;
-    if (this.loginInProgress) throw new Error("登录流程已经在进行中");
-    // Startup has just measured every domain; reuse that fresh result and only
-    // re-probe when the shared cache has expired.
-    const directory = await discoverDomainStatuses(false);
-    const candidates = orderLoginCandidates(directory?.domains);
-    if (!candidates.length) throw new Error("域名测速没有找到可用节点，请重新检测网络后再试");
-    const failures = [];
-    for (const candidate of candidates) {
-      await this.setOrigin(candidate.origin);
-      try {
-        return await this.login({ account, password, remember, autoLogin });
-      } catch (error) {
-        failures.push({ origin: candidate.origin, error: error?.message || String(error) });
-        this.appendSessionLog("login", { event: "failover-next", origin: candidate.origin, latency: candidate.latency, error: error?.message || String(error) });
+    if (this.loginController || this.loginInProgress) throw new Error("登录流程已经在进行中");
+    account = String(account || "").trim();
+    password = String(password || "");
+    if (!account || !password) throw new Error("请输入账号和密码");
+    if (account.length > 320 || password.length > 1024) throw new Error("账号或密码长度超过安全上限");
+    const controller = new AbortController();
+    this.loginController = controller;
+    this.loginInProgress = true;
+    this.loginDetectionPaused = true;
+    this.authSessionRevision += 1;
+    this.loginProgress = { phase: "preparing" };
+    this.emit();
+    const preferredOrigin = preferSelected && this.domainSelected ? this.origin : "";
+    void discoverDomainStatuses(false).catch(() => {});
+    try {
+      await waitForLoginTask(this.verifyOfficialRelease(), controller.signal);
+      return await runLoginFailover({
+        signal: controller.signal,
+        getCandidates: async round => {
+          const directory = round ? await discoverDomainStatuses(true) : currentDomainCandidates(this.origin);
+          return orderLoginCandidates(directory?.domains, { includeUnmeasured: true, preferredOrigin: round ? "" : preferredOrigin })
+            .filter(candidate => TRUSTED_PLATFORM_ORIGINS.has(candidate.origin));
+        },
+        attempt: async (candidate, signal) => {
+          assertLoginActive(signal);
+          this.origin = candidate.origin;
+          this.domainSelected = true;
+          this.emit();
+          return this.loginAtOrigin({ account, password, remember: Boolean(remember || autoLogin), autoLogin }, signal);
+        },
+        onProgress: progress => {
+          this.loginProgress = { phase: progress.phase, origin: progress.origin || "", attempt: progress.attempt, round: progress.round };
+          this.appendSessionLog("login", { event: progress.phase, ...progress });
+          this.emit();
+        }
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return { cancelled: true };
+      throw error;
+    } finally {
+      if (this.loginController === controller) {
+        this.loginController = null;
+        this.loginInProgress = false;
+        this.loginProgress = null;
+        this.emit();
+        if (this.loggedIn) void this.refreshAccount(true).catch(() => {});
       }
     }
-    const last = failures.at(-1);
-    throw new Error(`自动登录已按延迟依次尝试 ${failures.length} 个节点，均未成功${last?.error ? `；最后一次：${last.error}` : ""}`);
   }
 
   closeOAuthWindows() {
@@ -3284,6 +3396,8 @@ class AccountBackend {
   }
 
   async oauthLogin(provider) {
+    if (this.loginController) throw new Error("请先取消当前登录");
+    this.loginDetectionPaused = false;
     provider = String(provider || "").toLowerCase();
     if (!new Set(["google", "telegram"]).has(provider)) throw new Error("不支持的第三方登录方式");
     if (!this.domainSelected) throw new Error("请先从域名列表选择一个可用节点");
@@ -3318,6 +3432,7 @@ class AccountBackend {
       }
     });
     this.oauthWindow = oauth;
+    this.emit();
     oauth.setMenuBarVisibility(false);
     const chromeUserAgent = oauth.webContents.getUserAgent().replace(/\sElectron\/[^\s]+/i, "");
     oauth.webContents.setUserAgent(chromeUserAgent);
@@ -3355,7 +3470,14 @@ class AccountBackend {
       }
     });
 
-    await oauth.loadURL(platformUrlForOrigin(this.origin, "/zh/signin").href);
+    const cancelled = () => this.oauthWindow !== oauth || oauth.isDestroyed() || this.loginDetectionPaused;
+    try {
+      await oauth.loadURL(platformUrlForOrigin(this.origin, "/zh/signin").href);
+    } catch (error) {
+      if (cancelled()) return { cancelled: true };
+      throw error;
+    }
+    if (cancelled()) return { cancelled: true };
     if (!this.loggedIn) {
       await oauth.webContents.executeJavaScript(`localStorage.removeItem('console_token')`, true).catch(() => {});
     }
@@ -3363,6 +3485,7 @@ class AccountBackend {
     const iconMarker = provider === "google" ? "googleIcon" : "telegramIcon";
     let clicked = false;
     for (let attempt = 0; attempt < 80 && !clicked; attempt += 1) {
+      if (cancelled()) return { cancelled: true };
       clicked = await oauth.webContents.executeJavaScript(`(() => {
         const pattern = new RegExp(${JSON.stringify(pattern)}, 'i');
         const iconMarker = ${JSON.stringify(iconMarker)};
@@ -3376,6 +3499,7 @@ class AccountBackend {
       })()`, true).catch(() => false);
       if (!clicked) await new Promise(resolve => setTimeout(resolve, 250));
     }
+    if (cancelled()) return { cancelled: true };
     if (!clicked) {
       this.closeOAuthWindows();
       this.loginInProgress = false;
@@ -3385,20 +3509,12 @@ class AccountBackend {
     }
 
     if (!oauth.isDestroyed()) oauth.show();
-    const startedAt = Date.now();
     this.oauthPollTimer = setInterval(async () => {
       if (this.oauthPollBusy) return;
-      if (Date.now() - startedAt > 5 * 60 * 1000) {
-        this.closeOAuthWindows();
-        this.loginInProgress = false;
-        this.mode = "login";
-        this.emit();
-        return;
-      }
       this.oauthPollBusy = true;
       try {
         const snapshot = await this.readAccountSnapshot({ includeDetails: false, webContents: oauth.webContents });
-        if (!snapshot?.authenticated) return;
+        if (!snapshot?.authenticated || this.oauthWindow !== oauth || this.loginDetectionPaused) return;
         this.loggedIn = true;
         this.clearAuthenticationFailures("oauth-succeeded");
         this.originLocked = true;
@@ -9529,6 +9645,8 @@ class AccountBackend {
   destroy() {
     if (this.destroying) return;
     this.destroying = true;
+    this.cancelLogin();
+    this.loginPageWarmController?.abort();
     this.unregisterDiagnosticGlobalShortcut();
     this.cancelAutoModels();
     this.onlineWorldService.close();
@@ -9683,6 +9801,7 @@ handleLocalIpc("backend:switch-origin", (_event, origin) => backend.switchOrigin
 handleLocalIpc("backend:logout", () => backend.logout());
 handleLocalIpc("backend:login", (_event, credentials) => backend.login(credentials || {}));
 handleLocalIpc("backend:auto-login", (_event, credentials) => backend.loginWithFailover(credentials || {}));
+handleLocalIpc("backend:cancel-login", () => backend.cancelLogin());
 handleLocalIpc("backend:oauth-login", (_event, provider) => backend.oauthLogin(provider));
 handleLocalIpc("backend:create-room", (_event, settings) => backend.createRoom(settings || {}));
 handleLocalIpc("backend:join-room", (_event, settings) => backend.joinRoom(settings || {}));

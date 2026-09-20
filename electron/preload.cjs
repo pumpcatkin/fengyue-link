@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   logout: () => ipcRenderer.invoke("backend:logout"),
   login: credentials => ipcRenderer.invoke("backend:login", credentials),
   autoLogin: credentials => ipcRenderer.invoke("backend:auto-login", credentials),
+  cancelLogin: () => ipcRenderer.invoke("backend:cancel-login"),
   oauthLogin: provider => ipcRenderer.invoke("backend:oauth-login", provider),
   createRoom: settings => ipcRenderer.invoke("backend:create-room", settings),
   joinRoom: settings => ipcRenderer.invoke("backend:join-room", settings),

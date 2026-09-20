@@ -1086,7 +1086,7 @@ async function refreshDomains(force=false){
   }
   try{
     domainDirectory=await api.listDomains(force);
-    if(!state?.domainSelected&&!state?.originLocked&&!state?.loginInProgress){
+    if(!automaticLoginActive&&!state?.domainSelected&&!state?.originLocked&&!state?.loginInProgress){
       const fastest=sortedDomains().find(item=>item.online&&Number.isFinite(Number(item.latency)));
       if(fastest){
         const next=await api.setOrigin(fastest.origin);
@@ -1100,13 +1100,32 @@ async function refreshDomains(force=false){
     throw error;
   }
   finally{
-    refreshButtons[0].disabled=Boolean(state?.originLocked);
+    refreshButtons[0].disabled=Boolean(state?.originLocked)||Boolean(state?.loginInProgress);
     refreshButtons[1].disabled=Boolean(state?.loginInProgress);
     for(const refresh of refreshButtons)refresh.textContent="重新检测";
   }
 }
 
 document.querySelector("#model-loading-cancel").addEventListener("click",()=>api.cancelModelRequests().catch(error=>toast(error.message)));
+function renderLoginProgress(next){
+  const active=automaticLoginActive||Boolean(next.loginInProgress);
+  const progress=next.loginProgress||{};
+  const cancel=document.querySelector("#cancel-login");
+  const label=document.querySelector("#login-progress");
+  cancel.classList.toggle("hidden",!active);
+  cancel.disabled=!next.loginCancellable;
+  cancel.textContent=progress.phase==="cancelled"?"正在取消…":"取消登录";
+  document.querySelector("#clear-credentials").classList.toggle("hidden",active);
+  for(const input of [accountInput,passwordInput,rememberInput,autoLoginInput])input.disabled=active;
+  label.classList.toggle("hidden",!active);
+  let node="";
+  try{node=progress.origin?new URL(progress.origin).host:""}catch{}
+  label.textContent=progress.phase==="cancelled"?"正在停止登录…"
+    :progress.phase==="waiting"?"正在重新检测可用节点…"
+      :progress.phase==="switching"?"正在切换其他节点…"
+        :progress.phase==="verifying"?`正在验证登录${node?` · ${node}`:""}`
+          :progress.phase==="connecting"?`正在连接${node?` · ${node}`:""}`:"正在准备登录…";
+}
 function render(next){
   const modelJobs=next.modelOperations||[];
   const modelJob=modelJobs.find(job=>job.stage!=="queued")||modelJobs[0];
@@ -1254,11 +1273,12 @@ function render(next){
   placeholder.classList.toggle("hidden",capturedGame);
   renderSurfaceButtons(next);
   const releaseReady=Boolean(next.releaseSecurity?.verified);
-  submitLogin.disabled=automaticLoginActive||Boolean(next.loginInProgress)||!releaseReady||(!autoLoginInput.checked&&!next.domainSelected);
-  submitLogin.textContent=automaticLoginActive?"自动登录中…":next.loginInProgress?"登录中…":"登录";
+  submitLogin.disabled=automaticLoginActive||Boolean(next.loginInProgress)||!releaseReady;
+  submitLogin.textContent=automaticLoginActive||next.loginInProgress?"登录中…":"登录";
   document.querySelector("#google-login").disabled=Boolean(next.loginInProgress)||!releaseReady||!next.domainSelected;
   document.querySelector("#telegram-login").disabled=Boolean(next.loginInProgress)||!releaseReady||!next.domainSelected;
-  document.querySelector("#refresh-domains").disabled=Boolean(next.originLocked);
+  document.querySelector("#refresh-domains").disabled=automaticLoginActive||Boolean(next.loginInProgress)||Boolean(next.originLocked);
+  renderLoginProgress(next);
   renderDomainNote(next);
   renderDomainList();
   const roomSetup=document.querySelector("#room-setup");
@@ -1632,23 +1652,29 @@ document.querySelector("#profile-delete").addEventListener("click",async()=>{if(
 document.querySelector("#active-character-profile").addEventListener("change",event=>invoke(async()=>{await api.selectCharacterProfile(event.currentTarget.value);toast("已切换联机角色设定")}).catch(()=>{}));
 document.querySelectorAll("[data-tab]").forEach(button=>button.addEventListener("click",()=>activateSidebarTab(button.dataset.tab)));
 async function submitCredentials({automatic=autoLoginInput.checked}={}){
+  if(automaticLoginActive||state?.loginInProgress)return;
   const payload={account:accountInput.value,password:passwordInput.value,remember:rememberInput.checked,autoLogin:autoLoginInput.checked};
   if(automatic){
     rememberInput.checked=true;
     payload.remember=true;
     payload.autoLogin=true;
-    automaticLoginActive=true;
-    if(state)render(state);
   }
+  automaticLoginActive=true;
+  if(state)render(state);
   try{
-    if(automatic)await api.autoLogin(payload);
-    else await api.login(payload);
+    const result=automatic?await api.autoLogin(payload):await api.login(payload);
+    if(result?.cancelled){toast("登录已取消");return}
     passwordInput.value="";
-    toast(automatic?"已使用当前延迟最低的可用节点登录":"登录成功");
+    toast("登录成功");
   }finally{
-    if(automatic){automaticLoginActive=false;if(state)render(state)}
+    automaticLoginActive=false;if(state)render(state);
   }
 }
+document.querySelector("#cancel-login").addEventListener("click",()=>{
+  const button=document.querySelector("#cancel-login");
+  button.disabled=true;button.textContent="正在取消…";
+  api.cancelLogin().catch(error=>{toast(friendlyError(error));if(state)render(state)});
+});
 loginForm.addEventListener("submit",event=>{event.preventDefault();invoke(()=>submitCredentials()).catch(()=>{})});
 autoLoginInput.addEventListener("change",()=>{if(autoLoginInput.checked)rememberInput.checked=true;if(state)render(state)});
 rememberInput.addEventListener("change",()=>{if(!rememberInput.checked)autoLoginInput.checked=false;if(state)render(state)});
@@ -1669,8 +1695,8 @@ officialNoticeAction.addEventListener("click",()=>{
   releaseNoticeDismissed=true;
   officialNoticeOverlay.classList.add("hidden");
 });
-document.querySelector("#google-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("google");toast("请在 Google 认证窗口中完成登录")}).catch(()=>{}));
-document.querySelector("#telegram-login").addEventListener("click",()=>invoke(async()=>{await api.oauthLogin("telegram");toast("请在 Telegram 认证窗口中完成登录")}).catch(()=>{}));
+document.querySelector("#google-login").addEventListener("click",()=>invoke(async()=>{const result=await api.oauthLogin("google");if(!result?.cancelled)toast("请在 Google 认证窗口中完成登录")}).catch(()=>{}));
+document.querySelector("#telegram-login").addEventListener("click",()=>invoke(async()=>{const result=await api.oauthLogin("telegram");if(!result?.cancelled)toast("请在 Telegram 认证窗口中完成登录")}).catch(()=>{}));
 document.querySelector("#clear-credentials").addEventListener("click",()=>invoke(async()=>{await api.clearCredentials();accountInput.value="";passwordInput.value="";rememberInput.checked=false;autoLoginInput.checked=false;toast("已清除这个实例保存的账号和密码")}).catch(()=>{}));
 document.querySelector("#refresh-domains").addEventListener("click",()=>refreshDomains(true).catch(error=>toast(error?.message||String(error))));
 manualDomainButton.addEventListener("click",()=>invoke(useManualDomain).catch(()=>{}));
@@ -1888,6 +1914,7 @@ showStartupOfficialNotice();
 Promise.all([api.getState(),api.loadCredentials(),api.listDomainCandidates(),api.getAuthorInfo().catch(()=>null)]).then(async([initial,saved,candidates,authorInfo])=>{
   if(saved){accountInput.value=saved.account||"";passwordInput.value=saved.password||"";rememberInput.checked=true;autoLoginInput.checked=Boolean(saved.autoLogin)}
   renderAuthorInfo(authorInfo);domainDirectory=candidates;lastObservedResultKey=roundResultKey(initial);render(initial);renderDomainList();
-  await refreshDomains(false);
+  const refreshing=refreshDomains(false).catch(error=>{if(!state?.loginInProgress)toast(friendlyError(error))});
   if(saved?.autoLogin&&!initial.loggedIn)await submitCredentials({automatic:true});
+  await refreshing;
 }).catch(error=>toast(friendlyError(error)));

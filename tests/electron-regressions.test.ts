@@ -189,33 +189,34 @@ describe("Electron platform API regressions", () => {
     expect(preload).toContain('listDomainCandidates: () => ipcRenderer.invoke("backend:list-domain-candidates")');
     expect(renderer).toContain("api.listDomainCandidates()");
     expect(renderer).toContain('item.online===false?"检测失败":"待检测"');
-    expect(renderer).toContain("await refreshDomains(false)");
+    expect(renderer).toContain("const refreshing=refreshDomains(false)");
     expect(main).toContain("async prepareLoginPage()");
     expect(main).toContain("if (this.domainSelected) void this.prepareLoginPage()");
   });
 
-  it("uses a lightweight bounded login route and protects each account profile from duplicate instances", () => {
+  it("uses cancellable node rotation and protects each account profile from duplicate instances", () => {
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
     const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
     const loginStart = main.indexOf("async login({ account, password, remember, autoLogin = false })");
-    const loginEnd = main.indexOf("async startOAuth", loginStart);
+    const loginEnd = main.indexOf("closeOAuthWindows()", loginStart);
     const login = main.slice(loginStart, loginEnd);
-    expect(main).toContain("async readAccountSnapshot({ includeDetails = true, webContents = null } = {})");
+    expect(main).toContain("async readAccountSnapshot({ includeDetails = true, webContents = null, allowSubresourceLoading = false } = {})");
     expect(main).toContain("[point, personalProfile] = await Promise.all([");
-    expect(login).toContain("readAccountSnapshot({ includeDetails: false })");
-    expect(login).toContain("const authenticationDeadline = Date.now() + 15000");
-    expect(login).toContain("await this.loginPageWarmPromise");
-    expect(login).toContain("setTimeout(resolve, 200)");
-    expect(login).toContain("attempt < 150");
+    expect(login).toContain("readAccountSnapshot({ includeDetails: false, webContents: anchor.webContents, allowSubresourceLoading: true })");
+    expect(login).not.toContain("authenticationDeadline");
+    expect(login).toContain("await this.loadLoginPage(anchor, origin, signal)");
+    expect(login).toContain("await pauseLogin(250, signal)");
+    expect(login).toContain("while (!accountElement || !password)");
     expect(login).toContain("element.shadowRoot");
     expect(login).toContain('input[name="username"]');
     expect(login).toContain('event: "authenticated"');
     expect(login).not.toContain("await this.refreshAccount(true)");
-    expect(main).toContain("async loginWithFailover({ account, password, remember = true, autoLogin = true })");
-    expect(main).toContain("const candidates = orderLoginCandidates(directory?.domains)");
-    expect(main).toContain("const directory = await discoverDomainStatuses(false)");
+    expect(main).toContain("runLoginFailover({");
+    expect(main).toContain("orderLoginCandidates(directory?.domains, { includeUnmeasured: true");
+    expect(main).toContain("void discoverDomainStatuses(false).catch");
     expect(preload).toContain('autoLogin: credentials => ipcRenderer.invoke("backend:auto-login", credentials)');
+    expect(preload).toContain('cancelLogin: () => ipcRenderer.invoke("backend:cancel-login")');
     expect(renderer).toContain('if(saved?.autoLogin&&!initial.loggedIn)await submitCredentials({automatic:true})');
     expect(main).toContain("function acquireProfileInstanceLock(profileId)");
     expect(main).toContain('fs.openSync(file, "wx", 0o600)');
@@ -997,7 +998,8 @@ describe("Electron platform API regressions", () => {
     const releaseSecurity = readFileSync(new URL("../electron/release-security.cjs", import.meta.url), "utf8");
     expect(main).toContain("new ReleaseSecurityGate({");
     expect(main).toContain("await this.releaseSecurity.initialize()");
-    expect(main.match(/await this\.verifyOfficialRelease\(\);/g)).toHaveLength(2);
+    expect(main.match(/this\.verifyOfficialRelease\(\)/g)).toHaveLength(2);
+    expect(main).toContain("await waitForLoginTask(this.verifyOfficialRelease(), controller.signal)");
     expect(main).not.toContain("showStartupAnnouncement");
     expect(main).not.toContain('handleLocalIpc("app:verify-official-release"');
     expect(main).toContain('handleLocalIpc("app:open-official-release-page"');

@@ -5,16 +5,16 @@ const RESOURCE_GRADES = Object.freeze(["D-", "D", "D+", "C-", "C", "C+", "B-", "
 const MODIFIER_KEYS = Object.freeze([
   "marchDuration", "marchCost", "combatPower", "attackPower", "defensePower",
   "miningDuration", "miningYield", "trainingDuration", "trainingCost", "trainingYield",
-  "cultivationCost", "cultivationPower", "discoveryChance"
+  "cultivationCost", "experienceGain", "discoveryChance"
 ]);
 
 const RARITIES = Object.freeze([
-  Object.freeze({ id: "white", label: "白", rank: 0, weight: 560, progressMin: 0, progressMax: 99, potencyMin: 0.002, potencyMax: 0.006 }),
-  Object.freeze({ id: "green", label: "绿", rank: 1, weight: 250, progressMin: 100, progressMax: 219, potencyMin: 0.008, potencyMax: 0.015 }),
-  Object.freeze({ id: "blue", label: "蓝", rank: 2, weight: 110, progressMin: 220, progressMax: 359, potencyMin: 0.018, potencyMax: 0.03 }),
-  Object.freeze({ id: "purple", label: "紫", rank: 3, weight: 50, progressMin: 360, progressMax: 519, potencyMin: 0.035, potencyMax: 0.055 }),
-  Object.freeze({ id: "gold", label: "金", rank: 4, weight: 25, progressMin: 520, progressMax: 699, potencyMin: 0.065, potencyMax: 0.09 }),
-  Object.freeze({ id: "red", label: "红", rank: 5, weight: 5, progressMin: 700, progressMax: 1000, potencyMin: 0.11, potencyMax: 0.16 })
+  Object.freeze({ id: "white", label: "白", rank: 0, weight: 64000, progressMin: 0, progressMax: 99, potencyMin: 0.008, potencyMax: 0.02 }),
+  Object.freeze({ id: "green", label: "绿", rank: 1, weight: 24000, progressMin: 100, progressMax: 219, potencyMin: 0.028, potencyMax: 0.05 }),
+  Object.freeze({ id: "blue", label: "蓝", rank: 2, weight: 9000, progressMin: 220, progressMax: 359, potencyMin: 0.07, potencyMax: 0.11 }),
+  Object.freeze({ id: "purple", label: "紫", rank: 3, weight: 2770, progressMin: 360, progressMax: 519, potencyMin: 0.16, potencyMax: 0.24 }),
+  Object.freeze({ id: "gold", label: "金", rank: 4, weight: 200, progressMin: 520, progressMax: 699, potencyMin: 0.32, potencyMax: 0.42 }),
+  Object.freeze({ id: "red", label: "红", rank: 5, weight: 30, progressMin: 700, progressMax: 1000, potencyMin: 0.55, potencyMax: 0.7 })
 ]);
 const RARITY_BY_ID = Object.freeze(Object.fromEntries(RARITIES.map(item => [item.id, item])));
 
@@ -30,12 +30,12 @@ const MATERIALS = Object.freeze([
 const MATERIAL_BY_ID = Object.freeze(Object.fromEntries(MATERIALS.map(item => [item.id, item])));
 
 const MODIFIER_LIMITS = Object.freeze({
-  marchDuration: [-0.45, 0.15], marchCost: [-0.45, 0.15],
-  combatPower: [-0.2, 0.6], attackPower: [-0.2, 0.6], defensePower: [-0.2, 0.6],
-  miningDuration: [-0.45, 0.15], miningYield: [-0.2, 0.6],
-  trainingDuration: [-0.45, 0.15], trainingCost: [-0.45, 0.15], trainingYield: [-0.2, 0.6],
-  cultivationCost: [-0.45, 0.15], cultivationPower: [-0.2, 0.6],
-  discoveryChance: [-0.03, 0.12]
+  marchDuration: [-0.9, 0.75], marchCost: [-0.9, 0.75],
+  combatPower: [-0.75, 1], attackPower: [-0.75, 1], defensePower: [-0.75, 1],
+  miningDuration: [-0.9, 0.75], miningYield: [-0.75, 1],
+  trainingDuration: [-0.9, 0.75], trainingCost: [-0.9, 0.75], trainingYield: [-0.75, 1],
+  cultivationCost: [-0.8, 0.3], experienceGain: [-0.7, 1],
+  discoveryChance: [-0.2, 0.55]
 });
 const DEPLOYED_EFFECT_MULTIPLIER = 1.25;
 
@@ -76,6 +76,7 @@ const C = Object.freeze({
   resourceAtMost: value => ({ op: "resource-rank-lte", value }),
   populationAtLeast: value => ({ op: "population-gte", value }),
   populationAtMost: value => ({ op: "population-lte", value }),
+  occupationAtMost: value => ({ op: "occupation-count-lte", value }),
   neutral: value => ({ op: "neutral-is", value }),
   attacking: value => ({ op: "attacking-is", value }),
   armyAtLeast: value => ({ op: "army-size-gte", value }),
@@ -112,7 +113,7 @@ add("waste-route", "荒径省驮", "march", [effect("marchCost", "neighbor-hosti
 // Combat: general strength, attack and defence remain separate modifier channels.
 add("battle-instinct", "临阵机断", "combat", [effect("combatPower", "carried", "combat", 1)]);
 add("spearhead", "破阵锋芒", "combat", [effect("attackPower", "carried", "combat", 1, [C.attacking(true)])]);
-add("rearguard", "殿军持重", "combat", [effect("defensePower", "carried", "combat", 1, [C.attacking(false)])]);
+add("rearguard", "殿军持重", "combat", [effect("defensePower", "own-tile", "combat", 1, [C.attacking(false)])]);
 add("forest-ambush", "林间伏击", "combat", [effect("attackPower", "carried", "combat", 0.9, [C.terrain("forest"), C.attacking(true)])]);
 add("mountain-wall", "依山成垒", "combat", [effect("defensePower", "own-tile", "combat", 0.95, [C.terrain("mountain")])]);
 add("river-crossing", "济水争先", "combat", [effect("attackPower", "neighbor-hostile", "combat", 0.8, [C.terrain("river", "coast")])]);
@@ -129,8 +130,8 @@ add("poor-land-tenacity", "瘠土韧守", "combat", [effect("defensePower", "own
 add("allied-screen", "邻军掩护", "combat", [effect("defensePower", "neighbor-allied", "combat", 0.8)]);
 add("border-pressure", "临境威压", "combat", [effect("combatPower", "enemy-neighbor", "combat", -0.8)]);
 add("garrison-command", "镇地军令", "combat", [effect("combatPower", "own-tile", "combat", 0.9)]);
-add("mobile-reserve", "随军预备", "combat", [effect("defensePower", "carried", "combat", 0.7), effect("attackPower", "carried", "combat", 0.35, [C.armyAtLeast(1000)])]);
-add("shock-and-hold", "先登后据", "combat", [effect("attackPower", "carried", "combat", 0.65, [C.attacking(true)]), effect("defensePower", "carried", "combat", 0.35, [C.armyAtMost(1200)])]);
+add("mobile-reserve", "随军预备", "combat", [effect("combatPower", "carried", "combat", 0.7), effect("attackPower", "carried", "combat", 0.35, [C.armyAtLeast(1000)])]);
+add("shock-and-hold", "先登后据", "combat", [effect("attackPower", "carried", "combat", 0.65, [C.attacking(true)]), effect("combatPower", "carried", "combat", 0.35, [C.armyAtMost(1200)])]);
 add("border-fortifier", "边垒经营", "combat", [effect("defensePower", "neighbor-allied", "combat", 0.65), effect("combatPower", "neighbor-allied", "combat", 0.25, [C.terrain("mountain", "forest")])]);
 add("noon-command", "日中号令", "combat", [effect("combatPower", "carried", "combat", 0.75, [C.hour(11, 14)])]);
 add("deep-raid", "深入疾战", "combat", [effect("attackPower", "neighbor-hostile", "combat", 0.65, [C.armyAtLeast(1500), C.attacking(true)])]);
@@ -150,7 +151,7 @@ add("day-assay", "日照验矿", "mining", [effect("miningYield", "own-tile", "m
 add("neighbor-tools", "邻地借械", "mining", [effect("miningDuration", "neighbor-allied", "mining", -0.7)]);
 add("regional-smelter", "邻郡共炉", "mining", [effect("miningYield", "neighbor-allied", "mining", 0.7)]);
 add("frontier-salvage", "边境扰采", "mining", [effect("miningYield", "enemy-neighbor", "mining", -0.6)]);
-add("neutral-claim-survey", "无主矿籍", "mining", [effect("miningDuration", "neighbor-allied", "mining", -0.7, [C.neutral(true)])]);
+add("neutral-claim-survey", "初占矿籍", "mining", [effect("miningDuration", "own-tile", "mining", -0.7, [C.occupationAtMost(1)])]);
 add("carried-assayer", "随行矿师", "mining", [effect("miningYield", "carried", "mining", 0.65, [C.resourceAtLeast("B-")])]);
 add("low-grade-sorting", "杂矿分选", "mining", [effect("miningYield", "own-tile", "mining", 0.65, [C.resourceAtMost("B-")]), effect("miningDuration", "own-tile", "mining", -0.25)]);
 add("high-grade-caution", "精矿稳采", "mining", [effect("miningDuration", "own-tile", "mining", -0.55, [C.resourceAtLeast("S-")]), effect("miningYield", "own-tile", "mining", 0.3)]);
@@ -175,24 +176,24 @@ add("threatened-economy", "临敌扰训", "training", [effect("trainingDuration"
 add("field-instructor", "随军教头", "training", [effect("trainingDuration", "carried", "training", -0.65, [C.armyAtLeast(1000)])]);
 add("balanced-barracks", "营制均衡", "training", [effect("trainingCost", "own-tile", "training", -0.5), effect("trainingYield", "own-tile", "training", 0.35, [C.populationAtLeast(4000)])]);
 
-// Cultivation affects personal/general power training, not soldier recruitment.
-add("focused-cultivation", "凝神修习", "cultivation", [effect("cultivationPower", "carried", "cultivation", 1)]);
+// Cultivation-themed talents now improve experience acquisition instead of power gains.
+add("focused-cultivation", "凝神修习", "cultivation", [effect("experienceGain", "carried", "experience", 1)]);
 add("simple-retreat", "简居省资", "cultivation", [effect("cultivationCost", "carried", "cultivation", -1)]);
-add("mountain-retreat", "山中闭关", "cultivation", [effect("cultivationPower", "own-tile", "cultivation", 0.9, [C.terrain("mountain")])]);
+add("mountain-retreat", "山中闭关", "cultivation", [effect("experienceGain", "own-tile", "experience", 0.9, [C.terrain("mountain")])]);
 add("forest-meditation", "林间澄心", "cultivation", [effect("cultivationCost", "own-tile", "cultivation", -0.85, [C.terrain("forest")])]);
-add("river-breathing", "临流调息", "cultivation", [effect("cultivationPower", "own-tile", "cultivation", 0.8, [C.terrain("river", "coast")])]);
-add("academy-city", "大邑讲武", "cultivation", [effect("cultivationPower", "own-tile", "cultivation", 0.85, [C.populationAtLeast(6500)])]);
+add("river-breathing", "临流调息", "cultivation", [effect("experienceGain", "own-tile", "experience", 0.8, [C.terrain("river", "coast")])]);
+add("academy-city", "大邑讲武", "cultivation", [effect("experienceGain", "own-tile", "experience", 0.85, [C.populationAtLeast(6500)])]);
 add("quiet-hamlet", "小邑静修", "cultivation", [effect("cultivationCost", "own-tile", "cultivation", -0.8, [C.populationAtMost(1800)])]);
-add("rich-elixirs", "丰地药资", "cultivation", [effect("cultivationPower", "own-tile", "cultivation", 0.8, [C.resourceAtLeast("A")])]);
+add("rich-elixirs", "丰地药资", "cultivation", [effect("experienceGain", "own-tile", "experience", 0.8, [C.resourceAtLeast("A")])]);
 add("scarce-discipline", "困境砺志", "cultivation", [effect("cultivationCost", "own-tile", "cultivation", -0.75, [C.resourceAtMost("C-")])]);
-add("midnight-study", "子夜参悟", "cultivation", [effect("cultivationPower", "carried", "cultivation", 0.8, [C.hour(22, 3)])]);
+add("midnight-study", "子夜参悟", "cultivation", [effect("experienceGain", "carried", "experience", 0.8, [C.hour(22, 3)])]);
 add("dawn-practice", "晨起行功", "cultivation", [effect("cultivationCost", "carried", "cultivation", -0.7, [C.hour(5, 8)])]);
-add("neighbor-lecture", "邻郡论武", "cultivation", [effect("cultivationPower", "neighbor-allied", "cultivation", 0.7)]);
+add("neighbor-lecture", "邻郡论武", "cultivation", [effect("experienceGain", "neighbor-allied", "experience", 0.7)]);
 add("shared-dojo", "同盟道场", "cultivation", [effect("cultivationCost", "neighbor-allied", "cultivation", -0.7)]);
-add("frontier-tempering", "临境扰心", "cultivation", [effect("cultivationPower", "enemy-neighbor", "cultivation", -0.7)]);
-add("measured-progress", "循序精进", "cultivation", [effect("cultivationCost", "carried", "cultivation", -0.45), effect("cultivationPower", "carried", "cultivation", 0.4, [C.hour(9, 18)])]);
+add("frontier-tempering", "临境扰心", "cultivation", [effect("experienceGain", "enemy-neighbor", "experience", -0.7)]);
+add("measured-progress", "循序精进", "cultivation", [effect("cultivationCost", "carried", "cultivation", -0.45), effect("experienceGain", "carried", "experience", 0.4, [C.hour(9, 18)])]);
 
-// Discovery changes the existing base probability by additive percentage points.
+// Discovery uses percentage points in battle and a relative multiplier on training pity rolls.
 add("keen-eye", "慧眼识才", "discovery", [effect("discoveryChance", "carried", "discovery", 0.5)]);
 add("local-reputation", "乡里声望", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.48)]);
 add("allied-recommendation", "邻邦荐贤", "discovery", [effect("discoveryChance", "neighbor-allied", "discovery", 0.42)]);
@@ -206,7 +207,7 @@ add("forest-ranger-search", "林中寻杰", "discovery", [effect("discoveryChanc
 add("river-travellers", "津渡问贤", "discovery", [effect("discoveryChance", "own-tile", "discovery", 0.38, [C.terrain("river", "coast")])]);
 add("night-visitor", "夜访名士", "discovery", [effect("discoveryChance", "carried", "discovery", 0.42, [C.hour(19, 23)])]);
 add("morning-market", "早市访才", "discovery", [effect("discoveryChance", "carried", "discovery", 0.36, [C.hour(6, 10)])]);
-add("neutral-pioneers", "拓荒招贤", "discovery", [effect("discoveryChance", "neighbor-allied", "discovery", 0.4, [C.neutral(true)])]);
+add("neutral-pioneers", "拓荒招贤", "discovery", [effect("discoveryChance", "neighbor-hostile", "discovery", 0.4, [C.neutral(true)])]);
 add("wartime-recruiter", "军中拔擢", "discovery", [effect("discoveryChance", "carried", "discovery", 0.4, [C.attacking(true), C.armyAtLeast(1000)])]);
 add("campaign-talent-scout", "阵前识英", "discovery", [effect("discoveryChance", "carried", "discovery", 0.58, [C.discoveryKind("attack")])]);
 add("close-battle-observer", "近阵察才", "discovery", [effect("discoveryChance", "carried", "discovery", 0.52, [C.discoveryKind("attack"), C.armyAtMost(500)])]);
@@ -222,11 +223,11 @@ add("frontier-drill-scout", "边营访锐", "discovery", [effect("discoveryChanc
 add("stationed-quartermaster", "驻地转饷", "deployment", [effect("miningYield", "own-tile", "mining", 0.55), effect("trainingCost", "own-tile", "training", -0.35)]);
 add("watchtower-command", "望楼督阵", "deployment", [effect("defensePower", "own-tile", "combat", 0.6), effect("discoveryChance", "own-tile", "discovery", 0.3, [C.discoveryKind("training")])]);
 add("border-deployment", "列戍联防", "deployment", [effect("combatPower", "neighbor-allied", "combat", 0.5), effect("marchDuration", "neighbor-allied", "march", -0.3)]);
-add("garrison-mentor", "镇营授业", "deployment", [effect("trainingYield", "own-tile", "training", 0.45), effect("cultivationPower", "own-tile", "cultivation", 0.35)]);
+add("garrison-mentor", "镇营授业", "deployment", [effect("trainingYield", "own-tile", "training", 0.45), effect("experienceGain", "own-tile", "experience", 0.35)]);
 
 const CONDITION_OPS = new Set([
   "terrain-in", "resource-rank-gte", "resource-rank-lte", "population-gte", "population-lte",
-  "neutral-is", "attacking-is", "army-size-gte", "army-size-lte", "discovery-kind-is", "hour-between"
+  "occupation-count-lte", "neutral-is", "attacking-is", "army-size-gte", "army-size-lte", "discovery-kind-is", "hour-between"
 ]);
 const SCOPES = new Set(["carried", "own-tile", "neighbor-allied", "neighbor-hostile", "enemy-neighbor"]);
 
@@ -329,10 +330,19 @@ function normalizeTalent(talent, seedOrId = "talent", idValue) {
   let progress;
   if (Number.isFinite(Number(talent.progress))) {
     progress = clamp(Math.trunc(Number(talent.progress)), 0, 1000);
+  } else if (RARITY_BY_ID[talent.rarity]) {
+    const rarity = RARITY_BY_ID[talent.rarity];
+    if (Number.isFinite(Number(talent.potency))) {
+      const ratio = clamp((Number(talent.potency) - rarity.potencyMin) / Math.max(1e-9, rarity.potencyMax - rarity.potencyMin), 0, 1);
+      progress = Math.round(rarity.progressMin + ratio * (rarity.progressMax - rarity.progressMin));
+    } else {
+      const width = rarity.progressMax - rarity.progressMin + 1;
+      progress = rarity.progressMin + (hash(seed, "normalize", instanceId, talentId).readUInt32BE(0) % width);
+    }
   } else if (Number.isFinite(Number(talent.potency))) {
     progress = progressForPotency(talent.potency);
   } else {
-    const rarity = RARITY_BY_ID[talent.rarity] || pickRarity(seed, instanceId);
+    const rarity = pickRarity(seed, instanceId);
     const width = rarity.progressMax - rarity.progressMin + 1;
     progress = rarity.progressMin + (hash(seed, "normalize", instanceId, talentId).readUInt32BE(0) % width);
   }
@@ -344,7 +354,7 @@ function normalizeTalent(talent, seedOrId = "talent", idValue) {
 const KEY_LABELS = Object.freeze({
   marchDuration: "行军时长", marchCost: "行军金币消耗", combatPower: "战斗力", attackPower: "进攻力", defensePower: "防御力",
   miningDuration: "采集时长", miningYield: "采集产量", trainingDuration: "练兵时长", trainingCost: "练兵消耗",
-  trainingYield: "练兵产量", cultivationCost: "同等修炼效果所需金币", cultivationPower: "修炼收益", discoveryChance: "发现概率"
+  trainingYield: "练兵产量", cultivationCost: "同等修炼效果所需金币", experienceGain: "经验获取率", discoveryChance: "发现概率"
 });
 const SCOPE_LABELS = Object.freeze({ carried: "携带时", "own-tile": "部署地", "neighbor-allied": "相邻友方地", "neighbor-hostile": "相邻敌方地", "enemy-neighbor": "削弱敌方相邻8格：" });
 
@@ -401,6 +411,7 @@ function evaluationFacts(state, context) {
     terrain: String(context.terrain ?? cell.terrain ?? "plain"),
     resourceRank: resourceRank(context.resourceRank ?? context.resourceGrade ?? cell.resourceRank ?? cell.resourceGrade),
     population: Math.max(0, Number(context.population ?? cell.population ?? 0) || 0),
+    occupationCount: Math.max(0, Math.trunc(Number(context.occupationCount ?? cell.occupationCount ?? 0) || 0)),
     neutral: context.neutral == null ? relation === "neutral" : Boolean(context.neutral),
     attacking: Boolean(context.attacking ?? context.attack),
     armySize: Math.max(0, Number(context.armySize ?? context.soldiers ?? 0) || 0),
@@ -416,6 +427,7 @@ function conditionMatches(condition, facts) {
     case "resource-rank-lte": return facts.resourceRank <= resourceRank(condition.value);
     case "population-gte": return facts.population >= condition.value;
     case "population-lte": return facts.population <= condition.value;
+    case "occupation-count-lte": return facts.occupationCount <= condition.value;
     case "neutral-is": return facts.neutral === condition.value;
     case "attacking-is": return facts.attacking === condition.value;
     case "army-size-gte": return facts.armySize >= condition.value;
@@ -483,7 +495,7 @@ function collectSources(state, context, actorAccountId) {
     if (key && seen.has(key)) return false;
     if (key) seen.add(key);
     return Boolean(source.talent);
-  }).slice(0, 16);
+  });
 }
 
 function talentModifiers(state = {}, context = {}) {

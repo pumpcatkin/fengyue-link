@@ -346,7 +346,7 @@ describe("grid cultivation and integrated talents", () => {
     state.players.a.fieldArmySoldiers = 1;
     const quote = game.marchQuote(state, "a", target, 1, ["runner"], false, now + 1);
     expect(quote.baseDurationMs).toBe(15_000);
-    expect(quote.durationMs).toBe(Math.round(15_000 * 0.84));
+    expect(quote.durationMs).toBe(Math.round(15_000 * (1 + quote.modifiers.marchDuration)));
     const march = game.applyIntent(state, {
       type: "march", to: target, soldiers: 1, generalIds: ["runner"], attack: false, idempotencyKey: "talented-march"
     }, { actorAccountId: "a", now: now + 1 });
@@ -405,6 +405,25 @@ describe("grid cultivation and integrated talents", () => {
     const settled = game.settleWorld(combat.state, combat.result.finishAt);
     const battle = settled.effects.find((effect: any) => effect.type === "battle-won");
     expect(battle.attackModifiers.attackPower).toBeGreaterThan(0);
+  });
+
+  it("applies mining-duration talents to the authoritative job timer", () => {
+    const now = 1_000_000;
+    let state = grant(joined(now), now, "miner-clock");
+    const position = state.players.a.position;
+    const baseDuration = game.resourceCycleMs(game.staticCell(state.seed, position.x, position.y));
+    state.generals["miner-clock"].talent = talentEngine.normalizeTalent({
+      instanceId: "miner-clock", talentId: "shift-bells", progress: 1000
+    });
+    state = game.applyIntent(state, {
+      type: "deploy-general", generalId: "miner-clock", idempotencyKey: "deploy-miner-clock"
+    }, { actorAccountId: "a", now }).state;
+    const mining = game.applyIntent(state, {
+      type: "start-mining", x: position.x, y: position.y, idempotencyKey: "timed-mine"
+    }, { actorAccountId: "a", now: now + 1 });
+    expect(mining.result.modifiers.miningDuration).toBeLessThan(0);
+    expect(mining.result.durationMs).toBeLessThan(baseDuration);
+    expect(mining.state.jobs[mining.result.jobId].finishAt).toBe(now + 1 + mining.result.durationMs);
   });
 
   it("applies hostile adjacent deployed talents as bounded debuffs without leaking enemy buffs", () => {

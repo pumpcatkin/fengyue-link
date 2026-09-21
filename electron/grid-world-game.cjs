@@ -539,7 +539,10 @@ function accrueDeployedGeneralExperience(state, nowValue, experienceSinceValue, 
       const targetMinutes = training
         ? GENERAL_TRAINING_EXPERIENCE_MINUTES[level]
         : GENERAL_IDLE_EXPERIENCE_MINUTES[level];
-      amount += required / targetMinutes;
+      const modifiers = actionTalentModifiers(state, general.holderAccountId, "experience", general.location, {
+        carriedGeneralIds: [], now: minuteAt
+      });
+      amount += required / targetMinutes * Math.max(0, 1 + Number(modifiers.experienceGain || 0));
     }
     general.experienceUpdatedAt = cursor + minutes * MINUTE;
     const gained = grantGeneralExperience(general, amount);
@@ -656,13 +659,18 @@ function normalizeCarriedGeneralOrder(state) {
   return state;
 }
 
-function talentSourcesFor(state, accountId, carriedGeneralIds) {
+function talentSourcesFor(state, accountId, carriedGeneralIds, position = null) {
   const carried = carriedGeneralIds == null
     ? new Set(activeCarriedGeneralIds(state.players?.[accountId]))
     : new Set(carriedGeneralIds.map(String));
   return Object.entries(state.generals || {}).flatMap(([generalId, general]) => {
     if (!general?.talent || String(general.holderAccountId || "") !== String(accountId)) return [];
-    if (general.status === "deployed") return [{ generalId, holderAccountId: accountId, status: "deployed", location: general.location, talent: general.talent }];
+    if (general.status === "deployed") {
+      const dx = Math.abs(Number(general.location?.x) - Number(position?.x));
+      const dy = Math.abs(Number(general.location?.y) - Number(position?.y));
+      if (position && (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.max(dx, dy) > 1)) return [];
+      return [{ generalId, holderAccountId: accountId, status: "deployed", location: general.location, talent: general.talent }];
+    }
     if (carried.has(generalId) && general.status === "carried") return [{ generalId, holderAccountId: accountId, status: "carried", location: null, talent: general.talent }];
     return [];
   });
@@ -671,7 +679,7 @@ function talentSourcesFor(state, accountId, carriedGeneralIds) {
 function actionTalentModifiers(state, accountId, action, position, options = {}) {
   const info = staticCell(state.seed, position.x, position.y);
   const cell = state.cells?.[keyOf(position.x, position.y)] || {};
-  const sources = talentSourcesFor(state, accountId, options.carriedGeneralIds);
+  const sources = talentSourcesFor(state, accountId, options.carriedGeneralIds, position);
   for (const [generalId, general] of Object.entries(state.generals || {})) {
     if (!general?.talent || general.status !== "deployed" || String(general.holderAccountId || "") === String(accountId)) continue;
     const dx = Math.abs(Number(general.location?.x) - Number(position.x));
@@ -730,16 +738,16 @@ function cultivationQuote(target, player, nowValue = Date.now(), options = {}) {
   const position = player.position || { x: 0, y: 0 };
   const modifiers = state ? actionTalentModifiers(state, player.accountId, "cultivation", position, {
     carriedGeneralIds: targetType === "general" && target.status === "carried" ? [target.id] : activeCarriedGeneralIds(player), now
-  }) : { cultivationCost: 0, cultivationPower: 0, applied: [], evaluatedTalents: 0 };
+  }) : { cultivationCost: 0, applied: [], evaluatedTalents: 0 };
   const cost = investment;
   const investmentRatio = (investment - goldMin) / Math.max(1, goldMax - goldMin);
   const targetPowerMultiplier = targetType === "player" ? PLAYER_CULTIVATION_POWER_MULTIPLIER : 1;
   // Cost-saving talents improve the return on the submitted budget, not the debit.
   const baseGain = (range.powerGainMin + investmentRatio * (range.powerGainMax - range.powerGainMin))
-    * targetPowerMultiplier / Math.max(0.55, 1 + modifiers.cultivationCost);
+    * targetPowerMultiplier / Math.max(0.2, 1 + modifiers.cultivationCost);
   const targetKey = String(target.id || target.accountId || player.accountId || targetType);
   const randomFactor = 0.5 + randomUnit(String(options.seed ?? state?.seed ?? "cultivation"), "cultivation-power", targetKey, range.attempt);
-  const powerGainFraction = baseGain * randomFactor * (1 + modifiers.cultivationPower);
+  const powerGainFraction = baseGain * randomFactor;
   const currentPower = generalPower(target);
   const targetPower = currentPower + Math.max(1, Math.round(currentPower * powerGainFraction));
   const currentBasePower = clamp(Math.trunc(Number(target.basePower || target.power || 1)), 1, 100000);
@@ -1219,22 +1227,32 @@ function recordBattleReport(state, accountId, value) {
   return report;
 }
 
-function grantMarchExperience(state, job, distance, effects) {
+function grantMarchExperience(state, job, distance, activeGeneralIds, effects, now) {
+  const activeSet = new Set((activeGeneralIds || []).map(String));
   for (const generalId of [...new Set((job.generalIds || []).map(String))]) {
     const general = state.generals?.[generalId];
     if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
-    const gained = grantGeneralExperience(general, generalMarchExperienceGain(general, distance));
-    if (gained > 0) effects.push({ type: "general-experience-gained", source: "march", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general) });
+    const modifiers = actionTalentModifiers(state, job.accountId, "experience", job.to, {
+      attacking: Boolean(job.attack), armySize: job.soldiers,
+      carriedGeneralIds: activeSet.has(generalId) ? [generalId] : [], now
+    });
+    const multiplier = Math.max(0, 1 + Number(modifiers.experienceGain || 0));
+    const gained = grantGeneralExperience(general, generalMarchExperienceGain(general, distance) * multiplier);
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "march", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), experienceGain: modifiers.experienceGain });
   }
 }
 
-function grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects) {
+function grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects, now) {
   const difference = Math.abs(Number(attackerPower || 0) - Number(defenderPower || 0));
   for (const generalId of activeGeneralIds || []) {
     const general = state.generals?.[generalId];
     if (!general || String(general.holderAccountId || "") !== String(job.accountId || "")) continue;
-    const gained = grantGeneralExperience(general, generalBattleExperienceGain(general, difference));
-    if (gained > 0) effects.push({ type: "general-experience-gained", source: "battle", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), powerDifference: difference });
+    const modifiers = actionTalentModifiers(state, job.accountId, "experience", job.to, {
+      attacking: true, armySize: job.soldiers, carriedGeneralIds: [generalId], now
+    });
+    const multiplier = Math.max(0, 1 + Number(modifiers.experienceGain || 0));
+    const gained = grantGeneralExperience(general, generalBattleExperienceGain(general, difference) * multiplier);
+    if (gained > 0) effects.push({ type: "general-experience-gained", source: "battle", jobId: job.id, generalId, accountId: job.accountId, amount: gained, experience: general.experience, required: generalExperienceRequirement(general), powerDifference: difference, experienceGain: modifiers.experienceGain });
   }
 }
 
@@ -1677,12 +1695,12 @@ function resolveMarch(state, job, effects, now) {
     effects.push({ type: "march-blocked", jobId: job.id, accountId: job.accountId, at: blocked, returnedTo: job.from });
     return;
   }
-  grantMarchExperience(state, job, path.length, effects);
   const targetInfo = staticCell(state.seed, job.to.x, job.to.y);
   const target = dynamicCell(state, job.to.x, job.to.y);
   const activeGeneralIds = Array.isArray(job.activeGeneralIds)
     ? job.activeGeneralIds.filter(id => job.generalIds.includes(id)).slice(0, ACTIVE_CARRIED_GENERAL_LIMIT)
     : job.generalIds.slice(0, ACTIVE_CARRIED_GENERAL_LIMIT);
+  grantMarchExperience(state, job, path.length, activeGeneralIds, effects, now);
   const enemy = target.ownerAccountId && target.ownerAccountId !== job.accountId;
   const neutral = !target.ownerAccountId;
   if ((enemy || neutral) && job.attack) {
@@ -1756,7 +1774,7 @@ function resolveMarch(state, job, effects, now) {
         attackerSurvivors: casualties.attackerSurvivors, defenderSurvivors: casualties.defenderSurvivors,
         attackModifiers, defenseModifiers
       });
-      grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects);
+      grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects, now);
       const treasure = claimTreasureAt(state, job.accountId, job.to, now, effects);
       recordBattleReport(state, job.accountId, {
         jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
@@ -1845,7 +1863,7 @@ function resolveMarch(state, job, effects, now) {
         queueGeneralDiscovery(state, candidate);
       }
     }
-    grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects);
+    grantBattleExperience(state, job, activeGeneralIds, attackerPower, defenderPower, effects, now);
     recordBattleReport(state, job.accountId, {
       jobId: job.id, createdAt: now, target: job.to, outcome: "victory",
       attackerPower, defenderPower, soldiersGained: target.soldiers, ownLosses: losses, ownSurvivors: survivors,
@@ -2031,7 +2049,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       if (availableAt > now) throw new Error("该区域开采冷却尚未结束");
       delete cooldowns[keyOf(x, y)];
       const modifiers = actionTalentModifiers(state, actorAccountId, "mining", { x, y }, { now });
-      const cycleMs = resourceCycleMs(info);
+      const cycleMs = roundByModifier(resourceCycleMs(info), modifiers.miningDuration, 1000);
       const yieldPerCycle = roundByModifier(resourceYield(info), modifiers.miningYield, 1);
       const id = crypto.randomUUID();
       state.jobs[id] = { id, type: "mining", accountId: actorAccountId, x, y, auto: false, startedAt: now, finishAt: now + cycleMs, lastSettledAt: now, cycleMs, yieldPerCycle, yieldFormulaVersion: RESOURCE_YIELD_FORMULA_VERSION, modifiers };

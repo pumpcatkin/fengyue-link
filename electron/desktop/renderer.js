@@ -936,7 +936,7 @@ function renderOnlineWorld(next){
   else if(Number.isFinite(total)&&total>0)progress.value=Math.min(99,read/total*100);
   else progress.removeAttribute("value");
   document.querySelector("#online-world-loading-title").textContent=loading?.phase==="error"?"同步尚未完成":loading?.phase==="validating"?"正在校验云端数据":"正在读取云端数据";
-  document.querySelector("#online-world-loading-count").textContent=Number.isFinite(total)?`${read.toLocaleString()} / ${total.toLocaleString()} 条评论`:`已读取 ${read.toLocaleString()} 条评论`;
+  document.querySelector("#online-world-loading-count").textContent=Number.isFinite(total)?`${read.toLocaleString()} / ${total.toLocaleString()} 条数据`:`已读取 ${read.toLocaleString()} 条数据`;
   const gameVisible=(initialized||serverOwner)&&!onlineWorldInLibrary&&!loadingVisible;
   if(gameVisible)loadOnlineWorldProgram(next);else unloadOnlineWorldProgram();
   onlineWorldPage.classList.toggle("game-active",gameVisible);

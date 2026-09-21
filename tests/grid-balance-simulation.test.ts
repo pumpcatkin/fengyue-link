@@ -52,8 +52,10 @@ describe("grid balance simulation", () => {
     expect(report.resources.cooldownSecondsByGrade["D-"]).toMatchObject({ min: 3600, max: 3600 });
     expect(report.resources.cooldownSecondsByGrade["S+"]).toMatchObject({ min: 14400, max: 14400 });
     expect(report.talent.progressCap).toBe(1000);
-    expect(report.talent.percentEffects.red).toEqual({ min: 11, max: 16 });
-    expect(report.talent.modifierCaps.combatPowerPct).toBe(60);
+    expect(report.talent.percentEffects.white).toEqual({ min: 0.8, max: 2 });
+    expect(report.talent.percentEffects.red).toEqual({ min: 55, max: 70 });
+    expect(report.talent.modifierCaps.combatPowerPct).toBe(100);
+    expect(report.talent.modifierCaps.experienceGainPct).toBe(100);
     expect(Number.isInteger(Math.round(report.totals.winRatePct * 100))).toBe(true);
     expect(report.materialBalance).toMatchObject({ source: "author-manual-scatter", automaticGeneration: false, defaultScatterCount: 240, defaultRedAscend: 0, defaultRedReroll: 0, requiredPerAttempt: 1, maximumRequiredPerPlayer: 5 });
     expect(Object.values(report.materialBalance.usedTotal).reduce((sum: number, count: any) => sum + count, 0)).toBe(

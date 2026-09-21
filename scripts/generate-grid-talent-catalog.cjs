@@ -21,6 +21,7 @@ const actionLabels = Object.freeze({
   mining: "开采",
   training: "练兵",
   cultivation: "修炼",
+  experience: "获取经验",
   discovery: "发掘"
 });
 const keyLabels = Object.freeze({
@@ -35,7 +36,7 @@ const keyLabels = Object.freeze({
   trainingCost: "练兵消耗",
   trainingYield: "练兵产量",
   cultivationCost: "修炼消耗",
-  cultivationPower: "修炼战力",
+  experienceGain: "经验获取率",
   discoveryChance: "发掘概率"
 });
 const scopeLabels = Object.freeze({
@@ -57,6 +58,7 @@ const opLabels = Object.freeze({
   "resource-rank-lte": (value) => `资源评级 <= ${value}`,
   "population-gte": (value) => `人口 >= ${value}`,
   "population-lte": (value) => `人口 <= ${value}`,
+  "occupation-count-lte": (value) => `占领次数 <= ${value}`,
   "army-size-gte": (value) => `行军士兵 >= ${value}`,
   "army-size-lte": (value) => `行军士兵 <= ${value}`,
   "neutral-is": (value) => value ? "目标为中立地块" : "目标不是中立地块",
@@ -91,10 +93,12 @@ function effectText(item) {
 }
 
 function rarityText() {
+  const totalWeight = talents.RARITIES.reduce((sum, rarity) => sum + Number(rarity.weight), 0);
   return talents.RARITIES.map((rarity) => {
     const min = (Number(rarity.potencyMin) * 100).toFixed(2);
     const max = (Number(rarity.potencyMax) * 100).toFixed(2);
-    return `${rarity.label}（${rarity.weight}，潜能 ${min}-${max}%）`;
+    const chance = (Number(rarity.weight) / totalWeight * 100).toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    return `${rarity.label}（初始概率 ${chance}%，潜能 ${min}-${max}%）`;
   }).join("；");
 }
 
@@ -127,7 +131,7 @@ function buildDocument() {
     "",
     `- 分类数量：${Object.entries(counts).map(([key, value]) => `${categoryLabels[key]} ${value}`).join("；")}。`,
     `- 天赋效果按潜能值加算；所有非“随行将领”作用域统一乘以部署倍率 **${formatNumber(talents.DEPLOYED_EFFECT_MULTIPLIER)}**，随行将领不乘该倍率。`,
-    `- 全局修正上限：\`${JSON.stringify(talents.MODIFIER_LIMITS)}\`；发掘概率修正以百分点加到基础概率后再限制。`,
+    `- 全局修正上限：\`${JSON.stringify(talents.MODIFIER_LIMITS)}\`；攻打发掘按百分点加算，练兵发掘按相对倍率作用于逐兵保底概率。`,
     `- 稀有度：${rarityText()}。`,
     `- 天材地宝：${materialText()}。`,
     `- 发现判定专用条件“攻打获得将领判定”和“练兵获得将领判定”分别对应 ${code("discoveryKind=attack")} 与 ${code("discoveryKind=training")}；两类判定不会互相套用。`,
@@ -167,7 +171,7 @@ function buildDocument() {
     "脚本会覆盖本文件，不会修改游戏卡、版本号或平台配置。",
     ""
   );
-  return `${lines.join("\n")}\n`;
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
 const outputPath = path.resolve(__dirname, "..", "docs", "猎艳疆土全天赋表.md");

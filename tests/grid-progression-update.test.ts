@@ -162,6 +162,63 @@ describe("grid progression update rules", () => {
     expect(game.generalExperienceRequirement(4)).toBe(3_600);
   });
 
+  it("applies experience-gain talents to deployed, marching, and battle experience", () => {
+    let deployed = grant(joined("deployed-experience"), "mentor");
+    deployed.generals.mentor.talent = talents.normalizeTalent({
+      instanceId: "mentor", talentId: "garrison-mentor", progress: 1000
+    });
+    deployed = deploy(deployed, "mentor");
+    deployed.generals.mentor.experienceUpdatedAt = NOW;
+    const deployedSettled = game.settleWorld(deployed, NOW + game.MINUTE, { activeAccountId: "a", experienceSince: NOW });
+    expect(deployedSettled.state.generals.mentor.experience).toBeGreaterThan(100 / 180);
+    expect(deployedSettled.effects).toContainEqual(expect.objectContaining({
+      type: "general-experience-gained", source: "deployed", generalId: "mentor"
+    }));
+
+    let marching = grant(joined("march-experience"), "focused");
+    marching = grant(marching, "plain");
+    marching = grant(marching, "inactive");
+    marching.generals.focused.talent = talents.normalizeTalent({
+      instanceId: "focused", talentId: "focused-cultivation", progress: 1000
+    });
+    marching.generals.plain.talent = talents.normalizeTalent({
+      instanceId: "plain", talentId: "swift-column", progress: 1000
+    });
+    marching.generals.inactive.talent = talents.normalizeTalent({
+      instanceId: "inactive", talentId: "focused-cultivation", progress: 1000
+    });
+    marching.players.a.position = { x: 0, y: 0 };
+    marching.jobs.journey = {
+      id: "journey", type: "march", accountId: "a", from: { x: 0, y: 0 }, to: { x: 6, y: 0 },
+      path: Array.from({ length: 6 }, (_, index) => ({ x: index + 1, y: 0 })), soldiers: 0,
+      generalIds: ["focused", "plain", "inactive"], activeGeneralIds: ["focused", "plain"], attack: false,
+      startedAt: NOW, finishAt: NOW + 90_000
+    };
+    const marched = game.settleWorld(marching, NOW + 90_000, { activeAccountId: "a", experienceSince: NOW });
+    expect(marched.state.generals.focused.experience).toBeGreaterThan(marched.state.generals.plain.experience);
+    expect(marched.state.generals.plain.experience).toBe(marched.state.generals.inactive.experience);
+    expect(marched.effects).toContainEqual(expect.objectContaining({
+      type: "general-experience-gained", source: "march", generalId: "focused", experienceGain: 0.7
+    }));
+
+    let battle = grant(joined("battle-experience"), "fighter");
+    battle.generals.fighter.talent = talents.normalizeTalent({
+      instanceId: "fighter", talentId: "focused-cultivation", progress: 1000
+    });
+    battle.players.a.position = { x: 0, y: 0 };
+    battle.jobs.battle = {
+      id: "battle", type: "march", accountId: "a", from: { x: 0, y: 0 }, to: { x: 1, y: 0 },
+      path: [{ x: 1, y: 0 }], soldiers: 1_000_000, generalIds: ["fighter"], activeGeneralIds: ["fighter"],
+      attack: true, startedAt: NOW, finishAt: NOW + 15_000
+    };
+    const battled = game.settleWorld(battle, NOW + 15_000, { activeAccountId: "a", experienceSince: NOW });
+    const report = battled.effects.find((effect: any) => effect.type === "battle-won");
+    const experience = battled.effects.find((effect: any) => effect.type === "general-experience-gained" && effect.source === "battle");
+    expect(report).toBeTruthy();
+    expect(experience.experienceGain).toBe(0.7);
+    expect(experience.amount).toBeGreaterThan(game.generalBattleExperienceGain({ cultivationCount: 0 }, Math.abs(report.attackerPower - report.defenderPower)));
+  });
+
   it("scales battle and march experience by the power gap and distance", () => {
     const general = { cultivationCount: 0, experience: 0 };
     expect(game.generalBattleExperienceGain(general, 1)).toBe(47.809);

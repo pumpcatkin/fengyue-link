@@ -161,11 +161,16 @@ if (process.type === "renderer") {
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
       fs.writeFileSync(path.join(outputDir, "online-world-details.png"), (await window.webContents.capturePage()).toPNG());
       window.webContents.send("qa:onOnlineWorldState", { status: "opening", initialized: true, isServerOwner: true,
+        loadProgress: { schema: "fyow.load-progress/1", active: true, phase: "reading", readComments: 120, totalComments: null } });
+      await settle();
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-count').textContent`), "已读取 120 条数据");
+      window.webContents.send("qa:onOnlineWorldState", { status: "opening", initialized: true, isServerOwner: true,
         loadProgress: { schema: "fyow.load-progress/1", active: true, phase: "reading", readComments: 120, totalComments: 480 } });
       await settle();
       assert.equal(await evaluate(`document.querySelector('#online-world-loading').classList.contains('hidden')`), false);
       assert.equal(await evaluate(`document.querySelector('#online-world-loading-progress').value`), 25);
-      assert.equal(await evaluate(`document.querySelector('#online-world-loading-count').textContent`), "120 / 480 条评论");
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading-count').textContent`), "120 / 480 条数据");
+      assert.equal(await evaluate(`document.querySelector('#online-world-loading').textContent.includes('评论')`), false);
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('#online-world-loading-title')).color`), "rgb(238, 242, 244)");
       assert.equal(await evaluate(`document.querySelector('#online-world-loading').textContent.includes('猎艳疆土')`), false);
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').classList.contains('hidden')`), true);

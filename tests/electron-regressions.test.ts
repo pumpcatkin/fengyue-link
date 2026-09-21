@@ -4,6 +4,14 @@ import { describe, expect, it } from "vitest";
 
 
 describe("Electron platform API regressions", () => {
+  it("uses data wording in the pre-entry loading interface", () => {
+    const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
+    const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
+    expect(html).toContain('id="online-world-loading-count">正在查询数据数量…');
+    const countLine = renderer.split("\n").find(line => line.includes('querySelector("#online-world-loading-count")'));
+    expect(countLine).toContain(" 条数据");
+    expect(countLine).not.toContain("评论");
+  });
   it("persists a refreshed companion program into the local card library and installed JSON sources", () => {
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     expect(source).toContain("this.persistRefreshedOnlineWorldCard(card, refreshedCard)");

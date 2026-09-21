@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const talentEngine = require("../electron/grid-talents.cjs");
 
 // Deterministic planning simulation for the 64x64 grid economy. This module
 // does not mutate world state. Its default model mirrors the live engine; the
@@ -51,27 +52,26 @@ const BALANCE_BASELINE = Object.freeze({
   treasureScatter: Object.freeze({ count: 240, manual: true, redAscend: 0, redReroll: 0, simulatedClaimChancePerStep: 0.45, simulatedClaimTargetPerPlayer: 5 })
 });
 
-const TALENT_POTENCY = Object.freeze([
-  Object.freeze({ rarity: "white", progressMin: 0, progressMax: 99, potencyMinPct: 0.2, potencyMaxPct: 0.6 }),
-  Object.freeze({ rarity: "green", progressMin: 100, progressMax: 219, potencyMinPct: 0.8, potencyMaxPct: 1.5 }),
-  Object.freeze({ rarity: "blue", progressMin: 220, progressMax: 359, potencyMinPct: 1.8, potencyMaxPct: 3.0 }),
-  Object.freeze({ rarity: "purple", progressMin: 360, progressMax: 519, potencyMinPct: 3.5, potencyMaxPct: 5.5 }),
-  Object.freeze({ rarity: "gold", progressMin: 520, progressMax: 699, potencyMinPct: 6.5, potencyMaxPct: 9.0 }),
-  Object.freeze({ rarity: "red", progressMin: 700, progressMax: 1000, potencyMinPct: 11.0, potencyMaxPct: 16.0 })
-]);
+const TALENT_POTENCY = Object.freeze(talentEngine.RARITIES.map(rarity => Object.freeze({
+  rarity: rarity.id,
+  progressMin: rarity.progressMin,
+  progressMax: rarity.progressMax,
+  potencyMinPct: rarity.potencyMin * 100,
+  potencyMaxPct: rarity.potencyMax * 100
+})));
 
 const TALENT_CAPS = Object.freeze({
-  marchDurationPct: -45,
-  marchCostPct: -45,
-  combatPowerPct: 60,
-  miningDurationPct: -45,
-  miningYieldPct: 60,
-  trainingDurationPct: -45,
-  trainingCostPct: -45,
-  trainingYieldPct: 60,
-  cultivationCostPct: -45,
-  cultivationPowerPct: 60,
-  discoveryChancePct: 12
+  marchDurationPct: talentEngine.MODIFIER_LIMITS.marchDuration[0] * 100,
+  marchCostPct: talentEngine.MODIFIER_LIMITS.marchCost[0] * 100,
+  combatPowerPct: talentEngine.MODIFIER_LIMITS.combatPower[1] * 100,
+  miningDurationPct: talentEngine.MODIFIER_LIMITS.miningDuration[0] * 100,
+  miningYieldPct: talentEngine.MODIFIER_LIMITS.miningYield[1] * 100,
+  trainingDurationPct: talentEngine.MODIFIER_LIMITS.trainingDuration[0] * 100,
+  trainingCostPct: talentEngine.MODIFIER_LIMITS.trainingCost[0] * 100,
+  trainingYieldPct: talentEngine.MODIFIER_LIMITS.trainingYield[1] * 100,
+  cultivationCostPct: talentEngine.MODIFIER_LIMITS.cultivationCost[0] * 100,
+  experienceGainPct: talentEngine.MODIFIER_LIMITS.experienceGain[1] * 100,
+  discoveryChancePct: talentEngine.MODIFIER_LIMITS.discoveryChance[1] * 100
 });
 
 function round2(value) {

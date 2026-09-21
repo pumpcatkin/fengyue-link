@@ -9,7 +9,7 @@ const assert = require("node:assert/strict");
 const helpers = require("../electron/login-failover.cjs");
 const transport = require("../electron/platform-transport.cjs");
 const { OFFICIAL_DOMAIN_DIRECTORY_URLS, mergePublishedOrigins } = require("../electron/domain-directory.cjs");
-const { extractCommentItems } = require("../electron/online-world-protocol.cjs");
+const { extractCommentItems, decodeCommentChunk } = require("../electron/online-world-protocol.cjs");
 const { OnlineWorldService } = require("../electron/online-world-service.cjs");
 const version = require("../package.json").version;
 const live = process.argv.includes("--live");
@@ -93,15 +93,31 @@ app.whenReady().then(async () => {
     assert.equal(await instance.login({ ...credentials, remember: false, autoLogin: false }), true);
     const loginMs = Date.now() - started;
     clearTimeout(watchdog);
+    clearInterval(diagnostic);
     const card = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../game-cards/猎艳疆土.json"), "utf8"));
-    const workId = card.companion.workId || card.companion.appId || new URL(card.companion.url).pathname.split("/").pop();
+    const workId = process.argv.find(value => value.startsWith("--work-id="))?.slice(10)
+      || card.companion.workId || card.companion.appId || new URL(card.companion.url).pathname.split("/").pop();
     const samples = [];
+    let advertisedPages = 1;
+    if (process.argv.includes("--audit-pages")) {
+      for (let page = 1; page <= 12; page += 1) {
+        const payload = await instance.platformChatApi(`/comments/${encodeURIComponent(workId)}/1?page=${page}&limit=50&order=created_at_desc&filter_type=all`);
+        const items = extractCommentItems(payload);
+        const roots = items.filter(item => items.rootIds.includes(item.id));
+        console.log(JSON.stringify({ stage: "page-audit", page, total: payload.total, roots: items.rootCount, items: items.length,
+          first: roots[0]?.id, last: roots.at(-1)?.id, firstTime: roots[0]?.created_at, lastTime: roots.at(-1)?.created_at,
+          controlParts: items.filter(item => decodeCommentChunk(item.content)?.kind === "CTRL").map(item => ({ id: item.id, accountId: item.account_id || item.account?.id, part: decodeCommentChunk(item.content)?.part })) }));
+      }
+    }
     for (let pass = 0; pass < 3; pass += 1) {
       const before = Date.now();
       const profile = await instance.platformGoApi("/account/profile");
       assert.equal(String(profile.data?.id), instance.account.accountId);
       const page = await instance.platformChatApi(`/comments/${encodeURIComponent(workId)}/1?page=1&limit=50&order=created_at_desc&filter_type=all`);
       const comments = extractCommentItems(page);
+      advertisedPages = Math.max(advertisedPages, Math.ceil(Number(page.total || 0) / 50));
+      if (pass === 0) console.log(JSON.stringify({ stage: "page-shape", workId, envelopeKeys: Object.keys(page), dataKeys: Object.keys(page.data || {}), rootCount: comments.rootCount,
+        metadata: Object.fromEntries(Object.entries(page).filter(([, value]) => value == null || typeof value !== "object")) }));
       const root = comments.find(item => item.content && item.id);
       const branch = root ? await instance.platformChatApi(`/comments/branches/${encodeURIComponent(root.id)}`) : null;
       samples.push({ pass: pass + 1, elapsedMs: Date.now() - before, rootPageItems: comments.length, branchItems: branch ? extractCommentItems(branch).length : 0 });
@@ -115,13 +131,19 @@ app.whenReady().then(async () => {
     });
     reader.work = { id: workId, authorAccountId: card.companion.authorAccountId };
     reader.commentReadSession = { pages: new Map(), branches: new Map(), comments: new Map(), failedRoots: new Map(), totalRoots: null };
+    reader.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
     const history = await reader.readHistory(true);
     const incomplete = history.assembled.incomplete.map(item => ({
       id: item.id, kind: item.kind, total: item.total, received: item.received, missing: item.missing,
       sources: item.sources?.map(source => ({ id: source.id, createdAt: source.created_at }))
     }));
     assert.equal(reader.commentReadSession.failedRoots.size, 0, "a cloud branch request failed");
-    console.log(JSON.stringify({ stage: "authenticated-read-only", requestsPassed: true, recordsComplete: !incomplete.length, version, origin: instance.origin, loginMs, samples, history: reader.history, records: history.assembled.records.length, incomplete, events }));
+    const controls = reader.verifiedControls(history.assembled.records);
+    const snapshots = reader.verifiedSnapshots(history.assembled.records, controls[0]?.record);
+    assert(history.tailPage >= advertisedPages, "cloud pages were truncated before the advertised total");
+    assert(controls.length > 0, "no authenticated cloud control");
+    assert(snapshots.length > 0, "no authenticated cloud state");
+    console.log(JSON.stringify({ stage: "authenticated-read-only", requestsPassed: true, entryRecordsVerified: true, recordsComplete: !incomplete.length, version, origin: instance.origin, loginMs, samples, advertisedPages, history: reader.history, records: history.assembled.records.length, controls: controls.map(item => ({ id: item.record.id, seasonId: item.record.seasonId })), snapshots: snapshots.length, incomplete, events }));
   } finally {
     clearTimeout(watchdog);
     clearInterval(diagnostic);

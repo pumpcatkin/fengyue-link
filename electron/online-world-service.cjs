@@ -160,6 +160,43 @@ function commentPageRootCount(comments) {
   return Number.isSafeInteger(comments?.rootCount) ? comments.rootCount : commentPageRoots(comments).length;
 }
 
+function commentPagination(payload) {
+  const queue = [payload];
+  const seen = new Set();
+  let total = null;
+  let totalPages = null;
+  let hasMore = null;
+  for (let index = 0; index < queue.length && index < 32; index += 1) {
+    const value = queue[index];
+    if (!value || typeof value !== "object" || Array.isArray(value) || seen.has(value)) continue;
+    seen.add(value);
+    for (const key of ["total", "total_count", "totalCount"]) {
+      if (value[key] == null || value[key] === "") continue;
+      const count = Number(value[key]);
+      if (Number.isSafeInteger(count) && count >= 0) total = Math.max(total ?? 0, count);
+    }
+    for (const key of ["total_pages", "totalPages", "last_page", "lastPage"]) {
+      const count = Number(value[key]);
+      if (Number.isSafeInteger(count) && count >= 1) totalPages = Math.max(totalPages ?? 1, count);
+    }
+    for (const key of ["has_more", "hasMore"]) {
+      if (value[key] === true || value[key] === 1 || value[key] === "true") hasMore = true;
+      else if (hasMore == null && (value[key] === false || value[key] === 0 || value[key] === "false")) hasMore = false;
+    }
+    // Stay in list envelopes; a comment's nested reply total is not a page total.
+    for (const key of ["data", "result", "payload", "response", "pagination", "meta"]) {
+      if (value[key] && typeof value[key] === "object" && !Array.isArray(value[key])) queue.push(value[key]);
+    }
+  }
+  return { total, totalPages, hasMore };
+}
+
+function commentPageMinimumTail(comments, page) {
+  const pagination = comments?.pagination;
+  return Math.max(1, pagination?.totalPages || 0, Math.ceil((pagination?.total || 0) / HISTORY_PAGE_SIZE),
+    pagination?.hasMore === true ? page + 1 : 1);
+}
+
 async function completeReadBatch(requests) {
   const results = await Promise.allSettled(requests);
   const failed = results.find(result => result.status === "rejected");
@@ -2279,6 +2316,7 @@ class OnlineWorldService {
     const payload = await this.readCommentData(endpoint, { page }, 20000);
     this.assertSyncActive();
     const comments = extractCommentItems(payload);
+    Object.defineProperty(comments, "pagination", { value: commentPagination(payload) });
     this.trackReadComments(comments);
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
     if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
@@ -2451,36 +2489,53 @@ class OnlineWorldService {
   }
 
   async locateHistoryTailPage(readPage) {
-    const hintedPage = Math.max(1, Math.trunc(Number(this.historyTailPage || 1)));
-    const hinted = await readPage(hintedPage);
-    if (!commentPageRootCount(hinted) && hintedPage > 1) {
+    let minimumTail = 1;
+    const signatures = new Map();
+    const read = async page => {
+      const comments = await readPage(page);
+      minimumTail = Math.max(minimumTail, commentPageMinimumTail(comments, page));
+      if (minimumTail > MAX_HISTORY_PAGES) throw new Error("云端数据分页超过读取上限，请重试同步");
+      const ids = commentPageRoots(comments).map(commentId).filter(Boolean).sort();
+      if (ids.length) {
+        const signature = canonicalJson(ids);
+        if (signatures.has(signature) && signatures.get(signature) !== page) {
+          const error = new Error("云端数据分页返回重复内容，正在重新读取");
+          error.code = "FYOW_HISTORY_CHANGED";
+          throw error;
+        }
+        signatures.set(signature, page);
+      }
+      return comments;
+    };
+    const first = await read(1);
+    const hintedPage = Math.max(minimumTail, Math.min(MAX_HISTORY_PAGES, Math.trunc(Number(this.historyTailPage || 1))));
+    const hinted = hintedPage === 1 ? first : await read(hintedPage);
+    if (!commentPageRootCount(hinted) && hintedPage > minimumTail) {
       this.historyTailPage = 1;
       return this.locateHistoryTailPage(readPage);
     }
-    if (commentPageRootCount(hinted) < HISTORY_PAGE_SIZE) return hintedPage;
+    if (!commentPageRootCount(hinted) && hintedPage === 1 && minimumTail === 1) return 1;
     let lower = hintedPage;
     let upper = null;
     let step = 1;
+    // Filtered or deleted roots can leave a short page in the middle. Only an
+    // empty page beyond the advertised total establishes the history boundary.
     while (lower < MAX_HISTORY_PAGES) {
-      const candidate = Math.min(MAX_HISTORY_PAGES, hintedPage + step);
-      const comments = await readPage(candidate);
-      if (!commentPageRootCount(comments)) {
+      const candidate = Math.min(MAX_HISTORY_PAGES, Math.max(hintedPage + step, minimumTail));
+      const comments = await read(candidate);
+      if (!commentPageRootCount(comments) && candidate > minimumTail) {
         upper = candidate;
         break;
       }
       lower = candidate;
-      if (commentPageRootCount(comments) < HISTORY_PAGE_SIZE || candidate === MAX_HISTORY_PAGES) return candidate;
       step *= 2;
     }
-    if (upper == null) return lower;
+    if (upper == null) throw new Error("云端数据分页尚未读取完整，请重试同步");
     while (lower + 1 < upper) {
       const middle = Math.floor((lower + upper) / 2);
-      const comments = await readPage(middle);
-      if (!commentPageRootCount(comments)) upper = middle;
-      else {
-        lower = middle;
-        if (commentPageRootCount(comments) < HISTORY_PAGE_SIZE) return middle;
-      }
+      const comments = await read(middle);
+      if (!commentPageRootCount(comments) && middle > minimumTail) upper = middle;
+      else lower = middle;
     }
     return lower;
   }
@@ -2491,16 +2546,20 @@ class OnlineWorldService {
     const comments = [];
     const seen = new Set();
     const fetchedRoots = new Set();
-    for (let page = 1; page <= MAX_HISTORY_PAGES; page += 1) {
-      const items = await this.readHistoryPage(page);
-      const rootCount = commentPageRootCount(items);
+    const pages = new Map();
+    const readPage = async page => {
+      if (!pages.has(page)) pages.set(page, await this.readHistoryPage(page));
+      return pages.get(page);
+    };
+    const tailPage = await this.locateHistoryTailPage(readPage);
+    for (let page = 1; page <= tailPage; page += 1) {
+      const items = await readPage(page);
       for (const item of items) {
         const id = commentId(item);
         if (!id || seen.has(id)) continue;
         seen.add(id);
         comments.push(item);
       }
-      if (!rootCount || rootCount < HISTORY_PAGE_SIZE) break;
     }
     let hydrated;
     if (includeAllBranches) {
@@ -2548,7 +2607,8 @@ class OnlineWorldService {
     const firstPageComments = await readPage(1);
     const tailPageComments = tailPage === 1 ? firstPageComments : await readPage(tailPage);
     if (this.commentReadSession) {
-      this.commentReadSession.totalRoots = (tailPage - 1) * HISTORY_PAGE_SIZE + commentPageRootCount(tailPageComments);
+      this.commentReadSession.totalRoots = firstPageComments.pagination?.total
+        ?? (tailPage - 1) * HISTORY_PAGE_SIZE + commentPageRootCount(tailPageComments);
       this.trackReadComments([]);
     }
     const timestamps = comments => commentPageRoots(comments).map(commentTimestamp).filter(Boolean);
@@ -2642,8 +2702,8 @@ class OnlineWorldService {
           throw error;
         }
       }
-      if (commentPageRootCount(tailPageComments) === HISTORY_PAGE_SIZE
-        && commentPageRootCount(await this.readHistoryPage(tailPage + 1, { fresh: true }))) {
+      const nextPage = await this.readHistoryPage(tailPage + 1, { fresh: true });
+      if (commentPageRootCount(nextPage) || commentPageMinimumTail(nextPage, tailPage + 1) > tailPage) {
         const error = new Error("云端评论分页在读取期间增加，正在重新读取");
         error.code = "FYOW_HISTORY_CHANGED";
         throw error;
@@ -3581,7 +3641,7 @@ class OnlineWorldService {
     for (const page of scanPages) {
       const pageComments = await readPage(page);
       pagesScanned += 1;
-      if (!commentPageRootCount(pageComments)) break;
+      if (!commentPageRootCount(pageComments)) continue;
       const pageOrders = commentPageRoots(pageComments).map(comment => ({ timestamp: commentTimestamp(comment), commentId: commentId(comment) }))
         .filter(order => order.timestamp && order.commentId);
       for (const order of pageOrders) if (compareOrderValue(order, newestOrder) > 0) newestOrder = order;
@@ -3650,6 +3710,7 @@ class OnlineWorldService {
   }
 
   async syncNow(fullScan = false, { ignoreMigrationReset = false } = {}) {
+    fullScan = Boolean(fullScan || this.loadProgress?.active);
     const previousControlId = String(this.control?.id || "");
     const previousDirectSession = this.directSession();
     this.syncing = true;
@@ -3742,7 +3803,14 @@ class OnlineWorldService {
           return this.state();
         }
         if (!this.pendingMigration?.requiresPublish) this.pendingMigration = null;
-        if (this.loadProgress?.active && !controls.length) throw new Error("云端控制记录尚未读取完整，请重试同步");
+        if (this.loadProgress?.active && !controls.length) {
+          this.diagnostic({
+            event: "entry-control-incomplete", workId: this.work?.id, ...this.history,
+            controlRecords: history.assembled.records.filter(item => item.kind === "CTRL").length,
+            incompleteControls: history.assembled.incomplete.filter(item => item.kind === "CTRL").length
+          });
+          throw new Error("云端控制记录尚未读取完整，请重试同步");
+        }
         const snapshots = this.verifiedSnapshots(history.assembled.records);
         const snapshotItem = snapshots[0];
         const snapshot = snapshotItem?.record;

@@ -172,6 +172,93 @@ describe("online world platform service", () => {
     expect(reader.commentReadSession).toBeNull();
   });
 
+  it("reads signed control and state beyond short and empty interior pages using the platform total", async () => {
+    const fixture = coverageHarness();
+    fixture.map("player", 20, { cells: { "3,3": { ownerAccountId: "player", soldiers: 18, generalIds: [] } } });
+    const records = fixture.roots.splice(0);
+    const filler = Array.from({ length: 150 }, (_, index) => ({
+      id: `filler-${index}`, content: "data", created_at: fixture.base + 1000 - index
+    }));
+    fixture.roots.push(...filler, ...records);
+    const reader = fixture.create("player");
+    reader.control = structuredClone(fixture.author.control);
+    reader.world = structuredClone(fixture.author.world);
+    reader.world.privatePlayers.player = { preserved: "local dialogue" };
+    reader.historyTailPage = 1;
+    reader.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
+    const requested: number[] = [];
+    reader.requestConsole = async (endpoint: string) => {
+      expect(endpoint).not.toContain("/branches/");
+      const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+      requested.push(page);
+      const roots = fixture.roots.slice((page - 1) * 50, page * 50);
+      return { total: fixture.roots.length, data: page === 1 ? roots.slice(1) : page === 2 ? [] : roots };
+    };
+    await reader.sync(false);
+    expect(reader.history.tailPage).toBe(4);
+    expect(reader.control.id).toBe(fixture.author.control.id);
+    expect(reader.world.cells["3,3"].soldiers).toBe(18);
+    expect(reader.world.privatePlayers.player.preserved).toBe("local dialogue");
+    expect(reader.loadProgress).toMatchObject({ active: false, phase: "complete" });
+    expect(new Set(requested)).toEqual(new Set([1, 2, 3, 4, 5]));
+    expect((await reader.readAllCommentSources()).some((item: any) => item.id === records[0].id)).toBe(true);
+  });
+
+  it("does not treat a short page as the end even when the platform omits its total", async () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    reader.requestConsole = async (endpoint: string) => {
+      const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+      return { data: page === 1
+        ? Array.from({ length: 49 }, (_, index) => ({ id: `short-${index}`, content: "data", created_at: fixture.base + 1000 - index }))
+        : page === 2 ? fixture.roots : [] };
+    };
+    const history = await reader.readHistory(true);
+    expect(history.tailPage).toBe(2);
+    expect(reader.verifiedControls(history.assembled.records)).toHaveLength(1);
+    expect(reader.verifiedSnapshots(history.assembled.records, fixture.author.control)).toHaveLength(1);
+  });
+
+  it("rechecks the page after a short tail during entry and retries if it has grown", async () => {
+    const fixture = coverageHarness();
+    const map = fixture.map("player", 20, { cells: { "3,3": { ownerAccountId: "player", soldiers: 19, generalIds: [] } } });
+    fixture.roots.pop();
+    const reader = fixture.create("player");
+    reader.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
+    let nextPageReads = 0;
+    reader.requestConsole = async (endpoint: string) => {
+      const page = Number(new URL(`https://test${endpoint}`).searchParams.get("page"));
+      return { data: page === 1 ? fixture.roots : page === 2 && ++nextPageReads >= 2 ? [map.root] : [] };
+    };
+    await reader.sync(true);
+    expect(nextPageReads).toBeGreaterThanOrEqual(3);
+    expect(reader.world.cells["3,3"].soldiers).toBe(19);
+    expect(reader.history.tailPage).toBe(2);
+    expect(reader.loadProgress.phase).toBe("complete");
+  });
+
+  it.each(["missing", "invalid-signature"])("still rejects %s cloud control instead of accepting cached control or clearing local data", async kind => {
+    const fixture = coverageHarness();
+    fixture.roots.shift();
+    if (kind === "invalid-signature") fixture.append({ ...fixture.author.control, signature: "invalid" }, "author", fixture.base + 1);
+    const reader = fixture.create("player");
+    reader.control = structuredClone(fixture.author.control);
+    reader.world = structuredClone(fixture.author.world);
+    reader.world.privatePlayers.player = { preserved: "local dialogue" };
+    reader.loadProgress = { active: true, phase: "reading", readComments: 0, totalComments: null };
+    await expect(reader.sync(false)).rejects.toThrow("云端控制记录尚未读取完整");
+    expect(reader.world.privatePlayers.player.preserved).toBe("local dialogue");
+    expect(reader.control.id).toBe(fixture.author.control.id);
+    expect(reader.loadProgress.phase).toBe("error");
+  });
+
+  it("rejects a platform that repeats the same roots on every page", async () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    reader.requestConsole = async () => ({ data: fixture.roots });
+    await expect(reader.readHistory(true)).rejects.toMatchObject({ code: "FYOW_HISTORY_CHANGED" });
+  });
+
   it("hydrates more than two hundred roots with at most four concurrent branch reads", async () => {
     const instance = service({});
     let active = 0;
@@ -519,13 +606,13 @@ describe("online world platform service", () => {
     expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).toContain("latest");
     expect(history.assembled.records.map((item: any) => item.record.id).filter(Boolean)).toContain("old");
     expect(instance.history).toMatchObject({ tailPage: 3, stoppedBy: "oldest-page" });
-    expect([...new Set(requested)]).toEqual([1, 2, 3]);
+    expect([...new Set(requested)]).toEqual([1, 2, 3, 5, 4]);
 
     requested.splice(0);
     instance.publicHistoryOrder = history.completeThrough;
     instance.knownCommentIds.add("latest-ordinary");
     await instance.readHistory(false);
-    expect(requested).toEqual([3, 1]);
+    expect(requested).toEqual([1, 3, 4]);
     expect(instance.history.stoppedBy).toBe("known-comment-reached");
   });
 
@@ -582,7 +669,7 @@ describe("online world platform service", () => {
     const history = await instance.readHistory(true);
     expect(history.assembled.records.map((item: any) => item.record.id)).toContain("latest-ranked");
     expect(instance.history).toMatchObject({ tailPage: 3, pageOrder: "mixed", stoppedBy: "mixed-page-order-full-scan" });
-    expect([...new Set(requested)].sort()).toEqual([1, 2, 3]);
+    expect([...new Set(requested)].sort()).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("replaces a legacy player's generated context with the bound profile facts", async () => {
@@ -757,7 +844,7 @@ describe("online world platform service", () => {
     expect(history.assembled.records[0].record).toEqual(record);
     expect(history.pages.get(2).rootCount).toBe(1);
     expect(history.pages.get(2).length).toBeGreaterThan(50);
-    expect(endpoints.map(endpoint => Number(new URL(`https://test${endpoint}`).searchParams.get("page")))).toEqual([1, 2]);
+    expect(endpoints.map(endpoint => Number(new URL(`https://test${endpoint}`).searchParams.get("page")))).toEqual([1, 2, 3]);
     expect(instance.commentRootPages.get("root")).toBe(2);
   });
 
@@ -1001,7 +1088,7 @@ describe("online world platform service", () => {
       const unchanged = await instance.readWorldChatHistory();
       instance.applyWorldChatRecords(unchanged.assembled.records);
       expect(unchanged).toMatchObject({ incremental: true, pagesScanned: 1, reachedHistoryBoundary: true });
-      expect(requested).toEqual([4]);
+      expect(requested).toEqual([1, 4, 5]);
       expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat"]);
 
       roots.push(...makeChat("new-chat", 300));
@@ -1009,7 +1096,7 @@ describe("online world platform service", () => {
       const newest = await instance.readWorldChatHistory();
       instance.applyWorldChatRecords(newest.assembled.records);
       expect(newest.pagesScanned).toBe(1);
-      expect(requested).toEqual([4]);
+      expect(requested).toEqual([1, 4, 5]);
       expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["old-chat", "new-chat"]);
       roots.push(...encodeCommentRecord({ schema: "fyow.snapshot/3", snapshotId: "after-chat", revision: 9 }).map((content: string, index: number) => ({
         id: `after-chat-${index}`, account_id: "author", created_at: 301, content
@@ -1039,7 +1126,10 @@ describe("online world platform service", () => {
     expect(chunks.length).toBeGreaterThan(1);
     const root = { id: "root", account_id: "player", created_at: 100, content: chunks[0] };
     let repliesReady = false;
-    const instance = service({ requestConsole: async () => [root], getAccount: () => ({ accountId: "player" }) });
+    const instance = service({
+      requestConsole: async (endpoint: string) => new URL(`https://test${endpoint}`).searchParams.get("page") === "1" ? [root] : [],
+      getAccount: () => ({ accountId: "player" })
+    });
     instance.work = { id: "work", authorAccountId: "author" };
     instance.control = { seasonId: "season", authorityAccountId: "author" };
     instance.world = createWorld({ seasonId: "season", authorityAccountId: "author" });

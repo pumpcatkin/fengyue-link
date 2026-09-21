@@ -382,7 +382,7 @@ describe("online world migration regressions", () => {
       onChange: () => {}
     });
     instance.work = { id: "old", authorAccountId: "author" };
-    instance.readHistoryPage = vi.fn(async () => [{ id: "root", content: "root" }]);
+    instance.readHistoryPage = vi.fn(async (page: number) => page === 1 ? [{ id: "root", content: "root" }] : []);
     instance.readCommentBranches = vi.fn(async () => [{ id: "reply", parent_id: "root", content: "reply" }]);
     try {
       const comments = await instance.readAllCommentSources({ includeAllBranches: true });

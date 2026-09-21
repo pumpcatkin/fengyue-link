@@ -6,12 +6,14 @@ import { describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
 const helpers = require("../electron/login-failover.cjs");
+const transport = require("../electron/platform-transport.cjs");
 const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
 
 function backend() {
   const save = vi.fn();
   const Backend = runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-    ...helpers, URL, AbortController, setTimeout, clearTimeout, console,
+    ...helpers, ...transport, URL, AbortController, setTimeout, clearTimeout, console,
+    accountSignature: (value: unknown) => JSON.stringify(value),
     platformUrlForOrigin: (origin: string, pathname: string) => new URL(pathname, origin),
     discoverDomainStatuses: async () => ({ domains: [] }),
     currentDomainCandidates: () => ({ domains: [{ origin: "https://node.test", online: true, latency: 1 }] }),
@@ -128,5 +130,43 @@ describe("desktop login lifecycle", () => {
     expect(instance.closeOAuthWindows).toHaveBeenCalledOnce();
     expect(instance.loginInProgress).toBe(false);
     expect(instance.loginDetectionPaused).toBe(true);
+  });
+
+  it("never reloads the account renderer when a heartbeat fails and coalesces concurrent heartbeats", async () => {
+    const { instance } = backend();
+    instance.anchorNavigationArmed = true;
+    instance.anchor = { loadURL: vi.fn() };
+    instance.ensureAnchor = vi.fn();
+    instance.platformGoApi = vi.fn(async () => { throw new Error("Failed to fetch"); });
+    await Promise.all([instance.keepSessionAlive(), instance.keepSessionAlive()]);
+    expect(instance.platformGoApi).toHaveBeenCalledOnce();
+    expect(instance.ensureAnchor).not.toHaveBeenCalled();
+    expect(instance.anchor.loadURL).not.toHaveBeenCalled();
+    expect(instance.sessionHeartbeatPromise).toBeNull();
+    instance.lastPlatformSuccessAt = Date.now();
+    await instance.keepSessionAlive();
+    expect(instance.platformGoApi).toHaveBeenCalledOnce();
+  });
+
+  it("holds the active game's account through failed authentication probes", async () => {
+    const { instance } = backend();
+    Object.assign(instance, {
+      loggedIn: true, mode: "online-world", account: { accountId: "player" },
+      onlineWorldService: { work: { id: "work" } }, confirmAuthenticationFailure: () => true,
+      readAccountSnapshot: async () => ({ authenticated: false, reason: "guest-account" }),
+      detachSurface: vi.fn()
+    });
+    await Object.getPrototypeOf(instance).refreshAccount.call(instance);
+    expect(instance.loggedIn).toBe(true);
+    expect(instance.account.accountId).toBe("player");
+    expect(instance.detachSurface).not.toHaveBeenCalled();
+  });
+
+  it("shares a platform rate-limit cooldown without sending more requests", async () => {
+    const { instance } = backend();
+    instance.platformSession = { fetch: vi.fn(async () => new Response("{}", { status: 429, headers: { "retry-after": "60" } })) };
+    await expect(instance.platformGoApi("/account/profile")).rejects.toMatchObject({ status: 429 });
+    await expect(instance.platformGoApi("/account/profile")).rejects.toMatchObject({ status: 429 });
+    expect(instance.platformSession.fetch).toHaveBeenCalledOnce();
   });
 });

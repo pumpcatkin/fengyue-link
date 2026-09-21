@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
+const { isTransientPlatformError, platformRequestError } = require("./platform-transport.cjs");
 const {
   FYOW_SCHEMAS,
   FYOW_COMMENT_LIMIT,
@@ -2251,6 +2252,7 @@ class OnlineWorldService {
         return await write();
       } catch (error) {
         lastError = error;
+        if (!isTransientPlatformError(error)) throw error;
         if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 200 * attempt));
       }
     }
@@ -2274,26 +2276,37 @@ class OnlineWorldService {
   async fetchHistoryPage(page) {
     this.assertSyncActive();
     const endpoint = `/comments/${encodeURIComponent(this.work.id)}/1?page=${page}&limit=${HISTORY_PAGE_SIZE}&order=created_at_desc&filter_type=all`;
-    let payload;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        payload = await this.requestConsole(endpoint, { timeout: 20000 });
-        break;
-      } catch (error) {
-        this.assertSyncActive();
-        const transient = /fetch|network|connection|timeout|timed out|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION)|\b(?:429|502|503|504)\b|网络|超时|连接/i.test(error?.message || "");
-        if (!transient || attempt === 2) throw error;
-        this.diagnostic({ event: "comment-page-read-retry", page, attempt, error: error?.message || String(error) });
-        await new Promise(resolve => setTimeout(resolve, 300));
-        this.assertSyncActive();
-      }
-    }
+    const payload = await this.readCommentData(endpoint, { page }, 20000);
     this.assertSyncActive();
     const comments = extractCommentItems(payload);
     this.trackReadComments(comments);
     for (const root of commentPageRoots(comments)) this.commentRootPages.set(commentId(root), page);
     if (this.commentRootPages.size > 2000) this.commentRootPages = new Map([...this.commentRootPages].slice(-2000));
     return comments;
+  }
+
+  async readCommentData(endpoint, context, timeout = 15000) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const payload = await this.requestConsole(endpoint, { timeout, attempts: 1 });
+        const keys = ["data", "items", "list", "rows", "comment", "comments", "results", "records", "result", "payload", "response", "children", "replies", "branches", "child_comments", "sub_comments"];
+        const queue = [payload];
+        let valid = false;
+        for (let index = 0; index < queue.length && index < 64; index += 1) {
+          const value = queue[index];
+          if (Array.isArray(value) || (value && typeof value.content === "string" && (value.id || value.comment_id))) { valid = true; break; }
+          if (value && typeof value === "object") for (const key of keys) if (value[key] && typeof value[key] === "object") queue.push(value[key]);
+        }
+        if (!valid) throw platformRequestError("PLATFORM_DATA_SHAPE", "平台数据列表格式无效");
+        return payload;
+      } catch (error) {
+        this.assertSyncActive();
+        if (!isTransientPlatformError(error) || attempt === 2) throw error;
+        this.diagnostic({ event: context.rootCommentId ? "comment-branch-read-retry" : "comment-page-read-retry", ...context, attempt, code: error?.code || null, error: error?.message || String(error) });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        this.assertSyncActive();
+      }
+    }
   }
 
   async probeMigrationReset() {
@@ -2332,7 +2345,7 @@ class OnlineWorldService {
         : `/comments/branches/${encodeURIComponent(rootId)}?page=${page}&limit=${HISTORY_PAGE_SIZE}`;
       let payload;
       try {
-        payload = await this.requestConsole(endpoint, { timeout: 15000 });
+        payload = await this.readCommentData(endpoint, { rootCommentId: rootId, page });
         this.assertSyncActive();
       } catch (error) {
         if (this.syncPaused) throw error;

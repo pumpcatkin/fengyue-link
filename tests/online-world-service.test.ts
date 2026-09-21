@@ -2948,6 +2948,43 @@ describe("online world platform service", () => {
     expect(requestConsole).toHaveBeenCalledTimes(1);
   });
 
+  it("retries a temporary branch outage before accepting the complete signed record", async () => {
+    const fixture = coverageHarness();
+    const instance = fixture.create();
+    await instance.sync();
+    const request = instance.requestConsole;
+    let failed = false;
+    instance.requestConsole = vi.fn(async (endpoint: string, options: unknown) => {
+      if (endpoint.includes("/branches/") && !failed) { failed = true; throw new Error("Failed to fetch"); }
+      return request(endpoint, options);
+    });
+    await instance.readCommentBranches("fixture-root", 1);
+    expect(failed).toBe(true);
+    const branches = instance.requestConsole.mock.calls.filter(([endpoint]: string[]) => endpoint?.includes("/branches/"));
+    expect(branches).toHaveLength(2);
+    expect(instance.world).toBeTruthy();
+  });
+
+  it("rejects malformed cloud lists and retains the current world on a failed sync", async () => {
+    const fixture = coverageHarness();
+    const instance = fixture.create();
+    await instance.sync();
+    const world = JSON.parse(JSON.stringify(instance.world));
+    instance.requestConsole = async () => ({ code: 100000, data: {} });
+    await expect(instance.sync()).rejects.toThrow("PLATFORM_DATA_SHAPE");
+    expect(instance.world).toEqual(world);
+    expect(instance.status).toBe("degraded");
+  });
+
+  it("does not retry rejected writes or writes during platform rate limiting", async () => {
+    for (const status of [401, 403, 429]) {
+      const write = vi.fn(async () => { throw Object.assign(new Error(`HTTP ${status}`), { status }); });
+      const instance = service({});
+      await expect(instance.retryPlatformWrite(write)).rejects.toThrow(String(status));
+      expect(write).toHaveBeenCalledOnce();
+    }
+  });
+
   it("ignores a banned player map delta and stale player epoch", () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "author", seasonId: "season" });

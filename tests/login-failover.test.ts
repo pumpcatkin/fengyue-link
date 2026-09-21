@@ -65,6 +65,21 @@ describe("automatic login failover", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("uses fresh reachability results after a failed node instead of exhausting a stale list", async () => {
+    const attempt = vi.fn(async ({ origin }: { origin: string }) => {
+      if (origin === "initial") throw new Error("Failed to fetch");
+      return origin;
+    });
+    const result = await runLoginFailover({
+      signal: new AbortController().signal,
+      getCandidates: async () => [{ origin: "initial" }, { origin: "known-offline" }, { origin: "recovered" }],
+      refreshCandidates: async () => [{ origin: "initial" }, { origin: "recovered" }],
+      attempt
+    });
+    expect(result).toBe("recovered");
+    expect(attempt.mock.calls.map(([candidate]) => candidate.origin)).toEqual(["initial", "recovered"]);
+  });
+
   it.each(["discovery", "node", "retry-delay"])("cancels promptly during %s", async phase => {
     vi.useFakeTimers();
     const controller = new AbortController();

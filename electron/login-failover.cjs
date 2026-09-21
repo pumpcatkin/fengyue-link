@@ -54,12 +54,16 @@ function platformLoginError(message) {
   return loginError(transport ? "LOGIN_NODE_FAILED" : "LOGIN_REJECTED", `平台登录失败：${message}`);
 }
 
-async function runLoginFailover({ signal, getCandidates, attempt, onProgress = () => {}, nodeWaitMs = round => Math.min(60000, 25000 + round * 15000), retryDelayMs = round => Math.min(15000, 2500 * (round + 1)) }) {
+async function runLoginFailover({ signal, getCandidates, refreshCandidates, attempt, onProgress = () => {}, nodeWaitMs = round => Math.min(60000, 25000 + round * 15000), retryDelayMs = round => Math.min(15000, 2500 * (round + 1)) }) {
   let attemptNumber = 0;
   for (let round = 0; ; round += 1) {
     assertLoginActive(signal);
-    const candidates = await waitForLoginTask(getCandidates(round), signal);
-    for (const candidate of candidates) {
+    let candidates = [...await waitForLoginTask(getCandidates(round), signal)];
+    const attemptedOrigins = new Set();
+    while (candidates.length) {
+      const candidate = candidates.shift();
+      if (attemptedOrigins.has(candidate.origin)) continue;
+      attemptedOrigins.add(candidate.origin);
       assertLoginActive(signal);
       const node = new AbortController();
       const cancelNode = () => node.abort(signal.reason);
@@ -80,6 +84,7 @@ async function runLoginFailover({ signal, getCandidates, attempt, onProgress = (
         signal?.removeEventListener("abort", cancelNode);
         if (!node.signal.aborted) node.abort(loginError("LOGIN_NODE_FINISHED", "节点尝试已结束"));
       }
+      if (refreshCandidates) candidates = (await waitForLoginTask(refreshCandidates(round), signal)).filter(item => !attemptedOrigins.has(item.origin));
     }
     onProgress({ phase: "waiting", attempt: attemptNumber, round: round + 1 });
     await pauseLogin(retryDelayMs(round), signal);

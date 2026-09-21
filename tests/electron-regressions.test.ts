@@ -399,7 +399,7 @@ describe("Electron platform API regressions", () => {
     expect(gridStyles).toMatch(/aside\s*\{[^}]*overflow:\s*hidden auto/);
     expect(gridStyles).toMatch(/html, body\s*\{[^}]*overflow:\s*hidden/);
     expect(main).toContain("async platformServerTime()");
-    expect(main).toContain("response.headers.get('date')");
+    expect(main).toContain('this.platformRequest("/go/api/account/profile", { timeout: 5000, attempts: 1 })');
     expect(runtime).toContain("connect-src 'none'");
     expect(runtime).toContain("worker-src 'none'");
   });
@@ -425,7 +425,7 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain("this.authFailureStreak >= 3 && elapsedMs >= 9000");
     expect(main).toContain('event: confirmed ? "authentication-loss-confirmed" : "authentication-loss-deferred"');
     expect(main).toContain('event: "authentication-loss-held-during-active-session"');
-    expect(main).toContain("if (this.work || this.room)");
+    expect(main).toContain("if (this.work || this.room || this.onlineWorldService?.work)");
     expect(main).toContain('this.clearAuthenticationFailures("account-refresh")');
     expect(main).not.toContain("const next = snapshot ? Boolean(snapshot.authenticated) : await this.evaluateLogin()");
   });

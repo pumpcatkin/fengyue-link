@@ -49,6 +49,7 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates, loginError, assertLoginActive, waitForLoginTask, pauseLogin, platformLoginError, runLoginFailover } = require("./login-failover.cjs");
+const { requestPlatformJson, platformRequestError } = require("./platform-transport.cjs");
 const {
   OFFICIAL_DOMAIN_DIRECTORY_URLS,
   FALLBACK_PLATFORM_ORIGINS,
@@ -542,9 +543,10 @@ async function refreshDomainStatuses() {
       const response = await net.fetch(`${origin}/zh/chats`, { method: "GET", redirect: "follow", signal: AbortSignal.timeout(5_000) });
       const finalOrigin = normalizeOrigin(response.url) || origin;
       if (!TRUSTED_PLATFORM_ORIGINS.has(finalOrigin)) throw new Error(`节点重定向到了未受信任的域名：${finalOrigin}`);
+      void response.body?.cancel().catch(() => {});
       return {
         origin,
-        online: response.status >= 200 && response.status < 500,
+        online: response.ok,
         statusCode: response.status,
         latency: Date.now() - startedAt,
         finalOrigin,
@@ -3025,9 +3027,8 @@ class AccountBackend {
         if (profileResponse.status === 401 || profileResponse.status === 403) return { authenticated:false, reason:'profile-rejected' };
         if (!profileResponse.ok) return null;
         const profilePayload = await profileResponse.json().catch(() => null);
-        if (profilePayload && typeof profilePayload.code === 'number' && profilePayload.code !== 100000) {
-          return { authenticated:false, reason:'profile-rejected' };
-        }
+        if (!profilePayload || typeof profilePayload !== 'object') return null;
+        if (profilePayload.code != null && ![0,100000].includes(Number(profilePayload.code))) return null;
         const profile = unwrap(profilePayload) || {};
         const accountId = profile.id ?? profile.account_id ?? profile.accountId ?? null;
         const accountIdText = accountId == null ? '' : String(accountId).trim();
@@ -3083,7 +3084,7 @@ class AccountBackend {
       if (!snapshot.authenticated) {
         if (this.loggedIn && !this.loginInProgress) {
           if (!this.confirmAuthenticationFailure("account-refresh", snapshot.reason)) return;
-          if (this.work || this.room) {
+          if (this.work || this.room || this.onlineWorldService?.work) {
             this.appendSessionLog("login-state", {
               event: "authentication-loss-held-during-active-session",
               source: "account-refresh",
@@ -3128,7 +3129,7 @@ class AccountBackend {
   }
 
   async refreshLoginState(force = false) {
-    if (!this.domainSelected || this.loginInProgress || this.loginDetectionPaused) return;
+    if (!this.domainSelected || this.loginInProgress || this.loginDetectionPaused || this.accountRefreshPromise) return;
     const authSessionRevision = this.authSessionRevision;
     const anchor = await this.ensureAnchor();
     if (anchor.webContents.isLoading()) return;
@@ -3145,7 +3146,7 @@ class AccountBackend {
     } else if (!this.loggedIn) {
       next = false;
     } else if (!this.loginInProgress && this.confirmAuthenticationFailure("status-refresh", snapshot.reason)) {
-      if (this.work || this.room) {
+      if (this.work || this.room || this.onlineWorldService?.work) {
         this.appendSessionLog("login-state", {
           event: "authentication-loss-held-during-active-session",
           source: "status-refresh",
@@ -3238,12 +3239,27 @@ class AccountBackend {
           }
           return found;
         };
-        const first = selector => roots().map(root => root.querySelector?.(selector)).find(Boolean) || null;
+        const visible = element => {
+          const style = element.ownerDocument.defaultView.getComputedStyle(element);
+          return !element.disabled && !element.readOnly && element.type !== 'hidden'
+            && style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+        };
+        const first = (selector, scopes = roots()) => scopes.flatMap(root => [...(root.querySelectorAll?.(selector) || [])]).find(visible) || null;
+        const hydrated = element => {
+          const nextPage = element.ownerDocument.querySelector('script[src*="/_next/"],script#__NEXT_DATA__');
+          return !nextPage || Object.keys(element).some(key => key.startsWith('__reactProps$') || key.startsWith('__reactFiber$'));
+        };
         let accountElement = null;
         let password = null;
         while (!accountElement || !password) {
-          accountElement = first('#email,input[name="email"],input[name="username"],input[autocomplete="email"],input[autocomplete="username"],input[type="email"],input[placeholder*="邮箱"],input[placeholder*="用户名"],input[placeholder*="账号"],input[placeholder*="email" i],input[placeholder*="user" i]');
           password = first('#password,input[name="password"],input[autocomplete="current-password"],input[type="password"],input[placeholder*="密码"]');
+          const scopes = password?.closest('form') ? [password.closest('form')] : roots();
+          accountElement = first('#email,input[name="email"],input[name="username"],input[autocomplete="email"],input[autocomplete="username"],input[type="email"],input[placeholder*="邮箱"],input[placeholder*="用户名"],input[placeholder*="账号"],input[placeholder*="email" i],input[placeholder*="user" i]', scopes)
+            || (password?.closest('form') ? first('input[type="text"],input:not([type]),input[type="tel"]', scopes) : null);
+          if (accountElement && password && (!hydrated(accountElement) || !hydrated(password))) {
+            accountElement = null;
+            password = null;
+          }
           if (!accountElement || !password) await sleep(150);
         }
         const setValue = (element,value) => {
@@ -3255,17 +3271,25 @@ class AccountBackend {
         };
         setValue(accountElement, ${JSON.stringify(account)});
         setValue(password, ${JSON.stringify(password)});
-        await sleep(50);
+        await sleep(150);
+        if (!accountElement.isConnected || !password.isConnected || accountElement.value !== ${JSON.stringify(account)} || password.value !== ${JSON.stringify(password)}) {
+          return { ok:false, message:"登录表单仍在初始化" };
+        }
         const form = password.closest('form') || accountElement.closest('form');
-        const submit = form?.querySelector('button[type="submit"],input[type="submit"]')
-          || roots().flatMap(root => [...(root.querySelectorAll?.('button') || [])]).find(button => /^(登录|登錄|Sign in|Log in)$/i.test((button.textContent || '').trim()));
+        if (accountElement.validity?.typeMismatch && /用户名|账号|username/i.test(accountElement.placeholder || '')) accountElement.type = 'text';
+        const submit = (form ? [...form.querySelectorAll('button[type="submit"],input[type="submit"]')].find(button => button.getClientRects().length > 0) : null)
+          || roots().flatMap(root => [...(root.querySelectorAll?.('button') || [])]).find(button => button.getClientRects().length > 0 && /^(登录|立即登录|登錄|Sign in|Log in)$/i.test((button.textContent || '').trim()));
         if (!submit) return { ok:false, message:"找不到平台登录按钮" };
         for (let attempt = 0; attempt < 20 && (submit.disabled || submit.getAttribute('aria-disabled') === 'true'); attempt += 1) await sleep(50);
         if (submit.disabled || submit.getAttribute('aria-disabled') === 'true') return { ok:false, message:"登录按钮暂不可用，请检查输入内容" };
         submit.click();
         return { ok:true };
       })()`, true);
-      const result = await waitForLoginTask(fillLoginForm(), signal);
+      let result;
+      do {
+        result = await waitForLoginTask(fillLoginForm(), signal);
+        if (result?.message === "登录表单仍在初始化") await pauseLogin(150, signal);
+      } while (result?.message === "登录表单仍在初始化");
       assertLoginActive(signal);
       if (!result?.ok) {
         this.appendSessionLog("login", { event: "form-not-found", elapsedMs: Date.now() - startedAt, origin: this.origin, diagnostic: result?.diagnostic || null });
@@ -3359,6 +3383,8 @@ class AccountBackend {
           return orderLoginCandidates(directory?.domains, { includeUnmeasured: true, preferredOrigin: round ? "" : preferredOrigin })
             .filter(candidate => TRUSTED_PLATFORM_ORIGINS.has(candidate.origin));
         },
+        refreshCandidates: () => orderLoginCandidates(currentDomainCandidates(this.origin)?.domains, { includeUnmeasured: true })
+          .filter(candidate => TRUSTED_PLATFORM_ORIGINS.has(candidate.origin)),
         attempt: async (candidate, signal) => {
           assertLoginActive(signal);
           this.origin = candidate.origin;
@@ -3656,92 +3682,62 @@ class AccountBackend {
     return { appId, suffix };
   }
 
-  async platformChatApi(pathname, { method = "GET", body, timeout = 12000 } = {}) {
-    const anchor = await this.ensureAnchor();
-    if (anchor.webContents.isLoading()) await Promise.race([
-      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
-    ]);
-    return anchor.webContents.executeJavaScript(`(async () => {
-      const token = localStorage.getItem('console_token') || '';
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), ${JSON.stringify(Math.max(1000, Math.min(Number(timeout) || 12000, 30000)))});
-      const options = {
-        method: ${JSON.stringify(method)},
-        credentials: 'include',
-        cache: 'no-store',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
-      };
-      if (token) options.headers.Authorization = 'Bearer ' + token;
-      const body = ${JSON.stringify(body ?? null)};
-      if (body != null) options.body = JSON.stringify(body);
-      try {
-        const response = await fetch(${JSON.stringify(`/console/api${pathname}`)}, options);
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload?.message || payload?.msg || ('平台请求失败：' + response.status));
-        return payload;
-      } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('平台请求超时');
-        throw error;
-      } finally {
-        clearTimeout(timeoutId);
+  async platformRequest(pathname, options = {}) {
+    await this.networkReady;
+    const origin = this.origin;
+    const revision = this.authSessionRevision;
+    const retryAt = this.platformRateLimits?.get(origin) || 0;
+    if (retryAt > Date.now()) {
+      throw platformRequestError("PLATFORM_RATE_LIMIT", "平台请求频繁，正在等待恢复", { status: 429, retryAfterMs: retryAt - Date.now() });
+    }
+    let token = "";
+    let tokenTimer;
+    try {
+      const contents = this.anchor?.webContents;
+      if (contents && !contents.isDestroyed() && new URL(contents.getURL()).origin === origin) {
+        token = await Promise.race([
+          contents.mainFrame.executeJavaScript("localStorage.getItem('console_token') || ''").catch(() => ""),
+          new Promise(resolve => { tokenTimer = setTimeout(() => resolve(""), 500); })
+        ]);
       }
-    })()`, true);
+    } catch {} finally { clearTimeout(tokenTimer); }
+    if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
+    const startedAt = Date.now();
+    try {
+      const result = await requestPlatformJson({
+        ...options, origin, pathname, token: typeof token === "string" ? token : "",
+        fetch: (url, request) => this.platformSession.fetch(url, request),
+        onRetry: detail => this.appendSessionLog("platform-network", { event: "read-retry", origin, path: pathname.split("?")[0], ...detail })
+      });
+      if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
+      this.lastPlatformSuccessAt = Date.now();
+      return result;
+    } catch (error) {
+      if (error?.status === 429) {
+        this.platformRateLimits ||= new Map();
+        this.platformRateLimits.set(origin, Date.now() + error.retryAfterMs);
+      }
+      this.appendSessionLog("platform-network", {
+        event: "request-failed", origin, path: pathname.split("?")[0], method: options.method || "GET",
+        code: error?.code || null, status: error?.status || null, elapsedMs: Date.now() - startedAt,
+        error: error?.message || String(error)
+      });
+      throw error;
+    }
+  }
+
+  async platformChatApi(pathname, options = {}) {
+    return (await this.platformRequest(`/console/api${pathname}`, options)).payload;
   }
 
   async platformServerTime() {
-    const anchor = await this.ensureAnchor();
-    if (anchor.webContents.isLoading()) await Promise.race([
-      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
-    ]);
-    return anchor.webContents.executeJavaScript(`(async () => {
-      const token = localStorage.getItem('console_token') || '';
-      const headers = { 'X-Language':'zh-Hans', Accept:'application/json' };
-      if (token) headers.Authorization = 'Bearer ' + token;
-      const response = await fetch('/go/api/account/profile', { method:'GET', credentials:'include', cache:'no-store', headers });
-      if (!response.ok) throw new Error('平台时间校准请求失败：' + response.status);
-      const serverTime = Date.parse(response.headers.get('date') || '');
-      if (!Number.isFinite(serverTime)) throw new Error('平台响应缺少服务器时间');
-      return serverTime;
-    })()`, true);
+    const { serverTime } = await this.platformRequest("/go/api/account/profile", { timeout: 5000, attempts: 1 });
+    if (!Number.isFinite(serverTime)) throw platformRequestError("PLATFORM_TIME", "平台响应缺少服务器时间");
+    return serverTime;
   }
 
-  async platformGoApi(pathname, { method = "GET", body, timeout = 12000 } = {}) {
-    const anchor = await this.ensureAnchor();
-    if (anchor.webContents.isLoading()) await Promise.race([
-      new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
-    ]);
-    return anchor.webContents.executeJavaScript(`(async () => {
-      const token = localStorage.getItem('console_token') || '';
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), ${JSON.stringify(Math.max(1000, Math.min(Number(timeout) || 12000, 30000)))});
-      const options = {
-        method: ${JSON.stringify(method)},
-        credentials: 'include',
-        cache: 'no-store',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' }
-      };
-      if (token) options.headers.Authorization = 'Bearer ' + token;
-      const body = ${JSON.stringify(body ?? null)};
-      if (body != null) options.body = JSON.stringify(body);
-      try {
-        const response = await fetch(${JSON.stringify(`/go/api${pathname}`)}, options);
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || (typeof payload?.code === 'number' && payload.code !== 0 && payload.code !== 100000)) {
-          throw new Error(payload?.message || payload?.msg || ('平台请求失败：' + response.status));
-        }
-        return payload;
-      } catch (error) {
-        if (error?.name === 'AbortError') throw new Error('平台请求超时');
-        throw error;
-      } finally {
-        clearTimeout(timeoutId);
-      }
-    })()`, true);
+  async platformGoApi(pathname, options = {}) {
+    return (await this.platformRequest(`/go/api${pathname}`, options)).payload;
   }
 
   async listOnlineWorldCards() {
@@ -8651,14 +8647,13 @@ class AccountBackend {
   }
 
   async keepSessionAlive() {
-    if (!this.domainSelected || !this.anchorNavigationArmed) return;
-    try {
-      const anchor = await this.ensureAnchor();
-      if (anchor.webContents.isLoading()) return;
-      await anchor.webContents.executeJavaScript(`fetch('/zh/chats',{method:'GET',credentials:'include',cache:'no-store'}).then(response=>response.status)`, true);
-    } catch {
-      try { await this.anchor.loadURL(`${this.origin}/zh/chats`); } catch {}
-    }
+    if (!this.domainSelected || !this.anchorNavigationArmed || this.loginInProgress || this.loginDetectionPaused) return;
+    if (this.sessionHeartbeatPromise) return this.sessionHeartbeatPromise;
+    if (Date.now() - (this.lastPlatformSuccessAt || 0) < 25000) return;
+    this.sessionHeartbeatPromise = this.platformGoApi("/account/profile", { timeout: 5000, attempts: 1 })
+      .catch(error => this.appendSessionLog("platform-network", { event: "heartbeat-deferred", code: error?.code || null, error: error?.message || String(error) }))
+      .finally(() => { this.sessionHeartbeatPromise = null; });
+    return this.sessionHeartbeatPromise;
   }
 
   async chooseWork() {

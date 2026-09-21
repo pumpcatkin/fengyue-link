@@ -655,6 +655,40 @@ async function main() {
   });
   try {
     await login(window, loadCredentials());
+    if (process.env.FYOW_DIAGNOSE_DEPLOYMENTS === "1") {
+      const service = new OnlineWorldService({
+        requestConsole: async (endpoint, options = {}) => {
+          if (options.method && options.method !== "GET") throw new Error("Read-only ledger diagnosis");
+          const response = await api(window, `/console/api${endpoint}`, options);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return unwrap(response);
+        },
+        getAccount: () => ({}), getOrigin: () => ORIGIN, cacheFile: null, onChange: () => {}
+      });
+      service.work = { id: workId, authorAccountId: card.companion.authorAccountId };
+      service.commentReadSession = { pages: new Map(), branches: new Map(), comments: new Map(), failedRoots: new Map(), totalRoots: null };
+      const history = await service.readHistory(true);
+      const records = history.assembled.records;
+      const directory = path.join(__dirname, "../release-cache/deployment-diagnosis");
+      fs.mkdirSync(directory, { recursive: true });
+      const file = path.join(directory, `ledger-${Date.now()}.json`);
+      fs.writeFileSync(file, JSON.stringify({ work: service.work, records, incomplete: history.assembled.incomplete }, null, 2));
+      const cells = new Set(["25,9", "16,3"]);
+      process.stdout.write(`${JSON.stringify({
+        file, history: service.history,
+        controls: service.verifiedControls(records).map(item => ({ ...recordPlatformOrder(item), ...item.record })),
+        changes: records.filter(item => Object.keys(item.record.changes?.cells || {}).some(key => cells.has(key)))
+          .sort(comparePlatformOrder).map(item => ({
+            mapDeltaId: item.record.mapDeltaId, actor: item.record.actorAccountId, order: recordPlatformOrder(item),
+            cells: item.record.changes.cells, cellBases: item.record.changes.cellBases,
+            generals: Object.fromEntries(Object.entries(item.record.changes.generals || {}).map(([id, general]) => [id,
+              general && { id, name: general.name, status: general.status, holderAccountId: general.holderAccountId, location: general.location }])),
+            transitions: item.record.changes.generalTransitions
+          }))
+      }, null, 2)}\n`);
+      service.close();
+      return;
+    }
     if (process.env.FYOW_RESTORE_DEPLOYED_GENERAL === "1") {
       const targetAccountId = String(process.env.FYOW_RESTORE_TARGET_ACCOUNT_ID || "").trim();
       const targetAccountName = String(process.env.FYOW_RESTORE_TARGET_ACCOUNT_NAME || "").trim();

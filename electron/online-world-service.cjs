@@ -321,10 +321,9 @@ function samePublicCell(left, right) {
 function validOccupationTransition(currentCell, nextCell, { allowLegacy = true, baseCell = currentCell, requireBase = false } = {}) {
   const currentCount = cellOccupationCount(currentCell);
   const explicit = Object.hasOwn(nextCell || {}, "occupationCount");
-  // Historical records predate this field. They remain replayable only while
-  // the canonical cell has never acquired an explicit positive count and the
-  // signed control record says the record predates the protocol cutover.
-  if (!explicit) return allowLegacy && currentCount === 0;
+  // Legacy clients can keep publishing after a program update. Missing counters
+  // preserve the established count; they must not invalidate the ownership write.
+  if (!explicit) return allowLegacy;
   const nextCount = Number(nextCell.occupationCount);
   if (!Number.isSafeInteger(nextCount) || nextCount < 0 || nextCount > MAX_OCCUPATION_COUNT) return false;
   const transitionBase = requireBase ? baseCell : currentCell;
@@ -550,6 +549,23 @@ function occupationEnvelope(changes, key) {
       ...(modern ? { occupationCount: raw.nextOccupationCount } : {})
     }
   };
+}
+
+function effectivePublicCell(changes, key, currentCell) {
+  const envelope = occupationEnvelope(changes, key);
+  const next = envelope.nextCell;
+  if (next == null) return cellOccupationCount(currentCell) > 0
+    ? { ownerAccountId: null, soldiers: 0, generalIds: [], occupationCount: cellOccupationCount(currentCell) }
+    : null;
+  if (envelope.modern || Object.hasOwn(next, "occupationCount")) return next;
+  return { ...next, occupationCount: cellOccupationCount(currentCell) };
+}
+
+function mergeGeneralHistories(local, remote) {
+  const result = { ...cloneJson(local), ...cloneJson(remote) };
+  result.interactionHistory = [...new Map([...(local?.interactionHistory || []), ...(remote?.interactionHistory || [])]
+    .map(entry => [canonicalJson(entry), cloneJson(entry)])).values()];
+  return result;
 }
 
 function occupationBaseDescriptor(envelope) {
@@ -965,6 +981,8 @@ class OnlineWorldService {
     this.publicCellOrders = {};
     this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
+    this.publicGeneralRecalls = {};
+    this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
     this.marketSettledSales = new Set();
@@ -1210,6 +1228,10 @@ class OnlineWorldService {
       // local archive so a recall/cultivation followed by a disconnect cannot
       // turn a public tombstone into permanent local data loss.
       generals: Object.fromEntries(Object.entries(sourceWorld.generals || {}).filter(([, general]) => allowed(general.holderAccountId)).map(([id, general]) => [id, cloneJson(general)])),
+      generalOrders: Object.fromEntries(Object.keys(sourceWorld.generals || {}).map(id => [id, cloneJson(
+        compareOrderValue(this.localGeneralArchiveOrders[id], this.publicGeneralOrders[id]) > 0
+          ? this.localGeneralArchiveOrders[id] : this.publicGeneralOrders[id] || ledgerOrder(null)
+      )])),
       deployedGeneralProgress,
       jobs: Object.fromEntries(Object.entries(sourceWorld.jobs || {}).filter(([, job]) => allowed(job.accountId)).map(([id, job]) => [id, cloneJson(job)])),
       processedIntents: [...(sourceWorld.processedIntents || [])]
@@ -1232,7 +1254,7 @@ class OnlineWorldService {
       Object.assign(player, cloneJson(overlay.players?.[accountId] || {}));
     }
     if (overlay.privatePlayers?.[accountId]) this.world.privatePlayers[accountId] = cloneJson(overlay.privatePlayers[accountId]);
-    Object.assign(this.world.generals, cloneJson(overlay.generals || {}));
+    this.restoreGeneralArchives(overlay);
     Object.assign(this.world.jobs, cloneJson(overlay.jobs || {}));
     this.world.processedIntents = [...new Set(overlay.processedIntents || [])].slice(-1000);
     this.localDeployedGeneralProgress = cloneJson(overlay.deployedGeneralProgress || {});
@@ -1428,7 +1450,7 @@ class OnlineWorldService {
     if (overlay) {
       Object.assign(this.world.privatePlayers, overlay.privatePlayers || {});
       for (const [accountId, fields] of Object.entries(overlay.players || {})) if (this.world.players[accountId]) Object.assign(this.world.players[accountId], fields);
-      Object.assign(this.world.generals, overlay.generals || {});
+      this.restoreGeneralArchives(overlay);
       Object.assign(this.world.jobs, overlay.jobs || {});
       this.world.processedIntents = [...new Set([...(this.world.processedIntents || []), ...(overlay.processedIntents || [])])].slice(-1000);
     }
@@ -1445,6 +1467,81 @@ class OnlineWorldService {
     this.recoverOwnLocalPlayerState();
     this.pruneForeignPrivateState();
     this.reconcileMarketSales();
+  }
+
+  restoreGeneralArchives(overlay) {
+    for (const [id, local] of Object.entries(overlay?.generals || {})) {
+      const remote = this.world.generals[id];
+      const localOrder = ledgerOrder(overlay.generalOrders?.[id]);
+      const remoteOrder = ledgerOrder(this.publicGeneralOrders[id]);
+      const cell = remote?.location && this.world.cells[`${remote.location.x},${remote.location.y}`];
+      const verifiedDeployment = remote?.status === "deployed"
+        && cell?.ownerAccountId === remote.holderAccountId && cell.generalIds?.includes(id)
+        && remoteOrder.timestamp > 0 && compareOrderValue(remoteOrder, localOrder) >= 0;
+      this.world.generals[id] = verifiedDeployment ? mergeGeneralHistories(local, remote) : cloneJson(local);
+      this.localGeneralArchiveOrders[id] = verifiedDeployment ? remoteOrder : localOrder;
+    }
+    this.reconcileGeneralRecalls();
+  }
+
+  reconcileGeneralRecalls() {
+    const viewer = this.account().accountId;
+    for (const [id, proof] of Object.entries(this.publicGeneralRecalls || {})) {
+      const { transition, order } = proof || {};
+      if (!validGeneralTransitionShape(id, transition) || transition.reason !== "recalled"
+        || Number(proof.playerEpoch || 0) !== Number(this.world.playerEpochs?.[transition.holderAccountId] || 0)
+        || compareOrderValue(order, this.publicGeneralOrders[id]) < 0
+        || compareOrderValue(order, this.localGeneralArchiveOrders[id]) < 0) continue;
+      const cell = this.world.cells[`${transition.from.x},${transition.from.y}`];
+      if (cell?.generalIds?.includes(id)) continue;
+      let general = this.world.generals[id];
+      const archive = proof.general;
+      if (!general && transition.holderAccountId === viewer && archive?.id === id
+        && archive.holderAccountId === viewer && archive.status === "deployed"
+        && archive.location?.x === transition.from.x && archive.location?.y === transition.from.y) {
+        general = this.world.generals[id] = cloneJson(archive);
+      }
+      if (!general || general.holderAccountId !== transition.holderAccountId) continue;
+      if (general.holderAccountId === viewer) {
+        general.status = "carried";
+        general.location = null;
+        const player = this.world.players[viewer];
+        if (player) player.carriedGeneralIds = [...new Set([...(player.carriedGeneralIds || []), id])];
+        this.localGeneralArchiveOrders[id] = ledgerOrder(order);
+      } else if (general.status === "deployed") delete this.world.generals[id];
+    }
+  }
+
+  recoverLegacyGeneralRecalls(records) {
+    for (const item of records || []) {
+      const record = item.record;
+      if (record?.schema !== FYOW_SCHEMAS.mapDelta || record.workId !== this.work?.id
+        || record.seasonId !== this.control?.seasonId || record.gameId !== GRID_GAME_ID
+        || Object.hasOwn(record.changes || {}, "generalTransitions")
+        || !verifySignedRecord(record, record.deviceSigningPublicKey)
+        || !(item.sources || []).length || !item.sources.every(source => commentAccountId(source) === record.actorAccountId)
+        || Number(record.playerEpoch || 0) !== Number(this.world.playerEpochs?.[record.actorAccountId] || 0)) continue;
+      const order = recordPlatformOrder(item);
+      for (const [id, value] of Object.entries(record.changes?.generals || {})) {
+        if (value !== null || compareOrderValue(order, this.publicGeneralOrders[id]) !== 0) continue;
+        const general = this.world.generals[id];
+        if (!general || general.status !== "deployed" || general.holderAccountId !== record.actorAccountId
+          || !validPosition(general.location)) continue;
+        const key = `${general.location.x},${general.location.y}`;
+        const next = record.changes.cells?.[key];
+        const current = this.world.cells[key];
+        if (!isPublicCellShape(next) || next.ownerAccountId !== record.actorAccountId || next.generalIds.includes(id)
+          || current?.ownerAccountId !== record.actorAccountId || current.generalIds?.includes(id)
+          || compareOrderValue(this.publicCellOrders[key], order) < 0) continue;
+        this.publicGeneralRecalls[id] = {
+          order, general: publicGeneralState(general), playerEpoch: Number(record.playerEpoch || 0),
+          transition: { generalId: id, holderAccountId: record.actorAccountId, from: cloneJson(general.location),
+            reason: "recalled", targetStatus: "carried", nextHolderAccountId: record.actorAccountId }
+        };
+        this.diagnostic({ event: "general-location-reconciled", generalId: id, mapDeltaId: record.mapDeltaId, reason: "verified-legacy-recall" });
+      }
+    }
+    this.reconcileGeneralRecalls();
   }
 
   applyLocalDeployedGeneralProgress() {
@@ -1631,6 +1728,7 @@ class OnlineWorldService {
       publicCellOrders: this.publicCellOrders,
       publicCellWriteBases: this.publicCellWriteBases,
       publicGeneralOrders: this.publicGeneralOrders,
+      publicGeneralRecalls: this.publicGeneralRecalls,
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
       marketSettledSales: [...this.marketSettledSales].slice(-1000),
@@ -1734,6 +1832,8 @@ class OnlineWorldService {
     this.pendingJoinPreview = null;
     this.localEvents = [];
     this.localDeployedGeneralProgress = {};
+    this.localGeneralArchiveOrders = {};
+    this.publicGeneralRecalls = {};
     this.directInbox = [];
     this.directHistory = [];
     this.seenDirectMessageIds.clear();
@@ -1793,6 +1893,7 @@ class OnlineWorldService {
     // The cache loaded below is scoped to the referenced work. Drop the
     // previous session's experience overlay before restoring that cache.
     this.localDeployedGeneralProgress = {};
+    this.localGeneralArchiveOrders = {};
     this.pendingIntentTransaction = null;
     const account = this.account();
     if (!account.accountId) throw new Error("请先登录风月账号");
@@ -1900,6 +2001,7 @@ class OnlineWorldService {
     this.publicCellOrders = cached?.publicCellOrders && typeof cached.publicCellOrders === "object" ? cached.publicCellOrders : {};
     this.publicCellWriteBases = cached?.publicCellWriteBases && typeof cached.publicCellWriteBases === "object" ? cached.publicCellWriteBases : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
+    this.publicGeneralRecalls = cached?.publicGeneralRecalls && typeof cached.publicGeneralRecalls === "object" ? cached.publicGeneralRecalls : {};
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
     this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
@@ -1932,6 +2034,7 @@ class OnlineWorldService {
       this.publicCellOrders = {};
       this.publicCellWriteBases = {};
       this.publicGeneralOrders = {};
+      this.publicGeneralRecalls = {};
       this.publicMarketOrders = {};
       this.publicMarketSaleOrders = {};
       this.marketSettledSales.clear();
@@ -2072,6 +2175,8 @@ class OnlineWorldService {
     this.publicCellOrders = {};
     this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
+    this.publicGeneralRecalls = {};
+    this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
     this.marketSettledSales.clear();
@@ -2670,12 +2775,9 @@ class OnlineWorldService {
     const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actorAccountId] || 0)));
     if (Math.max(0, Math.trunc(Number(record.playerEpoch || 0))) !== currentEpoch) return false;
     if (this.world?.bans?.[actorAccountId]?.banned) return false;
-    const occupationProtocolActive = Number(this.control?.occupationCountingProtocol || 0) >= 1
-      && Number(this.controlPlatformOrder?.timestamp || 0) > 0;
-    const allowLegacyOccupation = !occupationProtocolActive
-      || compareOrderValue(order, this.controlPlatformOrder) < 0;
     const cells = record.changes?.cells;
     const cellBases = record.changes?.cellBases;
+    const allowLegacyOccupation = cellBases == null;
     const generals = record.changes?.generals;
     const hasGeneralTransitionEnvelope = Object.hasOwn(record.changes || {}, "generalTransitions");
     const generalTransitions = record.changes?.generalTransitions || {};
@@ -2787,9 +2889,9 @@ class OnlineWorldService {
       const currentCell = this.world?.cells?.[key];
       const envelope = occupationEnvelope(record.changes, key);
       const tracked = envelope.modern;
-      const requireBase = !allowLegacyOccupation && tracked;
+      const requireBase = tracked;
       const baseCell = requireBase ? envelope.baseCell : currentCell;
-      const nextCell = tracked ? envelope.nextCell : cell;
+      const nextCell = effectivePublicCell(record.changes, key, currentCell);
       if (requireBase) {
         const currentOrder = ledgerOrder(this.publicCellOrders[key] || this.publicMapBaselineOrder);
         const orderFromBase = compareOrderValue(currentOrder, envelope.baseOrder);
@@ -2801,12 +2903,12 @@ class OnlineWorldService {
             || String(currentBase.hash || "") !== expectedBase.hash) return false;
         }
       }
-      if (nextCell == null) {
-        if (cellOccupationCount(baseCell) > 0 || (requireBase && !samePublicCell(currentCell, baseCell))) return false;
+      if (cell == null) {
+        if (currentCell?.ownerAccountId !== actorAccountId || (requireBase && !samePublicCell(currentCell, baseCell))) return false;
         continue;
       }
       if (!isPublicCellShape(cell) || !isPublicCellShape(nextCell)) return false;
-      if (!validOccupationTransition(currentCell, nextCell, {
+      if (!validOccupationTransition(currentCell, tracked ? nextCell : cell, {
         allowLegacy: allowLegacyOccupation,
         baseCell,
         requireBase
@@ -2827,10 +2929,15 @@ class OnlineWorldService {
         : cellGarrisonCap(this.world, x, y, nextCell);
       if (!Number.isSafeInteger(submittedSoldiers) || submittedSoldiers < 0 || submittedSoldiers > garrisonCeiling) return false;
       if (!Array.isArray(nextCell.generalIds) || nextCell.generalIds.length > 2 || new Set(nextCell.generalIds.map(String)).size !== nextCell.generalIds.length) return false;
+      if (tracked && compareOrderValue(order, this.publicCellOrders[key] || this.publicMapBaselineOrder) > 0) {
+        for (const id of baseCell?.generalIds || []) {
+          if (!nextCell.generalIds.includes(id) && (generals[id] !== null || !validGeneralTransitionShape(id, generalTransitions[id]))) return false;
+        }
+      }
     }
-    for (const general of Object.values(generals)) {
+    for (const [id, general] of Object.entries(generals)) {
       if (general == null) continue;
-      if (general.status !== "deployed" || !general.id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
+      if (general.status !== "deployed" || general.id !== id || !general.location || String(general.holderAccountId || "") !== actorAccountId) return false;
       if (JSON.stringify(general).length > 30000 || String(general.appearanceSetting || "").length > 350 || String(general.coreSetting || general.setting || "").length > MAX_GENERAL_CORE_SETTING_LENGTH || String(general.memoryText || "").length > 1000) return false;
       if (Array.isArray(general.interactionHistory) && general.interactionHistory.length > 1000) return false;
       if (Array.isArray(general.masterHistory) && general.masterHistory.length > 20) return false;
@@ -2838,6 +2945,11 @@ class OnlineWorldService {
       const x = Number(general.location.x);
       const y = Number(general.location.y);
       if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE) return false;
+      if (!allowLegacyOccupation && compareOrderValue(order, this.publicGeneralOrders[id] || this.publicMapBaselineOrder) > 0) {
+        const key = `${x},${y}`;
+        const nextCell = Object.hasOwn(cells, key) ? cells[key] : this.world.cells[key];
+        if (nextCell?.ownerAccountId !== actorAccountId || !nextCell.generalIds?.includes(id)) return false;
+      }
     }
     if (hasGeneralTransitionEnvelope && Object.entries(generals).some(([id, general]) => general === null && !generalTransitions[id])) return false;
     for (const [id, transition] of Object.entries(generalTransitions)) {
@@ -3062,7 +3174,14 @@ class OnlineWorldService {
   }
 
   applyMapDelta(item) {
-    if (!this.validMapDelta(item)) return false;
+    if (!this.validMapDelta(item)) {
+      if (item?.record?.schema === FYOW_SCHEMAS.mapDelta && item.record.workId === this.work?.id) {
+        this.diagnostic({ event: "map-delta-rejected", code: "FYOW_MAP_DELTA_INVALID",
+          mapDeltaId: item.record.mapDeltaId, actorAccountId: item.record.actorAccountId,
+          cells: Object.keys(item.record.changes?.cells || {}), order: recordPlatformOrder(item) });
+      }
+      return false;
+    }
     const record = item.record;
     const actorAccountId = String(record.actorAccountId);
     const order = recordPlatformOrder(item);
@@ -3070,7 +3189,7 @@ class OnlineWorldService {
     for (const [key, cell] of Object.entries(record.changes.cells)) {
       if (compareOrderValue(order, this.publicCellOrders[key] || this.publicMapBaselineOrder) <= 0) continue;
       const envelope = occupationEnvelope(record.changes, key);
-      const nextCell = envelope.modern ? envelope.nextCell : cell;
+      const nextCell = effectivePublicCell(record.changes, key, this.world.cells[key]);
       if (nextCell == null) {
         if (this.world.cells[key]?.ownerAccountId !== actorAccountId) continue;
         delete this.world.cells[key];
@@ -3104,6 +3223,10 @@ class OnlineWorldService {
           this.publicGeneralOrders[id] = order;
           continue;
         }
+        if (transition.reason === "recalled") this.publicGeneralRecalls[id] = {
+          transition: cloneJson(transition), order: cloneJson(order), playerEpoch: Number(record.playerEpoch || 0),
+          ...(existing?.status === "deployed" ? { general: publicGeneralState(existing) } : {})
+        };
         const viewer = this.account().accountId;
         // A public deployed tombstone is not evidence that a newer private
         // carried/captured/market archive has ceased to exist.
@@ -3135,7 +3258,13 @@ class OnlineWorldService {
         const existing = this.world.generals[id];
         const isOwnPrivateArchive = String(existing?.holderAccountId || "") === this.account().accountId
           && existing?.status !== "deployed";
-        if (!isOwnPrivateArchive) this.world.generals[id] = { ...(existing || {}), ...publicGeneralState(general) };
+        const cell = this.world.cells[`${general.location.x},${general.location.y}`];
+        const verifiedDeployment = cell?.ownerAccountId === general.holderAccountId && cell.generalIds?.includes(id)
+          && compareOrderValue(order, this.localGeneralArchiveOrders[id]) >= 0;
+        if (!isOwnPrivateArchive || verifiedDeployment) {
+          this.world.generals[id] = mergeGeneralHistories(existing, publicGeneralState(cloneJson(general)));
+          if (general.holderAccountId === this.account().accountId) this.localGeneralArchiveOrders[id] = cloneJson(order);
+        }
         this.applyLocalDeployedGeneralProgress();
       }
       this.publicGeneralOrders[id] = order;
@@ -3624,7 +3753,6 @@ class OnlineWorldService {
           const localOverlay = this.captureLocalOverlay();
           const coverage = snapshotCoverage(snapshot);
           this.world = normalizeWorldState(cloneJson(snapshot.state));
-          this.restoreLocalOverlay(localOverlay);
           this.publicMapOrder = snapshotOrder;
           this.publicMapBaselineOrder = ledgerOrder(coverage?.through);
           this.publicHistoryOrder = ledgerOrder(coverage?.through);
@@ -3634,17 +3762,20 @@ class OnlineWorldService {
           this.publicCellOrders = cloneJson(coverage?.cellOrders || {});
           this.publicCellWriteBases = cloneJson(coverage?.cellWriteBases || {});
           this.publicGeneralOrders = cloneJson(coverage?.generalOrders || {});
+          this.publicGeneralRecalls = cloneJson(coverage?.generalRecalls || {});
           this.publicMarketOrders = cloneJson(coverage?.marketOrders || {});
           this.publicMarketSaleOrders = cloneJson(coverage?.marketSaleOrders || {});
           this.publicParticipantOrders = cloneJson(coverage?.participantOrders || {});
           this.publicAuthorityOrders = cloneJson(coverage?.authorityOrders || {});
           this.publicTreasureSources = cloneJson(coverage?.treasureSources || {});
+          this.restoreLocalOverlay(localOverlay);
         }
         normalizeWorldState(this.world);
         bindWorldAuthority(this.world, this.control);
         if (this.world) {
           this.collectTreasureSources(history.assembled.records);
           this.applyPublicLedger(history.assembled.records);
+          this.recoverLegacyGeneralRecalls(history.assembled.records);
           if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes
             && !this.appliedMapDeltaIds.has(String(this.pendingIntentTransaction.mapDeltaId))) {
             try {
@@ -3910,6 +4041,17 @@ class OnlineWorldService {
       deviceSigningPublicKey: identity.signingPublicKey,
       deviceEncryptionPublicKey: identity.encryptionPublicKey
     }, identity.signingPrivateKey);
+    if (options.beforeWorld) {
+      const validator = Object.create(this);
+      validator.world = options.beforeWorld;
+      const timestamp = Math.max(Math.trunc(this.now()), ...Object.values(changes.cellBases || {}).map(base => Number(base.order?.timestamp || 0) + 1));
+      if (!validator.validMapDelta({ record, sources: [{ id: "local-preflight", account_id: record.actorAccountId, created_at: timestamp }] })) {
+        this.diagnostic({ event: "map-delta-preflight-failed", code: "FYOW_MAP_DELTA_INVALID", mapDeltaId: record.mapDeltaId, cells: Object.keys(changes.cells || {}) });
+        const error = new Error("行动同步校验未通过，请重新同步后重试（FYOW_MAP_DELTA_INVALID）");
+        error.code = "FYOW_MAP_DELTA_INVALID";
+        throw error;
+      }
+    }
     const sources = await this.postRecord(record);
     const order = recordPlatformOrder({ sources });
     this.lastPublishedMapOrder = { mapDeltaId: record.mapDeltaId, order: cloneJson(order) };
@@ -3924,7 +4066,18 @@ class OnlineWorldService {
         if (envelope.modern) this.publicCellWriteBases[key] = occupationBaseDescriptor(envelope);
         else delete this.publicCellWriteBases[key];
       }
-      for (const id of Object.keys(changes.generals || {})) this.publicGeneralOrders[id] = order;
+      for (const id of Object.keys(changes.generals || {})) {
+        this.publicGeneralOrders[id] = order;
+        this.localGeneralArchiveOrders[id] = order;
+        const transition = changes.generalTransitions?.[id];
+        if (transition?.reason === "recalled") {
+          const previous = options.beforeWorld?.generals?.[id];
+          this.publicGeneralRecalls[id] = {
+            transition: cloneJson(transition), order: cloneJson(order), playerEpoch: record.playerEpoch,
+            ...(previous?.status === "deployed" ? { general: publicGeneralState(previous) } : {})
+          };
+        }
+      }
       for (const id of Object.keys(changes.marketListings || {})) this.publicMarketOrders[id] = order;
       for (const id of Object.keys(changes.marketSales || {})) this.publicMarketSaleOrders[id] = order;
       this.publicParticipantOrders[this.account().accountId] = order;
@@ -4040,7 +4193,7 @@ class OnlineWorldService {
         eventId: localEvent?.eventId,
         changes
       });
-      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId });
+      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId, beforeWorld });
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
@@ -4122,7 +4275,7 @@ class OnlineWorldService {
         eventId: event.eventId,
         changes
       });
-      mapDelta = await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId });
+      mapDelta = await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId, beforeWorld });
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
@@ -4472,6 +4625,7 @@ class OnlineWorldService {
         cellOrders: cloneJson(this.publicCellOrders),
         cellWriteBases: cloneJson(this.publicCellWriteBases),
         generalOrders: cloneJson(this.publicGeneralOrders),
+        generalRecalls: cloneJson(this.publicGeneralRecalls),
         marketOrders: cloneJson(this.publicMarketOrders),
         marketSaleOrders: cloneJson(this.publicMarketSaleOrders),
         participantOrders: cloneJson(this.publicParticipantOrders),
@@ -5113,6 +5267,8 @@ class OnlineWorldService {
         this.publicCellOrders = {};
         this.publicCellWriteBases = {};
         this.publicGeneralOrders = {};
+        this.publicGeneralRecalls = {};
+        this.localGeneralArchiveOrders = {};
         this.publicMarketOrders = {};
         this.publicMarketSaleOrders = {};
         this.marketSettledSales.clear();

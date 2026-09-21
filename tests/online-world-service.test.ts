@@ -1605,7 +1605,7 @@ describe("online world platform service", () => {
     const postCutoverLegacyWrite = fixture.map("player", 71, {
       cells: { "10,10": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
     });
-    expect(fixture.author.validMapDelta(postCutoverLegacyWrite)).toBe(false);
+    expect(fixture.author.validMapDelta(postCutoverLegacyWrite)).toBe(true);
     delete fixture.author.control.occupationCountingProtocol;
     fixture.author.controlPlatformOrder = { timestamp: 0, commentId: "" };
 
@@ -1624,8 +1624,10 @@ describe("online world platform service", () => {
     });
     const countedTombstone = fixture.map("player", 74, { cells: { "10,10": null } });
     expect(fixture.author.validMapDelta(sameOwnerIncrement)).toBe(false);
-    expect(fixture.author.validMapDelta(countDroppingLegacyWrite)).toBe(false);
-    expect(fixture.author.validMapDelta(countedTombstone)).toBe(false);
+    expect(fixture.author.applyMapDelta(countDroppingLegacyWrite)).toBe(true);
+    expect(fixture.author.world.cells["10,10"].occupationCount).toBe(1);
+    expect(fixture.author.applyMapDelta(countedTombstone)).toBe(true);
+    expect(fixture.author.world.cells["10,10"]).toMatchObject({ ownerAccountId: null, occupationCount: 1 });
 
     const secondTakeover = fixture.map("author", 75, {
       cells: { "10,10": { ownerAccountId: "author", soldiers: 0, generalIds: [], occupationCount: 2 } }
@@ -2624,6 +2626,168 @@ describe("online world platform service", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("replays a legacy claim followed by a modern deployment across control updates and repeated entry", async () => {
+    const fixture = coverageHarness();
+    const { author, base } = fixture;
+    const position = { x: 25, y: 9 };
+    const key = "25,9";
+    const guard = { ...createFallbackGeneral({ id: "guard", name: "守将", gender: "female", holderAccountId: "player" }),
+      status: "deployed", location: position };
+    delete guard.marketRelistAvailableAt;
+    delete guard.experienceUpdatedAt;
+    fixture.append(signRecord({ ...author.control, id: "program-update", occupationCountingProtocol: 1 },
+      fixture.identities.author.signingPrivateKey), "author", base + 30);
+    const claim = fixture.map("player", 40, {
+      cells: { [key]: { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
+    });
+    const deployment = fixture.map("player", 50, {
+      cells: { [key]: { ownerAccountId: "player", soldiers: 0, generalIds: ["guard"] } },
+      cellBases: { [key]: { cell: { ...claim.record.changes.cells[key], occupationCount: 0 },
+        nextOccupationCount: 0, order: recordPlatformOrder(claim) } },
+      generals: { guard }, generalTransitions: {}
+    });
+    const signedDeployment = canonicalJson(deployment.record);
+    fixture.map("player", 60, {
+      cells: { [key]: { ownerAccountId: "player", soldiers: 0, generalIds: [] } },
+      cellBases: { [key]: { cell: null, nextOccupationCount: 1, order: { timestamp: 0, commentId: "" } } },
+      generalTransitions: {}
+    });
+    const reader = fixture.create("player");
+    reader.world = structuredClone(author.world);
+    reader.world.players.player = { accountId: "player", position, gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: ["guard"] };
+    reader.world.generals.guard = { ...guard, status: "carried", location: null, interactionHistory: [{ role: "user", content: "保留的对话" }] };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await reader.sync(true);
+      expect(reader.world.cells[key]).toMatchObject({ ownerAccountId: "player", generalIds: ["guard"], occupationCount: 0 });
+      expect(reader.world.generals.guard).toMatchObject({ status: "deployed", holderAccountId: "player", location: position });
+      expect(reader.world.generals.guard.interactionHistory).toContainEqual({ role: "user", content: "保留的对话" });
+      expect(reader.world.players.player.carriedGeneralIds).not.toContain("guard");
+      expect(reader.publicGeneralOrders.guard).toEqual(recordPlatformOrder(deployment));
+      expect(canonicalJson(deployment.record)).toBe(signedDeployment);
+      expect(() => applyIntent(reader.world, { type: "talk-general", generalId: "guard", topic: "你好" },
+        { actorAccountId: "player", now: base + 10_000 })).not.toThrow();
+      const recall = applyIntent(reader.world, { type: "recall-general", generalId: "guard" },
+        { actorAccountId: "player", now: base + 10_000 });
+      expect(recall.state.generals.guard.status).toBe("carried");
+    }
+    const reopened = fixture.create("player");
+    reopened.world = structuredClone(reader.world);
+    reopened.localGeneralArchiveOrders = structuredClone(reader.localGeneralArchiveOrders);
+    await reopened.sync(true);
+    expect(reopened.world.generals.guard).toMatchObject({ status: "deployed", location: position });
+    expect(reopened.world.cells[key].generalIds).toContain("guard");
+  });
+
+  it("repairs a compacted legacy recall only with signed holder and matching cell evidence, retaining dialogue", async () => {
+    const fixture = coverageHarness();
+    const { author } = fixture;
+    const position = { x: 16, y: 3 };
+    author.world.players.player = { accountId: "player", position, gold: 1000, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    author.world.cells["16,3"] = { ownerAccountId: "player", soldiers: 0, generalIds: [] };
+    author.world.generals.guard = {
+      ...createFallbackGeneral({ id: "guard", name: "守将", gender: "female", holderAccountId: "player" }),
+      status: "deployed", location: position, interactionHistory: [{ role: "assistant", content: "云端对话" }]
+    };
+    const recall = fixture.map("player", 40, {
+      cells: { "16,3": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }, generals: { guard: null }
+    });
+    const garrison = fixture.map("player", 50, {
+      cells: { "16,3": { ownerAccountId: "player", soldiers: 0, generalIds: [] } }
+    });
+    const coverage = {
+      version: 1, through: { timestamp: 0, commentId: "" },
+      appliedMapDeltaIds: [recall.record.mapDeltaId, garrison.record.mapDeltaId],
+      generalOrders: { guard: recordPlatformOrder(recall) },
+      cellOrders: { "16,3": recordPlatformOrder(garrison) }
+    };
+    fixture.snapshot(author.world, 70, coverage);
+    const reader = fixture.create("player");
+    reader.world = structuredClone(author.world);
+    reader.world.generals.guard.interactionHistory.push({ role: "user", content: "本地对话" });
+    await reader.sync(true);
+    expect(reader.world.generals.guard).toMatchObject({ status: "carried", location: null, holderAccountId: "player" });
+    expect(reader.world.generals.guard.interactionHistory).toHaveLength(2);
+    expect(reader.world.players.player.carriedGeneralIds).toContain("guard");
+    expect(reader.publicGeneralRecalls.guard).toMatchObject({ order: recordPlatformOrder(recall) });
+    await reader.sync(true);
+    expect(reader.world.generals.guard.status).toBe("carried");
+
+    // A compaction by a different player must keep the verified recall archive.
+    const observer = fixture.create("author");
+    await observer.sync(true);
+    expect(observer.world.generals.guard).toBeUndefined();
+    fixture.snapshot(observer.world, 100, { ...coverage, generalRecalls: observer.publicGeneralRecalls });
+    const reopened = fixture.create("player");
+    await reopened.sync(true);
+    expect(reopened.world.generals.guard).toMatchObject({ status: "carried", location: null });
+    expect(reopened.world.players.player.carriedGeneralIds).toContain("guard");
+    expect(reopened.world.generals.guard.interactionHistory).toContainEqual({ role: "assistant", content: "云端对话" });
+  });
+
+  it("does not infer recalls from foreign tombstones or cells that still contain the general", () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    reader.control = fixture.author.control;
+    reader.world = structuredClone(fixture.author.world);
+    reader.world.cells["16,3"] = { ownerAccountId: "player", soldiers: 0, generalIds: ["guard"] };
+    reader.world.generals.guard = {
+      ...createFallbackGeneral({ id: "guard", holderAccountId: "player" }), status: "deployed", location: { x: 16, y: 3 }
+    };
+    for (const actor of ["author", "player"]) {
+      const item = fixture.map(actor, 80, { cells: { "16,3": { ownerAccountId: actor, soldiers: 0, generalIds: [] } }, generals: { guard: null } });
+      reader.publicGeneralOrders.guard = recordPlatformOrder(item);
+      reader.publicCellOrders["16,3"] = recordPlatformOrder(item);
+      reader.recoverLegacyGeneralRecalls([item]);
+      expect(reader.world.generals.guard.status).toBe("deployed");
+      expect(reader.publicGeneralRecalls.guard).toBeUndefined();
+    }
+  });
+
+  it("preserves a newer confirmed local recall when an older deployment snapshot is restored", () => {
+    const fixture = coverageHarness();
+    const reader = fixture.create("player");
+    reader.world = structuredClone(fixture.author.world);
+    reader.world.players.player = { accountId: "player", carriedGeneralIds: ["guard"] };
+    reader.world.cells["2,2"] = { ownerAccountId: "player", soldiers: 0, generalIds: ["guard"] };
+    reader.world.generals.guard = { ...createFallbackGeneral({ id: "guard", holderAccountId: "player" }),
+      status: "deployed", location: { x: 2, y: 2 } };
+    reader.publicGeneralOrders.guard = { timestamp: fixture.base + 10, commentId: "old" };
+    reader.restoreGeneralArchives({ generals: { guard: { ...reader.world.generals.guard, status: "carried", location: null } },
+      generalOrders: { guard: { timestamp: fixture.base + 20, commentId: "new" } } });
+    expect(reader.world.generals.guard).toMatchObject({ status: "carried", location: null });
+  });
+
+  it("rejects invalid public writes before posting rather than reporting a local-only success", async () => {
+    const fixture = coverageHarness();
+    const post = vi.fn();
+    fixture.author.postRecord = post;
+    await expect(fixture.author.publishMapChanges({
+      cells: { "2,2": { ownerAccountId: "player", soldiers: 0, generalIds: [] } },
+      generals: {}, generalTransitions: {}, cellBases: {}
+    }, fixture.identities.author, { beforeWorld: structuredClone(fixture.author.world) })).rejects.toThrow("FYOW_MAP_DELTA_INVALID");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("requires modern deployment and removal records to agree with their cell membership", () => {
+    const fixture = coverageHarness();
+    const guard = { ...createFallbackGeneral({ id: "guard", holderAccountId: "player" }),
+      status: "deployed", location: { x: 2, y: 2 } };
+    const base = { ownerAccountId: "player", soldiers: 0, generalIds: ["guard"], occupationCount: 0 };
+    fixture.author.world.cells["2,2"] = base;
+    fixture.author.world.generals.guard = guard;
+    const orphan = fixture.map("player", 30, {
+      cells: { "2,2": { ...base, generalIds: [] } }, generals: {}, generalTransitions: {},
+      cellBases: { "2,2": { cell: base, order: { timestamp: 0, commentId: "" }, nextOccupationCount: 0 } }
+    });
+    expect(fixture.author.applyMapDelta(orphan)).toBe(false);
+    expect(fixture.author.world.cells["2,2"].generalIds).toContain("guard");
+    const noPlacement = fixture.map("player", 40, {
+      cells: {}, cellBases: {}, generals: { absent: { ...guard, id: "absent", location: { x: 3, y: 3 } } }
+    });
+    expect(fixture.author.applyMapDelta(noPlacement)).toBe(false);
+    expect(fixture.author.world.generals.absent).toBeUndefined();
   });
 
   it("rejects an unproven public general removal and only recalls after location proof", () => {

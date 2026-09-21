@@ -1324,7 +1324,7 @@ class OnlineWorldService {
     return this.pendingIntentTransaction;
   }
 
-  async retryPendingIntentTransactionPublish() {
+  async retryPendingIntentTransactionPublish({ comments } = {}) {
     const transaction = this.pendingIntentTransaction;
     if (!transaction || transaction.phase !== "prepared" || !hasPublicMapChanges(transaction.changes)) return null;
     const validSession = String(transaction.workId || "") === String(this.work?.id || "")
@@ -1333,7 +1333,9 @@ class OnlineWorldService {
       && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[this.account().accountId] || 0)));
     if (!validSession) return null;
     const identity = await this.getIdentity();
-    const record = await this.publishMapChanges(transaction.changes, identity, { mapDeltaId: transaction.mapDeltaId });
+    const record = await this.publishMapChanges(transaction.changes, identity, {
+      mapDeltaId: transaction.mapDeltaId, cloudComments: comments
+    });
     transaction.phase = "published";
     transaction.publishedAt = this.now();
     if (this.lastPublishedMapOrder?.mapDeltaId === transaction.mapDeltaId) {
@@ -1347,6 +1349,58 @@ class OnlineWorldService {
       intentType: transaction.intentType
     });
     return record;
+  }
+
+  reconcilePendingPublication(comments) {
+    const transaction = this.pendingIntentTransaction;
+    const publication = transaction?.publication;
+    if (!publication?.record || transaction.phase !== "prepared") return;
+    const chunks = encodeCommentRecord(publication.record);
+    const actor = String(publication.record.actorAccountId || "");
+    const candidates = [];
+    for (const root of commentPageRoots(comments)) {
+      if (root.content !== chunks[0] || commentAccountId(root) !== actor) continue;
+      const rootId = commentId(root);
+      const sources = Array(chunks.length).fill(null);
+      sources[0] = root;
+      for (const source of comments) {
+        if (commentAccountId(source) !== actor
+          || String(source._fyowRootId || source.parent_id || source.root_comment_id || "") !== rootId) continue;
+        const part = chunks.indexOf(source.content);
+        if (part > 0 && !sources[part]) sources[part] = source;
+      }
+      candidates.push(sources);
+    }
+    // Use one native branch only. A timed-out POST may already be visible in
+    // the cloud; read it back before attempting that chunk again.
+    candidates.sort((left, right) => right.filter(Boolean).length - left.filter(Boolean).length);
+    publication.sources = (candidates[0] || []).map(source => source ? {
+      id: commentId(source), account_id: commentAccountId(source),
+      created_at: commentTimestamp(source), content: source.content,
+      ...(source._fyowRootId || source.parent_id || source.root_comment_id
+        ? { parent_id: String(source._fyowRootId || source.parent_id || source.root_comment_id) } : {})
+    } : null);
+    this.saveCache();
+  }
+
+  recordPendingPublicationFailure(error) {
+    const transaction = this.pendingIntentTransaction;
+    if (!transaction) return;
+    const publication = transaction.publication;
+    transaction.lastPublishError = {
+      code: String(error?.code || "FYOW_PUBLICATION_FAILED"),
+      message: String(error?.message || error).slice(0, 500),
+      status: Number(error?.status || error?.statusCode || 0) || null,
+      at: this.now(),
+      confirmedParts: (publication?.sources || []).filter(Boolean).length,
+      totalParts: publication?.record ? encodeCommentRecord(publication.record).length : null
+    };
+    this.diagnostic({
+      event: "intent-transaction-publish-deferred",
+      transactionId: transaction.transactionId, mapDeltaId: transaction.mapDeltaId,
+      intentType: transaction.intentType, ...transaction.lastPublishError
+    });
+    this.saveCache();
   }
 
   applyCommittedTransactionChanges(changes, publishedOrder = null) {
@@ -2104,8 +2158,15 @@ class OnlineWorldService {
     try {
       await this.sync(true);
     } catch (error) {
-      this.updateLoadProgress({ phase: "error", error: error?.message || String(error) });
-      throw error;
+      if (error?.code !== "FYOW_PUBLICATION_PENDING" || !this.control || !this.world
+        || this.pendingIntentTransaction?.phase !== "prepared") {
+        this.updateLoadProgress({ phase: "error", error: error?.message || String(error) });
+        throw error;
+      }
+      // Cloud entry verification succeeded. Keep the verified map open so the
+      // durable outbox can retry, without enabling further actions meanwhile.
+      syncError = error;
+      this.updateLoadProgress({ phase: "complete", active: false, error: null, totalComments: this.loadProgress?.readComments || 0 });
     }
     this.assertSyncActive();
     if (this.pendingMigration) {
@@ -2247,12 +2308,21 @@ class OnlineWorldService {
   async postRecord(record, options = {}) {
     const responses = [];
     const chunks = encodeCommentRecord(record);
+    const publication = options.publication;
+    const savedSources = publication?.sources || [];
     let rootId = String(options.parentId || "");
     let rootAccountId = String(options.toAccountId || this.work?.authorAccountId || "");
     for (let index = 0; index < chunks.length; index += 1) {
       const content = chunks[index];
       const writeOptions = rootId ? { ...options, parentId: rootId, toAccountId: rootAccountId } : options;
-      const response = await this.retryPlatformWrite(() => this.postComment(content, writeOptions));
+      const saved = savedSources[index];
+      const matchingSaved = saved && commentId(saved) && saved.content === content
+        && commentAccountId(saved) === this.account().accountId
+        && (index === 0 || String(saved._fyowRootId || saved.parent_id || saved.root_comment_id || "") === rootId);
+      // Pending transactions reconcile ambiguous writes on the next sync. An
+      // immediate POST retry could create another root or duplicate replies.
+      const response = matchingSaved ? saved
+        : await this.retryPlatformWrite(() => this.postComment(content, writeOptions), publication ? 1 : COMMENT_POST_ATTEMPTS);
       const source = firstObject(response, item => Boolean(item.id || item.comment_id) && typeof item.content === "string")
         || firstObject(response, item => Boolean(item.id || item.comment_id)) || response || {};
       const timestampSource = firstObject(response, item => commentTimestamp(item) > 0);
@@ -2272,11 +2342,21 @@ class OnlineWorldService {
         ...(writeOptions.parentId ? { parent_id: String(writeOptions.parentId) } : {}),
         content
       };
+      if (publication && !commentId(normalized)) {
+        const error = new Error("平台尚未返回数据写入确认编号");
+        error.code = "FYOW_COMMENT_ACK_MISSING";
+        throw error;
+      }
       responses.push(normalized);
       if (index === 0 && !rootId) {
         rootId = commentId(normalized);
         rootAccountId = commentAccountId(normalized) || rootAccountId;
         if (chunks.length > 1 && !rootId) throw new Error("平台没有返回分片根评论编号，无法发布原生回复分片");
+      }
+      if (publication) {
+        publication.sources ||= [];
+        publication.sources[index] = cloneJson(normalized);
+        this.saveCache();
       }
     }
     return responses;
@@ -3738,7 +3818,7 @@ class OnlineWorldService {
       try {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingTreasureRewards().length));
+            history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingIntentTransaction || this.pendingTreasureRewards().length));
             break;
           } catch (error) {
             if (error.code !== "FYOW_HISTORY_CHANGED" || attempt === 2) throw error;
@@ -3860,9 +3940,9 @@ class OnlineWorldService {
           if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes
             && !this.appliedMapDeltaIds.has(String(this.pendingIntentTransaction.mapDeltaId))) {
             try {
-              await this.retryPendingIntentTransactionPublish();
+              await this.retryPendingIntentTransactionPublish({ comments: history.comments || [] });
             } catch (error) {
-              this.diagnostic({ event: "intent-transaction-publish-deferred", intentType: this.pendingIntentTransaction?.intentType, error: error?.message || String(error) });
+              this.recordPendingPublicationFailure(error);
             }
             this.assertSyncActive();
           }
@@ -3899,7 +3979,11 @@ class OnlineWorldService {
           return [];
         });
         this.assertSyncActive();
-        if (this.pendingIntentTransaction?.phase === "prepared") throw new Error("行动结果已保存在本机，等待同步，请重试连接");
+        if (this.pendingIntentTransaction?.phase === "prepared") {
+          const error = new Error("行动结果已保存在本机，等待同步，请重试连接");
+          error.code = "FYOW_PUBLICATION_PENDING";
+          throw error;
+        }
       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
       this.updateLoadProgress({
@@ -4106,7 +4190,18 @@ class OnlineWorldService {
   async publishMapChanges(changes, identity, options = {}) {
     if (!hasPublicMapChanges(changes)) return null;
     const actor = this.world.players?.[this.account().accountId];
-    const record = signRecord({
+    const transaction = options.mapDeltaId && this.pendingIntentTransaction?.mapDeltaId === options.mapDeltaId
+      ? this.pendingIntentTransaction : null;
+    const savedRecord = transaction?.publication?.record;
+    if (savedRecord && (savedRecord.mapDeltaId !== transaction.mapDeltaId || savedRecord.workId !== this.work.id
+      || savedRecord.seasonId !== this.control.seasonId || savedRecord.actorAccountId !== this.account().accountId
+      || canonicalJson(savedRecord.changes) !== canonicalJson(changes)
+      || !verifySignedRecord(savedRecord, savedRecord.deviceSigningPublicKey))) {
+      const error = new Error("待同步行动的签名记录校验未通过");
+      error.code = "FYOW_OUTBOX_INVALID";
+      throw error;
+    }
+    const record = savedRecord || signRecord({
       schema: FYOW_SCHEMAS.mapDelta,
       mapDeltaId: String(options.mapDeltaId || crypto.randomUUID()),
       gameId: GRID_GAME_ID,
@@ -4133,7 +4228,12 @@ class OnlineWorldService {
         throw error;
       }
     }
-    const sources = await this.postRecord(record);
+    if (transaction && !transaction.publication) {
+      transaction.publication = { record: cloneJson(record), sources: [] };
+      this.saveCache();
+    }
+    if (transaction && Array.isArray(options.cloudComments)) this.reconcilePendingPublication(options.cloudComments);
+    const sources = await this.postRecord(record, transaction ? { publication: transaction.publication } : {});
     const order = recordPlatformOrder({ sources });
     this.lastPublishedMapOrder = { mapDeltaId: record.mapDeltaId, order: cloneJson(order) };
     const rootId = order.commentId || null;
@@ -4373,15 +4473,7 @@ class OnlineWorldService {
       if (!mapDelta && transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) {
         this.status = "degraded";
         this.error = "行动结果已保存在本机，等待同步，请重试连接";
-        this.diagnostic({
-          event: "intent-transaction-publish-deferred",
-          status: "local-state-preserved",
-          transactionId: this.pendingIntentTransaction.transactionId,
-          mapDeltaId: transactionMapDeltaId,
-          intentType: "time-settle",
-          error: error?.message || String(error)
-        });
-        this.saveCache();
+        this.recordPendingPublicationFailure(error);
         this.notify();
         return settled.effects;
       }

@@ -191,6 +191,9 @@ if (process.type === "renderer") {
       onlineWorldFixture = await evaluate(`onlineWorldState`);
       onlineWorldFixture.world.generals.g1.experience = 24.659;
       onlineWorldFixture.world.generals.g1.cultivationCount = 0;
+      onlineWorldFixture.status = "degraded";
+      onlineWorldFixture.error = "行动结果已保存在本机，等待同步，请重试连接";
+      onlineWorldFixture.loadProgress = { active: false, phase: "complete", readComments: 480, totalComments: 480 };
       await evaluate(`document.querySelector('#online-world-open-form').requestSubmit()`);
       await settle();
       assert.equal(await evaluate(`!document.querySelector('#online-world-frame').classList.contains('hidden')`), true);
@@ -199,6 +202,13 @@ if (process.type === "renderer") {
       const embeddedGameFrame = window.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
       assert(embeddedGameFrame, "missing sandboxed online-world frame");
       for (let attempt = 0; attempt < 20 && await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').classList.contains('hidden')`); attempt += 1) await settle();
+      assert.equal(await evaluate(`onlineWorldInLibrary`), false, "a pending publication incorrectly returned to the library");
+      assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), false);
+      fs.writeFileSync(path.join(outputDir, "pending-publication-entry.png"), (await window.webContents.capturePage()).toPNG());
+      onlineWorldFixture.status = "ready";
+      onlineWorldFixture.error = null;
+      window.webContents.send("qa:onOnlineWorldState", onlineWorldFixture);
+      await settle();
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').classList.contains('hidden')`), false);
       await embeddedGameFrame.executeJavaScript(`openGeneral('g1')`);
       await settle();

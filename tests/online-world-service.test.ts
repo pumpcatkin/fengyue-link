@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 const require = createRequire(import.meta.url);
 const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
-const { assembleCommentRecords, encodeCommentRecord, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
+const { assembleCommentRecords, encodeCommentRecord, extractCommentItems, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral, applyIntent, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
@@ -46,7 +46,7 @@ function service(options: Record<string, unknown>) {
   });
 }
 
-function coverageHarness() {
+function coverageHarness(workId = "work") {
   const identities: Record<string, any> = { author: generateOnlineWorldIdentity(), player: generateOnlineWorldIdentity() };
   const roots: any[] = [];
   const base = 1_800_000_000_000;
@@ -75,13 +75,13 @@ function coverageHarness() {
       getAccount: () => ({ accountId }), getIdentity: async () => identities[accountId] || identities.player,
       requestConsole, now: () => base + 10_000
     });
-    instance.work = { id: "work", authorAccountId: "author" };
+    instance.work = { id: workId, authorAccountId: "author" };
     instance.status = "ready";
     return instance;
   };
   const author = create();
   author.control = signRecord({
-    schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season",
+    schema: "fyow.control/3", id: "control", gameId: "cc.aiero.fyow.grid-conquest", workId, seasonId: "season",
     programHash: author.currentProgramHash(), authorityAccountId: "author", authoritySigningPublicKey: identities.author.signingPublicKey
   }, identities.author.signingPrivateKey);
   author.world = createWorld({ seed: "coverage", seasonId: "season", authorityAccountId: "author", startedAt: base });
@@ -92,14 +92,14 @@ function coverageHarness() {
     const publicState = JSON.parse(JSON.stringify(state));
     delete publicState.privatePlayers;
     return append(signRecord({
-      schema: "fyow.snapshot/3", snapshotId: `snapshot-${time}`, gameId: author.world.gameId, workId: "work", seasonId: "season",
+      schema: "fyow.snapshot/3", snapshotId: `snapshot-${time}`, gameId: author.world.gameId, workId, seasonId: "season",
       revision: state.revision || 0, state: publicState, stateHash: sha256(Buffer.from(canonicalJson(publicState))),
       ...(coverage ? { ledgerCoverage: coverage } : {})
     }, identities.author.signingPrivateKey), "author", base + time);
   };
   snapshot(author.world, 10, { version: 1, through: { timestamp: 0, commentId: "" } });
   const map = (actor: string, time: number, changes: any, extra: any = {}) => append(signRecord({
-    schema: "fyow.map-delta/1", mapDeltaId: `map-${actor}-${time}`, gameId: author.world.gameId, workId: "work", seasonId: "season",
+    schema: "fyow.map-delta/1", mapDeltaId: `map-${actor}-${time}`, gameId: author.world.gameId, workId, seasonId: "season",
     actorAccountId: actor, participant: { displayName: actor }, playerEpoch: 0,
     deviceSigningPublicKey: identities[actor].signingPublicKey,
     changes: { cells: {}, generals: {}, ...changes }, ...extra
@@ -2974,6 +2974,158 @@ describe("online world platform service", () => {
     expect(instance.resolvePendingIntentTransaction()).toBe(true);
     expect(instance.world.cells["2,1"].ownerAccountId).toBe("player");
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
+  });
+
+  it("opens the verified map with a pending write, keeps polling, and recovers without replaying the action", async () => {
+    vi.useFakeTimers();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-pending-entry-"));
+    const fixture = coverageHarness("pending-work");
+    const seed = fixture.create("player");
+    const reader = fixture.create("player");
+    let online = false;
+    let posts = 0;
+    try {
+      fixture.author.world.players.player = {
+        accountId: "player", displayName: "玩家", gold: 700, basePower: 100, power: 100,
+        position: { x: 2, y: 2 }, carriedGeneralIds: [], fieldArmySoldiers: 40
+      };
+      fixture.author.world.privatePlayers.player = { orientation: "any", note: "preserve dialogue" };
+      fixture.snapshot(fixture.author.world, 30);
+      seed.cacheFile = reader.cacheFile = path.join(directory, "cache.json");
+      seed.world = structuredClone(fixture.author.world);
+      seed.control = structuredClone(fixture.author.control);
+      const before = structuredClone(seed.world);
+      seed.world.players.player.position = { x: 3, y: 3 };
+      seed.world.cells["3,3"] = { ownerAccountId: "player", soldiers: 4, generalIds: [] };
+      seed.prepareIntentTransaction({
+        beforeWorld: before, mapDeltaId: "pending-entry-map", intentType: "time-settle", eventId: "settled-once",
+        changes: { cells: { "3,3": seed.world.cells["3,3"] }, generals: {} }
+      });
+      const request = reader.requestConsole;
+      reader.requestConsole = async (endpoint: string, options: any = {}) => {
+        if (endpoint.startsWith("/installed-apps/")) return { id: "pending-work", created_by_account_id: "author" };
+        if (options.method !== "POST") return request(endpoint, options);
+        posts += 1;
+        if (!online) throw Object.assign(new Error("platform rate limit"), { code: "PLATFORM_RATE_LIMITED", status: 429 });
+        const source = { id: `pending-post-${posts}`, account_id: "player", created_at: fixture.base + 100 + posts, ...options.body };
+        if (options.body.parent_id) fixture.roots.find(root => root.id === options.body.parent_id).children.push(source);
+        else fixture.roots.push({ ...source, children: [] });
+        return source;
+      };
+      const state = await reader.open({ workUrl: "https://aigirlfriend.baby/zh/explore/installed/pending-work" });
+      expect(state).toMatchObject({ status: "degraded", initialized: true, loadProgress: { phase: "complete", active: false } });
+      expect(state.error).toContain("等待同步");
+      expect(reader.pollTimer).not.toBeNull();
+      expect(reader.pendingIntentTransaction.lastPublishError).toMatchObject({ code: "PLATFORM_RATE_LIMITED", status: 429 });
+      const transactionId = reader.pendingIntentTransaction.transactionId;
+      const beforePoll = posts;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(posts).toBeGreaterThan(beforePoll);
+      expect(reader.pendingIntentTransaction.transactionId).toBe(transactionId);
+      expect(reader.pollFailureCount).toBe(1);
+      online = true;
+      const recovered = await reader.sync();
+      expect(recovered.status).toBe("ready");
+      expect(reader.pendingIntentTransaction).toBeNull();
+      expect(reader.world.cells["3,3"].soldiers).toBe(4);
+      expect(reader.world.players.player).toMatchObject({ gold: 700, fieldArmySoldiers: 40, position: { x: 3, y: 3 } });
+      expect(reader.world.privatePlayers.player.note).toBe("preserve dialogue");
+      const committedPosts = posts;
+      await reader.sync();
+      expect(posts).toBe(committedPosts);
+    } finally {
+      seed.close();
+      reader.close();
+      vi.useRealTimers();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([0, 1, 3])("recovers an ambiguous chunk %i response from the cloud without posting it twice", async lostPart => {
+    const fixture = coverageHarness();
+    const writer = fixture.create("player");
+    writer.world = structuredClone(fixture.author.world);
+    writer.control = structuredClone(fixture.author.control);
+    writer.world.players.player = { accountId: "player", displayName: "original", position: { x: 1, y: 1 }, carriedGeneralIds: [] };
+    const changes = { cells: { "2,2": { ownerAccountId: "player", soldiers: 5, generalIds: [] } }, generals: {}, padding: crypto.randomBytes(3000).toString("hex") };
+    writer.prepareIntentTransaction({ beforeWorld: structuredClone(writer.world), mapDeltaId: "resume-same-map", intentType: "time-settle", changes });
+    const roots: any[] = [];
+    const submitted: string[] = [];
+    let interrupted = false;
+    const transport = async (_endpoint: string, options: any) => {
+      submitted.push(options.body.content);
+      const source = { id: `chunk-${submitted.length}`, account_id: "player", created_at: fixture.base + 200 + submitted.length, ...options.body };
+      if (options.body.parent_id) roots.find(root => root.id === options.body.parent_id).children.push(source);
+      else roots.push({ ...source, children: [] });
+      if (!interrupted && submitted.length - 1 === lostPart) {
+        interrupted = true;
+        throw Object.assign(new Error("response lost after server accepted chunk"), { code: "PLATFORM_TIMEOUT" });
+      }
+      return source;
+    };
+    writer.requestConsole = transport;
+    await expect(writer.retryPendingIntentTransactionPublish()).rejects.toThrow("response lost");
+    const saved = structuredClone(writer.pendingIntentTransaction);
+    expect(saved.publication.sources.filter(Boolean)).toHaveLength(lostPart);
+    const restarted = fixture.create("player");
+    restarted.control = structuredClone(fixture.author.control);
+    restarted.world = structuredClone(writer.world);
+    restarted.world.players.player.displayName = "renamed after disconnect";
+    restarted.pendingIntentTransaction = saved;
+    restarted.requestConsole = transport;
+    restarted.reconcilePendingPublication(extractCommentItems({ data: roots }));
+    expect(restarted.pendingIntentTransaction.publication.sources.filter(Boolean)).toHaveLength(lostPart + 1);
+    await restarted.retryPendingIntentTransactionPublish();
+    const chunks = encodeCommentRecord(saved.publication.record);
+    expect(chunks.length).toBeGreaterThan(3);
+    expect(submitted).toEqual(chunks);
+    expect(roots).toHaveLength(1);
+    const assembled = assembleCommentRecords(extractCommentItems({ data: roots }));
+    expect(assembled.incomplete).toHaveLength(0);
+    expect(assembled.records[0].record.participant.displayName).toBe("original");
+    expect(restarted.resolvePendingIntentTransaction()).toBe(true);
+    expect(restarted.world.cells["2,2"].soldiers).toBe(5);
+  });
+
+  it.each(["journal", "legacy"])("resumes %s successful chunks after an explicit failure without creating a second root", async mode => {
+    const fixture = coverageHarness();
+    const writer = fixture.create("player");
+    writer.control = structuredClone(fixture.author.control);
+    writer.world = structuredClone(fixture.author.world);
+    const changes = { cells: { "2,2": { ownerAccountId: "player", soldiers: 5, generalIds: [] } }, generals: {}, padding: crypto.randomBytes(1800).toString("hex") };
+    writer.prepareIntentTransaction({ beforeWorld: structuredClone(writer.world), mapDeltaId: "resume-confirmed", intentType: "time-settle", changes });
+    const posted: any[] = [];
+    let fail = true;
+    writer.requestConsole = async (_endpoint: string, options: any) => {
+      if (fail && posted.length === 1) throw Object.assign(new Error("rate limit"), { code: "PLATFORM_RATE_LIMITED" });
+      const source = { id: `saved-${posted.length}`, account_id: "player", created_at: fixture.base + 200, ...options.body };
+      posted.push(source);
+      return source;
+    };
+    await expect(writer.retryPendingIntentTransactionPublish()).rejects.toThrow("rate limit");
+    expect(writer.pendingIntentTransaction.publication.sources).toHaveLength(1);
+    if (mode === "legacy") delete writer.pendingIntentTransaction.publication;
+    fail = false;
+    await writer.retryPendingIntentTransactionPublish(mode === "legacy" ? { comments: extractCommentItems({ data: posted }) } : {});
+    expect(posted.filter(item => !item.parent_id)).toHaveLength(1);
+    expect(posted.slice(1).every(item => item.parent_id === "saved-0")).toBe(true);
+    expect(new Set(posted.map(item => item.content)).size).toBe(posted.length);
+    expect(writer.pendingIntentTransaction.phase).toBe("published");
+  });
+
+  it("does not publish an altered saved transaction signature", async () => {
+    const fixture = coverageHarness();
+    const writer = fixture.create("player");
+    writer.control = structuredClone(fixture.author.control);
+    writer.world = structuredClone(fixture.author.world);
+    const changes = { cells: { "2,2": { ownerAccountId: "player", soldiers: 5, generalIds: [] } }, generals: {} };
+    writer.prepareIntentTransaction({ beforeWorld: structuredClone(writer.world), mapDeltaId: "signed-outbox", intentType: "time-settle", changes });
+    writer.requestConsole = vi.fn(async () => { throw Object.assign(new Error("429"), { code: "PLATFORM_RATE_LIMITED" }); });
+    await expect(writer.retryPendingIntentTransactionPublish()).rejects.toThrow("429");
+    writer.pendingIntentTransaction.publication.record.participant.displayName = "tampered";
+    await expect(writer.retryPendingIntentTransactionPublish()).rejects.toMatchObject({ code: "FYOW_OUTBOX_INVALID" });
+    expect(writer.requestConsole).toHaveBeenCalledTimes(1);
+    expect(writer.pendingIntentTransaction.phase).toBe("prepared");
   });
 
   it("finishes local travel when comment reads fail, without fighting on a stale map", async () => {

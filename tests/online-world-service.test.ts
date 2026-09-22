@@ -3304,6 +3304,32 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.position).toEqual({ x: 1, y: 1 });
   });
 
+  it("treats a materialized empty neutral cell as the sparse public null base", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", seed: "neutral-public-base", startedAt: 1_000_000 });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    instance.world.playerEpochs.player = 0;
+    instance.world.cells["2,2"] = { ownerAccountId: null, soldiers: 0, generalIds: [], occupationCount: 0 };
+    const changes = {
+      cells: { "2,2": { ownerAccountId: "player", soldiers: 1, generalIds: [] } },
+      cellBases: { "2,2": { cell: null, nextOccupationCount: 1, order: { timestamp: 0, commentId: "" } } },
+      generals: {}, generalTransitions: {}, marketListings: {}, marketSales: {}, claimedTreasures: {}, battles: {}, conquests: {}
+    };
+    const record = signRecord({
+      schema: "fyow.map-delta/1", mapDeltaId: "neutral-base-map", gameId: instance.world.gameId,
+      workId: "work", seasonId: "season", actorAccountId: "player", participant: { displayName: "玩家" },
+      playerEpoch: 0, changes, deviceSigningPublicKey: identity.signingPublicKey,
+      deviceEncryptionPublicKey: identity.encryptionPublicKey
+    }, identity.signingPrivateKey);
+    expect(instance.validMapDelta({ record, sources: [{ id: "neutral-base", account_id: "player", created_at: 2 }] })).toBe(true);
+  });
+
   it("opens the verified map with a pending write, keeps polling, and recovers without replaying the action", async () => {
     vi.useFakeTimers();
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-pending-entry-"));

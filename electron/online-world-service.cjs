@@ -376,12 +376,17 @@ function isPublicCellShape(cell) {
 
 function comparablePublicCell(cell) {
   if (!cell) return null;
-  return {
+  const normalized = {
     ownerAccountId: cell.ownerAccountId ? String(cell.ownerAccountId) : null,
     soldiers: Math.max(0, Math.trunc(Number(cell.soldiers || 0))),
     generalIds: [...new Set((cell.generalIds || []).map(String))].slice(0, 2),
     occupationCount: cellOccupationCount(cell)
   };
+  // The public map is sparse: an explicitly materialized empty neutral cell
+  // carries no public state and is equivalent to an absent cell.
+  if (!normalized.ownerAccountId && normalized.soldiers === 0
+    && normalized.generalIds.length === 0 && normalized.occupationCount === 0) return null;
+  return normalized;
 }
 
 function samePublicCell(left, right) {

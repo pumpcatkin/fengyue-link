@@ -2160,6 +2160,12 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const general = state.generals[generalId];
       const price = integer(intent.price, "售价", 1, 1000000000);
       if (!general || String(general.holderAccountId) !== actorAccountId) throw new Error("只能上架自己的将领");
+      const existingSellerListing = Object.values(state.marketListings || {}).find(listing =>
+        String(listing?.sellerAccountId || "") === actorAccountId
+      );
+      if (existingSellerListing && String(existingSellerListing.generalId || "") !== generalId) {
+        throw new Error("每位玩家同时只能挂卖一名将领");
+      }
       if (general.status === "captured" || general.status === "deployed" || general.status === "market") throw new Error("当前将领不能上架名将市场");
       if (general.marketListingId) throw new Error("这名将领已经在名将市场中");
       const relistAvailableAt = Math.max(0, Number(general.marketRelistAvailableAt || 0));

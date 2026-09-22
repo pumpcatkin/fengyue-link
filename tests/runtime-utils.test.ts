@@ -19,6 +19,19 @@ function temporaryDirectory() {
 }
 
 describe("runtime persistence guards", () => {
+  it("filters exported session logs to a requested time window", () => {
+    const cutoff = Date.parse("2026-09-22T12:15:00.000Z");
+    const input = [
+      { time: "2026-09-22T12:14:59.999Z", category: "online-world", detail: { event: "old" } },
+      { time: "2026-09-22T12:15:00.000Z", category: "network", detail: { event: "boundary" } },
+      { time: "2026-09-22T12:29:59.000Z", category: "online-world", detail: { event: "recent" } }
+    ].map(item => JSON.stringify(item)).join("\n");
+    const result = runtime.filterSessionLogTextSince(input, cutoff);
+    expect(result).not.toContain('"event":"old"');
+    expect(result).toContain('"event":"boundary"');
+    expect(result).toContain('"event":"recent"');
+  });
+
   it("atomically replaces JSON without leaving a temporary file", () => {
     const directory = temporaryDirectory();
     const file = join(directory, "state.json");

@@ -3750,8 +3750,13 @@ class OnlineWorldService {
         if (orderFromBase > 0) {
           const expectedBase = occupationBaseDescriptor(envelope);
           const currentBase = this.publicCellWriteBases[key];
-          if (!currentBase || compareOrderValue(currentBase.order, expectedBase.order) !== 0
-            || String(currentBase.hash || "") !== expectedBase.hash) return false;
+          // A reconnect can lose the auxiliary write-base index while the
+          // authoritative public cell is still present.  Exact cell equality
+          // is sufficient proof in that case; reject only when the observed
+          // cell itself has diverged from the submitted base.
+          if (!samePublicCell(currentCell, baseCell)
+            && (!currentBase || compareOrderValue(currentBase.order, expectedBase.order) !== 0
+              || String(currentBase.hash || "") !== expectedBase.hash)) return false;
         }
       }
       if (cell == null) {
@@ -4238,21 +4243,31 @@ class OnlineWorldService {
 
   applyMarketSaleToSeller(sale) {
     const transactionId = String(sale?.transactionId || "");
-    if (!transactionId || this.marketSettledSales.has(transactionId)) return false;
+    if (!transactionId) return false;
+    const alreadySettled = this.marketSettledSales.has(transactionId);
     const accountId = this.account().accountId;
     if (String(sale?.sellerAccountId || "") !== accountId) return false;
     const player = this.world?.players?.[accountId];
     if (!player) return false;
     const generalId = String(sale.generalId || "");
     const general = this.world.generals?.[generalId];
-    if (general && String(general.holderAccountId || "") === accountId && String(general.marketListingId || "") === String(sale.listingId || "")) {
+    let removed = false;
+    // The sale record is authoritative. Older caches may have lost
+    // marketListingId during reconnect, so do not leave a seller-owned
+    // general usable merely because that auxiliary field is absent.
+    if (general && String(general.holderAccountId || "") === accountId
+      && (String(general.marketListingId || "") === String(sale.listingId || "")
+        || general.status === "market" || general.status === "carried" || general.status === "waiting")) {
       delete this.world.generals[generalId];
       player.carriedGeneralIds = (player.carriedGeneralIds || []).filter(id => String(id) !== generalId);
+      removed = true;
     }
-    player.gold = Math.max(0, Math.trunc(Number(player.gold || 0)) + Math.max(0, Math.trunc(Number(sale.price || 0))));
+    if (!this.marketSettledSales.has(transactionId)) {
+      player.gold = Math.max(0, Math.trunc(Number(player.gold || 0)) + Math.max(0, Math.trunc(Number(sale.price || 0))));
+    }
     this.marketSettledSales.add(transactionId);
     if (this.marketSettledSales.size > 1000) this.marketSettledSales = new Set([...this.marketSettledSales].slice(-1000));
-    return true;
+    return removed || !alreadySettled;
   }
 
   applyMapDeltas(records) {

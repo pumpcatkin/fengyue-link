@@ -108,6 +108,21 @@ function coverageHarness(workId = "work") {
 }
 
 describe("online world platform service", () => {
+  it("removes a seller-owned market general even when the cached listing id is missing", () => {
+    const instance: any = service({ getAccount: () => ({ accountId: "seller" }) });
+    instance.world = {
+      players: { seller: { accountId: "seller", gold: 100, carriedGeneralIds: ["g-sale"] } },
+      generals: { "g-sale": { id: "g-sale", holderAccountId: "seller", status: "carried", marketListingId: null } }
+    };
+    instance.marketSettledSales = new Set();
+    expect(instance.applyMarketSaleToSeller({ transactionId: "tx-sale", listingId: "listing", generalId: "g-sale", sellerAccountId: "seller", price: 75 })).toBe(true);
+    expect(instance.world.generals["g-sale"]).toBeUndefined();
+    expect(instance.world.players.seller.carriedGeneralIds).toEqual([]);
+    expect(instance.world.players.seller.gold).toBe(175);
+    expect(instance.applyMarketSaleToSeller({ transactionId: "tx-sale", listingId: "listing", generalId: "g-sale", sellerAccountId: "seller", price: 75 })).toBe(false);
+    expect(instance.world.players.seller.gold).toBe(175);
+  });
+
   it("ignores model-supplied and edited experience when previewing a new general", () => {
     const forged = { ...completeGeneral, experience: 100, experienceRequired: 0, cultivationCount: 5 };
     const general = normalizeGeneratedGeneral(forged, { gender: "female" }, forged);

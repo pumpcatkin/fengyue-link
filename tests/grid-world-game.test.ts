@@ -599,6 +599,19 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(bought.state, { type: "list-general", generalId: "market-general", price: 456, idempotencyKey: "list-captive" }, { actorAccountId: "b", now: now + 3 })).toThrow(/不能上架/);
   });
 
+  it("allows only one active market listing per seller", () => {
+    const now = Date.now();
+    let state = game.createWorld({ seed: "market-single-listing", seasonId: "season", startedAt: now, authorityAccountId: "a" });
+    state.players.a = { accountId: "a", displayName: "甲", accountName: "甲", gold: 10_000, power: 100, basePower: 100, trainingLevel: 0, cultivationCount: 0, position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1", "g2"] };
+    state.privatePlayers.a = { materials: { white: 0, green: 0, blue: 0, purple: 0, red: 0, gold: 0 } };
+    state.generals.g1 = game.createFallbackGeneral({ id: "g1", name: "甲一", gender: "female", power: 200, holderAccountId: "a" });
+    state.generals.g2 = game.createFallbackGeneral({ id: "g2", name: "甲二", gender: "female", power: 200, holderAccountId: "a" });
+    state.generals.g1.status = "carried";
+    state.generals.g2.status = "carried";
+    state = game.applyIntent(state, { type: "list-general", generalId: "g1", price: 100, idempotencyKey: "list-one" }, { actorAccountId: "a", now }).state;
+    expect(() => game.applyIntent(state, { type: "list-general", generalId: "g2", price: 100, idempotencyKey: "list-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/同时只能挂卖一名将领/);
+  });
+
   it("blocks banned accounts and removes reset players into a new epoch", () => {
     const state = joined(1_000_000);
     state.players.b = { accountId: "b", accountName: "b@example", displayName: "乙", gold: 500, position: { x: 2, y: 2 }, fieldArmySoldiers: 3, carriedGeneralIds: [], joinedAt: 1_000_000 };

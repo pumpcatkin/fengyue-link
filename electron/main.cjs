@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
 const zlib = require("node:zlib");
-const { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory } = require("./runtime-utils.cjs");
+const { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory, filterSessionLogTextSince } = require("./runtime-utils.cjs");
 const {
   upsertMultiplayerPrefix,
   upsertMultiplayerProfiles,
@@ -2178,24 +2178,27 @@ class AccountBackend {
 
   exportDiagnosticLogToDesktop() {
     this.appendSessionLog("diagnostic-export", { event: "requested", shortcut: "Ctrl+Shift+8" });
+    const exportedAt = Date.now();
+    const cutoff = exportedAt - 15 * 60 * 1000;
     const directory = path.dirname(this.sessionLogFile);
     const prefix = `${safeProfileId(this.profileId)}-`;
     const files = fs.readdirSync(directory, { withFileTypes: true })
       .filter(entry => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".jsonl"))
       .map(entry => path.join(directory, entry.name))
       .sort((left, right) => fs.statSync(left).mtimeMs - fs.statSync(right).mtimeMs);
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").replace(/\.\d{3}Z$/, "");
+    const stamp = new Date(exportedAt).toISOString().replace(/[-:]/g, "").replace("T", "-").replace(/\.\d{3}Z$/, "");
     const target = path.join(app.getPath("desktop"), `风月联机日志-${stamp}.txt`);
     const header = [
       "风月联机工具诊断日志",
-      `导出时间: ${new Date().toISOString()}`,
+      `导出时间: ${new Date(exportedAt).toISOString()}`,
+      "日志范围: 最近 15 分钟",
       `配置实例: ${this.profileId}`,
       `账号: ${this.account?.username || "未登录"}`,
       `在线世界: ${this.onlineWorldService?.work?.id || "未打开"}`,
       "每行均为一条按时间记录的 JSON 行为或诊断事件。",
       ""
     ].join("\n");
-    const body = files.map(file => fs.readFileSync(file, "utf8").trim()).filter(Boolean).join("\n");
+    const body = files.map(file => filterSessionLogTextSince(fs.readFileSync(file, "utf8"), cutoff).trim()).filter(Boolean).join("\n");
     atomicWriteFileSync(fs, target, `${header}${body}${body ? "\n" : ""}`, { encoding: "utf8", mode: 0o600 });
     return target;
   }

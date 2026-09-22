@@ -99,4 +99,18 @@ function pruneSessionLogDirectory(fs, directory, options = {}) {
   return { removed, retained, retainedBytes };
 }
 
-module.exports = { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory };
+function filterSessionLogTextSince(text, since) {
+  const cutoff = Number(since);
+  if (!Number.isFinite(cutoff)) return "";
+  const retained = String(text || "").split(/\r?\n/).filter(Boolean).filter(line => {
+    try {
+      const timestamp = Date.parse(String(JSON.parse(line)?.time || ""));
+      return Number.isFinite(timestamp) && timestamp >= cutoff;
+    } catch {
+      return false;
+    }
+  });
+  return retained.length ? `${retained.join("\n")}\n` : "";
+}
+
+module.exports = { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync, sanitizeLogDetail, pruneSessionLogDirectory, filterSessionLogTextSince };

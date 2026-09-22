@@ -681,9 +681,11 @@ function transactionPublicProjection(world, changes) {
   const listingKeys = Object.keys(changes?.marketListings || {});
   const saleKeys = Object.keys(changes?.marketSales || {});
   const claimKeys = Object.keys(changes?.claimedTreasures || {});
+  const cells = publicCells(world);
   const listings = publicMarketListings(world);
   return {
-    cells: selectedPublicEntries(world?.cells, cellKeys, comparablePublicCell),
+    // Match the sparse public map used by createPublicMapChanges/cellBases.
+    cells: selectedPublicEntries(cells, cellKeys, comparablePublicCell),
     generals: selectedPublicEntries(world?.generals, generalKeys,
       general => general?.status === "deployed" ? publicGeneralState(general) : null),
     marketListings: selectedPublicEntries(listings, listingKeys),
@@ -1617,8 +1619,15 @@ class OnlineWorldService {
     const after = transaction.afterPublic || {};
     for (const key of Object.keys(transaction.changes.cells || {})) {
       const envelope = occupationEnvelope(transaction.changes, key);
-      const beforeCell = Object.hasOwn(before.cells || {}, key) ? before.cells[key] : envelope.modern ? envelope.baseCell : undefined;
-      const afterCell = Object.hasOwn(after.cells || {}, key) ? after.cells[key] : envelope.nextCell;
+      // Modern occupation envelopes are authoritative about the sparse public
+      // base. Older caches projected an empty neutral cell as an object even
+      // though the wire record stores that same cell as null.
+      const beforeCell = envelope.modern
+        ? envelope.baseCell
+        : Object.hasOwn(before.cells || {}, key) ? before.cells[key] : undefined;
+      const afterCell = envelope.modern
+        ? envelope.nextCell
+        : Object.hasOwn(after.cells || {}, key) ? after.cells[key] : undefined;
       const currentOrder = this.publicCellOrders[key] || this.publicMapBaselineOrder;
       const baseOrder = envelope.modern ? envelope.baseOrder : currentOrder;
       if (beforeCell !== undefined && compareOrderValue(currentOrder, baseOrder) === 0 && samePublicCell(this.world.cells[key], afterCell)) {
@@ -5208,7 +5217,8 @@ class OnlineWorldService {
       this.saveCache();
       return settled.effects;
     } catch (error) {
-      if (!mapDelta && transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) {
+      if (!mapDelta && transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId
+        && deferablePublicationError(error)) {
         this.status = "degraded";
         this.error = "行动结果已保存在本机，等待同步，请重试连接";
         this.recordPendingPublicationFailure(error);
@@ -5218,6 +5228,9 @@ class OnlineWorldService {
       if (!mapDelta) {
         this.world = beforeWorld;
         this.localEvents.splice(localEventStart);
+        if (transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) {
+          this.cancelPendingIntentTransaction(error?.code || "publication-rejected");
+        }
         this.saveCache();
       }
       throw error;

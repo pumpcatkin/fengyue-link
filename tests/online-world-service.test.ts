@@ -3270,6 +3270,40 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
   });
 
+  it("rolls back deterministic map validation failures instead of retaining a disconnected transaction", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", seed: "deterministic-map-error", startedAt: 1_000_000 });
+    instance.world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 1000,
+      position: { x: 1, y: 1 }, fieldArmySoldiers: 0, carriedGeneralIds: []
+    };
+    instance.world.privatePlayers.player = {};
+    instance.world.playerEpochs.player = 0;
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    instance.world.jobs.march = {
+      id: "march", type: "march", accountId: "player", from: { x: 1, y: 1 }, to: { x: 2, y: 1 },
+      path: [{ x: 1, y: 1 }, { x: 2, y: 1 }], generalIds: [], activeGeneralIds: [], soldiers: 100,
+      attack: true, startedAt: 1_000_000, finishAt: 1_500_000
+    };
+    instance.publishMapChanges = vi.fn(async () => {
+      const error: any = new Error("行动同步校验未通过，请重新同步后重试（FYOW_MAP_DELTA_INVALID）");
+      error.code = "FYOW_MAP_DELTA_INVALID";
+      throw error;
+    });
+
+    await expect(instance.settleLocalClock(2_000_000)).rejects.toMatchObject({ code: "FYOW_MAP_DELTA_INVALID" });
+    expect(instance.pendingIntentTransaction).toBeNull();
+    expect(instance.world.jobs.march).toBeDefined();
+    expect(instance.world.players.player.position).toEqual({ x: 1, y: 1 });
+  });
+
   it("opens the verified map with a pending write, keeps polling, and recovers without replaying the action", async () => {
     vi.useFakeTimers();
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fyow-pending-entry-"));

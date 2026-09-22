@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { requestPlatformJson, isTransientPlatformError } = require("../electron/platform-transport.cjs");
+const { requestPlatformJson, isTransientPlatformError, platformRateLimitScope, RATE_LIMIT_MESSAGE } = require("../electron/platform-transport.cjs");
 const defaults = { origin: "https://node.test", pathname: "/go/api/account/profile", attempts: 1 };
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(data), { status, headers });
 afterEach(() => vi.useRealTimers());
@@ -41,6 +41,60 @@ describe("account session transport", () => {
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it("normalizes HTTP and business rate limits to one player-facing message", async () => {
+    await expect(requestPlatformJson({ ...defaults, fetch: async () => json({}, 429) })).rejects.toMatchObject({
+      code: "PLATFORM_RATE_LIMIT", status: 429, message: RATE_LIMIT_MESSAGE
+    });
+    await expect(requestPlatformJson({ ...defaults, fetch: async () => json({ code: 429001, message: "评论过于频繁，请等待" }) })).rejects.toMatchObject({
+      code: "PLATFORM_RATE_LIMIT", status: 429, message: RATE_LIMIT_MESSAGE
+    });
+  });
+
+  it("recognizes comment throttling carried inside an HTTP 400 response", async () => {
+    await expect(requestPlatformJson({
+      ...defaults,
+      method: "POST",
+      body: { content: "fixture" },
+      fetch: async () => json({ code: "COMMENT_TOO_FREQUENT", message: "评论操作过于频繁，请稍后再试" }, 400, { "retry-after": "5" })
+    })).rejects.toMatchObject({
+      code: "PLATFORM_RATE_LIMIT",
+      status: 429,
+      httpStatus: 400,
+      apiCode: "COMMENT_TOO_FREQUENT",
+      retryAfterMs: 5000,
+      message: RATE_LIMIT_MESSAGE
+    });
+  });
+
+  it("recognizes a code-only business throttle response", async () => {
+    await expect(requestPlatformJson({
+      ...defaults,
+      method: "POST",
+      body: { content: "fixture" },
+      fetch: async () => json({ code: "COMMENT_TOO_FREQUENT" })
+    })).rejects.toMatchObject({
+      code: "PLATFORM_RATE_LIMIT",
+      status: 429,
+      apiCode: "COMMENT_TOO_FREQUENT",
+      message: RATE_LIMIT_MESSAGE
+    });
+  });
+
+  it("keeps a bounded platform validation message for a non-retryable HTTP 400", async () => {
+    await expect(requestPlatformJson({
+      ...defaults,
+      method: "POST",
+      body: { content: "fixture" },
+      fetch: async () => json({ code: "INVALID_PARENT", error: { message: "parent_id does not belong to this work" } }, 400)
+    })).rejects.toMatchObject({
+      code: "PLATFORM_HTTP",
+      status: 400,
+      httpStatus: 400,
+      apiCode: "INVALID_PARENT",
+      message: "[PLATFORM_HTTP] parent_id does not belong to this work"
+    });
+  });
+
   it("rejects business errors and HTML rather than turning them into an empty world", async () => {
     for (const response of [json({ code: 500123, message: { error: "internal" } }), new Response("<html>challenge</html>"), json(null)]) {
       const fetch = vi.fn(async () => response);
@@ -77,5 +131,15 @@ describe("account session transport", () => {
     for (const error of [new Error("401 network"), new Error("429 timeout"), { code: "PLATFORM_RATE_LIMIT", status: 429 }, { code: "PLATFORM_AUTH", status: 403 }]) {
       expect(isTransientPlatformError(error)).toBe(false);
     }
+  });
+
+  it("scopes comment-write cooldowns without blocking cloud reads", () => {
+    const origin = "https://node.test";
+    const write = platformRateLimitScope(origin, "/console/api/comments/work/1", "POST");
+    const remove = platformRateLimitScope(origin, "/console/api/comments/work/1/comment", "DELETE");
+    const read = platformRateLimitScope(origin, "/console/api/comments/work/1?page=1", "GET");
+    expect(write).toBe(`${origin}:comments:write`);
+    expect(remove).toBe(write);
+    expect(read).not.toBe(write);
   });
 });

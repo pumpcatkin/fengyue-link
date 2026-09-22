@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { isTransientPlatformError, platformRequestError } = require("./platform-transport.cjs");
+const { PlatformCommentOperations } = require("./platform-comment-operations.cjs");
 const {
   FYOW_SCHEMAS,
   FYOW_COMMENT_LIMIT,
@@ -149,6 +150,12 @@ function commentAccountId(value) {
   return String(value?.account_id || value?.accountId || value?.created_by_account_id || value?.from_account_id || value?.account?.id || value?.user?.id || value?.author?.id || value?.created_by?.id || value?.sender?.id || "");
 }
 
+function commentParentId(value) {
+  const id = commentId(value);
+  const parentId = String(value?._fyowRootId || value?.parent_id || value?.parentId || value?.root_comment_id || value?.rootCommentId || "");
+  return parentId && parentId !== id ? parentId : "";
+}
+
 function commentPageRoots(comments) {
   if (!Array.isArray(comments)) return [];
   if (!Array.isArray(comments.rootIds)) return comments.filter(comment => !comment?._fyowRootId);
@@ -264,11 +271,36 @@ function actionConnectionError(error) {
   const wrapped = new Error("平台连接暂时中断，本次行动尚未提交；请检查网络或代理后重试", { cause: error });
   // Keep the structured request metadata when a platform/network error is
   // wrapped, so the game can offer the same explicit retry flow as model errors.
-  for (const key of ["errorCode", "retryable", "userMessage", "modelUsage"]) {
+  for (const key of ["code", "status", "statusCode", "httpStatus", "retryAfterMs", "errorCode", "retryable", "userMessage", "modelUsage"]) {
     if (error?.[key] !== undefined) wrapped[key] = error[key];
   }
   return wrapped;
 }
+
+function deferablePublicationError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const status = Number(error?.status || error?.statusCode || 0);
+  if (/^PLATFORM_(?:RATE_LIMIT|NETWORK|TIMEOUT|SERVER)/.test(code)) return true;
+  if (["PLATFORM_INVALID_JSON", "FYOW_COMMENT_ACK_MISSING", "FYOW_COMMENT_ACK_MISMATCH", "FYOW_PUBLICATION_RECHECK_PENDING"].includes(code)) return true;
+  if (status === 408 || status === 429 || status >= 500) return true;
+  return /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断/i
+    .test(String(error?.message || error || ""));
+}
+
+// A transport/acknowledgement failure is ambiguous: the platform may have
+// accepted the comment before the client lost its response. Rate limiting is
+// different because the server explicitly rejected the write.
+function ambiguousPublicationError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  if (code === "PLATFORM_RATE_LIMIT" || code === "PLATFORM_AUTH" || code === "PLATFORM_HTTP" || code === "PLATFORM_API") return false;
+  if (/^PLATFORM_(?:NETWORK|TIMEOUT|SERVER|INVALID_JSON)/.test(code)) return true;
+  if (/^FYOW_COMMENT_ACK_(?:MISSING|MISMATCH)/.test(code)) return true;
+  return Number(error?.status || error?.statusCode || 0) >= 500
+    || /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断/i
+      .test(String(error?.message || error || ""));
+}
+
+const AMBIGUOUS_PUBLICATION_GRACE_MS = 1500;
 
 function normalizeCharacterProfile(value = {}) {
   const source = value && typeof value === "object" ? value : {};
@@ -620,6 +652,56 @@ function hasPublicMapChanges(changes) {
     || Object.keys(changes?.conquests || {}).length);
 }
 
+function acceptedRecallProof(record, sources, generalId, deployedGeneral = null) {
+  const id = String(generalId || "");
+  const transition = record?.changes?.generalTransitions?.[id];
+  const order = recordPlatformOrder({ sources: Array.isArray(sources) ? sources : [] });
+  if (!id || transition?.reason !== "recalled" || !order.timestamp) return null;
+  return {
+    version: 1,
+    mapDeltaId: String(record.mapDeltaId || ""),
+    recordHash: sha256(Buffer.from(canonicalJson(record))),
+    sourceIds: (sources || []).map(commentId).filter(Boolean).sort(),
+    actorAccountId: String(record.actorAccountId || ""),
+    transition: cloneJson(transition),
+    order: cloneJson(order),
+    playerEpoch: Number(record.playerEpoch || 0),
+    ...(deployedGeneral?.status === "deployed" ? { general: publicGeneralState(deployedGeneral) } : {})
+  };
+}
+
+function selectedPublicEntries(source, keys, projector = value => cloneJson(value)) {
+  return Object.fromEntries([...new Set(keys || [])].map(key => [key,
+    Object.hasOwn(source || {}, key) ? projector(source[key], key) : null]));
+}
+
+function transactionPublicProjection(world, changes) {
+  const cellKeys = Object.keys(changes?.cells || {});
+  const generalKeys = Object.keys(changes?.generals || {});
+  const listingKeys = Object.keys(changes?.marketListings || {});
+  const saleKeys = Object.keys(changes?.marketSales || {});
+  const claimKeys = Object.keys(changes?.claimedTreasures || {});
+  const listings = publicMarketListings(world);
+  return {
+    cells: selectedPublicEntries(world?.cells, cellKeys, comparablePublicCell),
+    generals: selectedPublicEntries(world?.generals, generalKeys,
+      general => general?.status === "deployed" ? publicGeneralState(general) : null),
+    marketListings: selectedPublicEntries(listings, listingKeys),
+    marketSales: selectedPublicEntries(world?.marketSales, saleKeys),
+    claimedTreasures: selectedPublicEntries(world?.claimedTreasures, claimKeys),
+    treasureSpawns: selectedPublicEntries(world?.treasureSpawns, claimKeys)
+  };
+}
+
+function changedProjectionKeys(before = {}, after = {}) {
+  return [...new Set([...Object.keys(before || {}), ...Object.keys(after || {})])]
+    .filter(key => {
+      const beforeHas = Object.hasOwn(before || {}, key);
+      const afterHas = Object.hasOwn(after || {}, key);
+      return beforeHas !== afterHas || (beforeHas && canonicalJson(before[key]) !== canonicalJson(after[key]));
+    });
+}
+
 function parseJsonAnswer(value) {
   const text = String(value || "").trim();
   try { return JSON.parse(text); } catch {}
@@ -965,6 +1047,15 @@ class OnlineWorldService {
     this.requestConsole = options.requestConsole;
     this.requestGo = options.requestGo;
     this.requestModel = options.requestModel;
+    this.commentOperations = options.commentOperations || new PlatformCommentOperations({
+      requestConsole: (...args) => {
+        if (typeof this.requestConsole !== "function") throw new Error("评论操作尚未连接平台");
+        return this.requestConsole(...args);
+      },
+      getAccount: () => this.account(),
+      getActiveWorkId: () => this.work?.id || "",
+      resolveComments: (ids, sources) => this.resolveCommentDeletionSources(ids, sources)
+    });
     this.runModelTask = options.runModelTask;
     this.onClose = options.onClose;
     this.getAccount = options.getAccount;
@@ -1020,6 +1111,8 @@ class OnlineWorldService {
     this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
     this.publicGeneralRecalls = {};
+    this.pendingCommentRetirements = [];
+    this.commentRetirementInFlight = null;
     this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -1304,8 +1397,10 @@ class OnlineWorldService {
   }
 
   prepareIntentTransaction({ beforeWorld, mapDeltaId, intentType, eventId, changes = null }) {
+    const beforeOverlay = this.captureLocalOverlay(beforeWorld);
+    const afterOverlay = this.captureLocalOverlay(this.world);
     this.pendingIntentTransaction = {
-      version: 1,
+      version: 2,
       transactionId: crypto.randomUUID(),
       mapDeltaId: String(mapDeltaId),
       workId: String(this.work?.id || ""),
@@ -1314,10 +1409,23 @@ class OnlineWorldService {
       playerEpoch: Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[this.account().accountId] || 0))),
       intentType: String(intentType || "unknown").slice(0, 80),
       eventId: String(eventId || ""),
-      beforeOverlay: this.captureLocalOverlay(beforeWorld),
-      afterOverlay: this.captureLocalOverlay(this.world),
+      beforeOverlay,
+      afterOverlay,
+      beforePublic: changes ? transactionPublicProjection(beforeWorld, changes) : null,
+      afterPublic: changes ? transactionPublicProjection(this.world, changes) : null,
+      baseOrders: changes ? {
+        generals: Object.fromEntries([...new Set([
+          ...Object.keys(changes.generals || {}),
+          ...changedProjectionKeys(beforeOverlay?.generals, afterOverlay?.generals)
+        ])].map(id => [id, cloneJson(this.publicGeneralOrders[id] || this.publicMapBaselineOrder)])),
+        marketListings: Object.fromEntries(Object.keys(changes.marketListings || {})
+          .map(id => [id, cloneJson(this.publicMarketOrders[id] || this.publicMapBaselineOrder)])),
+        marketSales: Object.fromEntries(Object.keys(changes.marketSales || {})
+          .map(id => [id, cloneJson(this.publicMarketSaleOrders[id] || this.publicMapBaselineOrder)]))
+      } : null,
       changes: changes ? cloneJson(changes) : null,
       phase: "prepared",
+      projectionState: "optimistic",
       createdAt: this.now()
     };
     this.saveCache();
@@ -1332,10 +1440,63 @@ class OnlineWorldService {
       && String(transaction.accountId || "") === this.account().accountId
       && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[this.account().accountId] || 0)));
     if (!validSession) return null;
-    const identity = await this.getIdentity();
-    const record = await this.publishMapChanges(transaction.changes, identity, {
-      mapDeltaId: transaction.mapDeltaId, cloudComments: comments
-    });
+    this.restorePendingIntentReplayBase(transaction);
+    const ambiguousSince = Number(transaction.publication?.ambiguousSince || 0);
+    const ambiguous = Boolean(transaction.publication?.record)
+      && (ambiguousSince > 0 || ambiguousPublicationError(transaction.lastPublishError));
+    if (ambiguous && !transaction.publication?.ambiguityVerifiedAt) {
+      const failureAt = ambiguousSince || Number(transaction.lastPublishError?.at || 0);
+      const elapsed = Math.max(0, this.now() - failureAt);
+      if (elapsed < AMBIGUOUS_PUBLICATION_GRACE_MS) {
+        const error = new Error("平台写入回执待核对，请稍后重试");
+        error.code = "FYOW_PUBLICATION_RECHECK_PENDING";
+        error.retryAt = failureAt + AMBIGUOUS_PUBLICATION_GRACE_MS;
+        this.restorePendingIntentOptimisticProjection(transaction);
+        throw error;
+      }
+      // A lost POST response may still become visible after the first history
+      // scan. Perform one delayed, independent full read before posting any
+      // missing chunk, so a retry cannot create a duplicate root/reply.
+      let verifiedComments;
+      try {
+        verifiedComments = await this.readAllCommentSources({
+          includeAllBranches: true, strictBranches: true, requireStable: true, fresh: true
+        });
+      } catch (error) {
+        this.restorePendingIntentOptimisticProjection(transaction);
+        throw error;
+      }
+      transaction.publication.ambiguityVerifiedAt = this.now();
+      transaction.publication.ambiguityReadCommentCount = verifiedComments.length;
+      this.reconcilePendingPublication(verifiedComments);
+      this.saveCache();
+    }
+    if (Array.isArray(comments)) this.reconcilePendingPublication(comments);
+    if (this.pendingPublicationWasSuperseded(transaction)) {
+      const error = new Error("云端状态已推进，待同步行动已取消（FYOW_OUTBOX_STALE）");
+      error.code = "FYOW_OUTBOX_STALE";
+      throw error;
+    }
+    let record;
+    try {
+      const identity = await this.getIdentity();
+      record = await this.publishMapChanges(transaction.changes, identity, {
+        mapDeltaId: transaction.mapDeltaId, cloudComments: comments,
+        beforeWorld: cloneJson(this.world)
+      });
+    } catch (error) {
+      if (ambiguousPublicationError(error) && transaction.publication) {
+        // The delayed read only proves the chunks that were visible before
+        // this publish attempt. If a later chunk loses its acknowledgement,
+        // require a new grace period and independent cloud read for that
+        // specific attempt before it can be posted again.
+        transaction.publication.ambiguousSince = this.now();
+        delete transaction.publication.ambiguityVerifiedAt;
+        delete transaction.publication.ambiguityReadCommentCount;
+      }
+      if (deferablePublicationError(error)) this.restorePendingIntentOptimisticProjection(transaction);
+      throw error;
+    }
     transaction.phase = "published";
     transaction.publishedAt = this.now();
     if (this.lastPublishedMapOrder?.mapDeltaId === transaction.mapDeltaId) {
@@ -1349,6 +1510,191 @@ class OnlineWorldService {
       intentType: transaction.intentType
     });
     return record;
+  }
+
+  validPendingIntentSession(transaction = this.pendingIntentTransaction) {
+    return Boolean(transaction && this.world
+      && String(transaction.workId || "") === String(this.work?.id || "")
+      && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
+      && String(transaction.accountId || "") === this.account().accountId
+      && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0)))
+        === Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0))));
+  }
+
+  pendingPublicationRootOrder(transaction = this.pendingIntentTransaction) {
+    const root = transaction?.publication?.sources?.[0];
+    return root && commentId(root) && commentTimestamp(root) > 0
+      ? recordPlatformOrder({ sources: [root] }) : null;
+  }
+
+  pendingPublicationWasSuperseded(transaction = this.pendingIntentTransaction) {
+    const rootOrder = this.pendingPublicationRootOrder(transaction);
+    if (!rootOrder) return false;
+    const changes = transaction?.changes || {};
+    if (Object.keys(changes.cells || {}).some(key => compareOrderValue(this.publicCellOrders[key] || this.publicMapBaselineOrder, rootOrder) > 0)) return true;
+    if (Object.keys(changes.generals || {}).some(id => compareOrderValue(this.publicGeneralOrders[id] || this.publicMapBaselineOrder, rootOrder) > 0)) return true;
+    if (Object.keys(changes.marketListings || {}).some(id => compareOrderValue(this.publicMarketOrders[id] || this.publicMapBaselineOrder, rootOrder) > 0)) return true;
+    if (Object.keys(changes.marketSales || {}).some(id => compareOrderValue(this.publicMarketSaleOrders[id] || this.publicMapBaselineOrder, rootOrder) > 0)) return true;
+    return Object.keys(changes.claimedTreasures || {}).some(id => {
+      const winnerOrder = this.world?.claimedTreasures?.[id]?.platformOrder;
+      return winnerOrder && compareOrderValue(winnerOrder, rootOrder) < 0;
+    });
+  }
+
+  applyPendingLocalProjection(transaction, side, allowedGeneralOrder = null) {
+    if (!this.world || !transaction || !["before", "after"].includes(side)) return false;
+    const source = transaction[`${side}Overlay`];
+    const other = transaction[`${side === "before" ? "after" : "before"}Overlay`];
+    if (!source || !other) return false;
+    const accountId = this.account().accountId;
+    const applyObjectPatch = (target, sourceValues = {}, otherValues = {}) => {
+      for (const key of changedProjectionKeys(sourceValues, otherValues)) {
+        if (Object.hasOwn(sourceValues, key)) target[key] = cloneJson(sourceValues[key]);
+        else delete target[key];
+      }
+    };
+    const generalBaseOrder = id => transaction.baseOrders?.generals?.[id]
+      || transaction.beforeOverlay?.generalOrders?.[id] || this.publicMapBaselineOrder;
+    const generalCellIsAtBase = id => {
+      if (allowedGeneralOrder) return true;
+      const general = source.generals?.[id] || other.generals?.[id];
+      const from = transaction.changes?.generalTransitions?.[id]?.from;
+      const location = validPosition(general?.location) ? general.location : from;
+      const key = validPosition(location) ? `${location.x},${location.y}` : "";
+      if (!key || !Object.hasOwn(transaction.changes?.cells || {}, key)) return true;
+      const envelope = occupationEnvelope(transaction.changes, key);
+      return !envelope.modern || compareOrderValue(
+        this.publicCellOrders[key] || this.publicMapBaselineOrder, envelope.baseOrder
+      ) === 0;
+    };
+    const generalIsAtBase = id => (!Object.hasOwn(transaction.changes?.generals || {}, id)
+      || compareOrderValue(
+        this.publicGeneralOrders[id] || this.publicMapBaselineOrder,
+        allowedGeneralOrder || generalBaseOrder(id)
+      ) === 0) && generalCellIsAtBase(id);
+    const player = this.world.players?.[accountId];
+    if (player) {
+      const sourcePlayer = source.players?.[accountId] || {};
+      const otherPlayer = other.players?.[accountId] || {};
+      for (const key of changedProjectionKeys(sourcePlayer, otherPlayer)) {
+        if (key !== "carriedGeneralIds") {
+          if (Object.hasOwn(sourcePlayer, key)) player[key] = cloneJson(sourcePlayer[key]);
+          else delete player[key];
+          continue;
+        }
+        const sourceIds = new Set((sourcePlayer[key] || []).map(String));
+        const otherIds = new Set((otherPlayer[key] || []).map(String));
+        const currentIds = new Set((player[key] || []).map(String));
+        for (const id of new Set([...sourceIds, ...otherIds])) {
+          if (sourceIds.has(id) === otherIds.has(id) || !generalIsAtBase(id)) continue;
+          sourceIds.has(id) ? currentIds.add(id) : currentIds.delete(id);
+        }
+        player[key] = [...currentIds];
+      }
+    }
+    this.world.privatePlayers ||= {};
+    this.world.privatePlayers[accountId] ||= {};
+    applyObjectPatch(this.world.privatePlayers[accountId], source.privatePlayers?.[accountId], other.privatePlayers?.[accountId]);
+    for (const id of changedProjectionKeys(source.generals, other.generals)) {
+      if (!generalIsAtBase(id)) continue;
+      if (Object.hasOwn(source.generals || {}, id)) this.world.generals[id] = cloneJson(source.generals[id]);
+      else delete this.world.generals[id];
+    }
+    applyObjectPatch(this.world.jobs, source.jobs, other.jobs);
+    applyObjectPatch(this.localDeployedGeneralProgress, source.deployedGeneralProgress, other.deployedGeneralProgress);
+    const sourceIntents = new Set(source.processedIntents || []);
+    const otherIntents = new Set(other.processedIntents || []);
+    const changedIntents = new Set([...sourceIntents, ...otherIntents].filter(id => sourceIntents.has(id) !== otherIntents.has(id)));
+    const currentIntents = new Set(this.world.processedIntents || []);
+    for (const id of changedIntents) sourceIntents.has(id) ? currentIntents.add(id) : currentIntents.delete(id);
+    this.world.processedIntents = [...currentIntents].slice(-1000);
+    return true;
+  }
+
+  restorePendingIntentReplayBase(transaction = this.pendingIntentTransaction) {
+    if (!this.validPendingIntentSession(transaction) || transaction.phase !== "prepared" || !transaction.changes) return false;
+    const before = transaction.beforePublic || {};
+    const after = transaction.afterPublic || {};
+    for (const key of Object.keys(transaction.changes.cells || {})) {
+      const envelope = occupationEnvelope(transaction.changes, key);
+      const beforeCell = Object.hasOwn(before.cells || {}, key) ? before.cells[key] : envelope.modern ? envelope.baseCell : undefined;
+      const afterCell = Object.hasOwn(after.cells || {}, key) ? after.cells[key] : envelope.nextCell;
+      const currentOrder = this.publicCellOrders[key] || this.publicMapBaselineOrder;
+      const baseOrder = envelope.modern ? envelope.baseOrder : currentOrder;
+      if (beforeCell !== undefined && compareOrderValue(currentOrder, baseOrder) === 0 && samePublicCell(this.world.cells[key], afterCell)) {
+        if (beforeCell == null) delete this.world.cells[key];
+        else this.world.cells[key] = cloneJson(beforeCell);
+      }
+    }
+    const restoreMap = (target, beforeValues = {}, afterValues = {}, orderFor = null, baseOrders = {}) => {
+      for (const key of Object.keys(afterValues || {})) {
+        if (!Object.hasOwn(beforeValues || {}, key)) continue;
+        if (orderFor && compareOrderValue(orderFor(key), baseOrders?.[key] || this.publicMapBaselineOrder) !== 0) continue;
+        if (canonicalJson(target?.[key] ?? null) !== canonicalJson(afterValues[key])) continue;
+        if (beforeValues[key] == null) delete target[key];
+        else target[key] = cloneJson(beforeValues[key]);
+      }
+    };
+    restoreMap(this.world.marketListings, before.marketListings, after.marketListings,
+      key => this.publicMarketOrders[key] || this.publicMapBaselineOrder, transaction.baseOrders?.marketListings);
+    restoreMap(this.world.marketSales, before.marketSales, after.marketSales,
+      key => this.publicMarketSaleOrders[key] || this.publicMapBaselineOrder, transaction.baseOrders?.marketSales);
+    restoreMap(this.world.claimedTreasures, before.claimedTreasures, after.claimedTreasures);
+    restoreMap(this.world.treasureSpawns, before.treasureSpawns, after.treasureSpawns);
+    this.applyPendingLocalProjection(transaction, "before");
+    transaction.projectionState = "base";
+    return true;
+  }
+
+  restorePendingIntentOptimisticProjection(transaction = this.pendingIntentTransaction) {
+    if (!this.validPendingIntentSession(transaction) || transaction.phase !== "prepared" || !transaction.changes) return false;
+    for (const key of Object.keys(transaction.changes.cells || {})) {
+      const envelope = occupationEnvelope(transaction.changes, key);
+      if (!envelope.modern
+        || compareOrderValue(this.publicCellOrders[key] || this.publicMapBaselineOrder, envelope.baseOrder) !== 0
+        || !samePublicCell(this.world.cells[key], envelope.baseCell)) continue;
+      if (envelope.nextCell == null) delete this.world.cells[key];
+      else this.world.cells[key] = cloneJson(envelope.nextCell);
+    }
+    const before = transaction.beforePublic || {};
+    const after = transaction.afterPublic || {};
+    const applyMap = (target, beforeValues = {}, afterValues = {}, orderFor, baseOrders = {}) => {
+      for (const key of changedProjectionKeys(beforeValues, afterValues)) {
+        if (compareOrderValue(orderFor(key), baseOrders?.[key] || this.publicMapBaselineOrder) !== 0
+          || canonicalJson(target?.[key] ?? null) !== canonicalJson(beforeValues?.[key] ?? null)) continue;
+        if (afterValues?.[key] == null) delete target[key];
+        else target[key] = cloneJson(afterValues[key]);
+      }
+    };
+    applyMap(this.world.marketListings, before.marketListings, after.marketListings,
+      key => this.publicMarketOrders[key] || this.publicMapBaselineOrder, transaction.baseOrders?.marketListings);
+    applyMap(this.world.marketSales, before.marketSales, after.marketSales,
+      key => this.publicMarketSaleOrders[key] || this.publicMapBaselineOrder, transaction.baseOrders?.marketSales);
+    for (const id of changedProjectionKeys(before.claimedTreasures, after.claimedTreasures)) {
+      if (canonicalJson(this.world.claimedTreasures?.[id] ?? null) !== canonicalJson(before.claimedTreasures?.[id] ?? null)) continue;
+      if (after.claimedTreasures?.[id] == null) delete this.world.claimedTreasures[id];
+      else this.world.claimedTreasures[id] = cloneJson(after.claimedTreasures[id]);
+      if (after.treasureSpawns?.[id] == null) delete this.world.treasureSpawns[id];
+      else this.world.treasureSpawns[id] = cloneJson(after.treasureSpawns[id]);
+    }
+    this.applyPendingLocalProjection(transaction, "after");
+    transaction.projectionState = "optimistic";
+    return true;
+  }
+
+  cancelPendingIntentTransaction(reason = "cloud-state-advanced") {
+    const transaction = this.pendingIntentTransaction;
+    if (!transaction) return false;
+    if (transaction.eventId) {
+      this.localEvents = this.localEvents.filter(event => String(event?.eventId || "") !== String(transaction.eventId));
+    }
+    this.diagnostic({
+      event: "intent-transaction-cancelled", reason,
+      transactionId: transaction.transactionId, mapDeltaId: transaction.mapDeltaId,
+      intentType: transaction.intentType
+    });
+    this.pendingIntentTransaction = null;
+    return true;
   }
 
   reconcilePendingPublication(comments) {
@@ -1365,7 +1711,7 @@ class OnlineWorldService {
       sources[0] = root;
       for (const source of comments) {
         if (commentAccountId(source) !== actor
-          || String(source._fyowRootId || source.parent_id || source.root_comment_id || "") !== rootId) continue;
+          || commentParentId(source) !== rootId) continue;
         const part = chunks.indexOf(source.content);
         if (part > 0 && !sources[part]) sources[part] = source;
       }
@@ -1377,8 +1723,7 @@ class OnlineWorldService {
     publication.sources = (candidates[0] || []).map(source => source ? {
       id: commentId(source), account_id: commentAccountId(source),
       created_at: commentTimestamp(source), content: source.content,
-      ...(source._fyowRootId || source.parent_id || source.root_comment_id
-        ? { parent_id: String(source._fyowRootId || source.parent_id || source.root_comment_id) } : {})
+      ...(commentParentId(source) ? { parent_id: commentParentId(source) } : {})
     } : null);
     this.saveCache();
   }
@@ -1387,11 +1732,15 @@ class OnlineWorldService {
     const transaction = this.pendingIntentTransaction;
     if (!transaction) return;
     const publication = transaction.publication;
+    const failedAt = this.now();
+    if (publication && ambiguousPublicationError(error) && !publication.ambiguousSince) {
+      publication.ambiguousSince = failedAt;
+    }
     transaction.lastPublishError = {
       code: String(error?.code || "FYOW_PUBLICATION_FAILED"),
       message: String(error?.message || error).slice(0, 500),
       status: Number(error?.status || error?.statusCode || 0) || null,
-      at: this.now(),
+      at: failedAt,
       confirmedParts: (publication?.sources || []).filter(Boolean).length,
       totalParts: publication?.record ? encodeCommentRecord(publication.record).length : null
     };
@@ -1403,7 +1752,7 @@ class OnlineWorldService {
     this.saveCache();
   }
 
-  applyCommittedTransactionChanges(changes, publishedOrder = null) {
+  applyCommittedTransactionChanges(changes, publishedOrder = null, { rememberConquests = true } = {}) {
     if (!this.world || !changes || typeof changes !== "object") return false;
     for (const [key, cell] of Object.entries(changes.cells || {})) {
       if (publishedOrder && compareOrderValue(this.publicCellOrders[key], publishedOrder) > 0) continue;
@@ -1428,44 +1777,96 @@ class OnlineWorldService {
     this.world.marketListings ||= {};
     this.world.marketSales ||= {};
     for (const [id, listing] of Object.entries(changes.marketListings || {})) {
+      if (publishedOrder && compareOrderValue(this.publicMarketOrders[id], publishedOrder) > 0) continue;
       if (listing == null) delete this.world.marketListings[id];
       else this.world.marketListings[id] = cloneJson(listing);
     }
-    for (const [id, sale] of Object.entries(changes.marketSales || {})) if (sale != null) this.world.marketSales[id] = cloneJson(sale);
+    for (const [id, sale] of Object.entries(changes.marketSales || {})) {
+      if (publishedOrder && compareOrderValue(this.publicMarketSaleOrders[id], publishedOrder) > 0) continue;
+      if (sale != null) this.world.marketSales[id] = cloneJson(sale);
+    }
     this.world.claimedTreasures ||= {};
     for (const [id, claim] of Object.entries(changes.claimedTreasures || {})) {
       if (claim == null) continue;
-      this.world.claimedTreasures[id] = cloneJson(claim);
+      const winnerOrder = this.world.claimedTreasures[id]?.platformOrder;
+      if (publishedOrder && winnerOrder && compareOrderValue(winnerOrder, publishedOrder) <= 0) continue;
+      this.world.claimedTreasures[id] = {
+        ...cloneJson(claim), ...(publishedOrder?.timestamp ? { platformOrder: cloneJson(publishedOrder) } : {})
+      };
       delete this.world.treasureSpawns[id];
     }
-    this.rememberConquests(changes.conquests);
+    if (rememberConquests) this.rememberConquests(changes.conquests, publishedOrder);
+    return true;
+  }
+
+  pendingIntentOutcomeIsEffective(transaction, publishedOrder) {
+    if (!transaction?.changes || !publishedOrder?.timestamp) return false;
+    const after = transaction.afterPublic || {};
+    for (const key of Object.keys(transaction.changes.cells || {})) {
+      const expected = Object.hasOwn(after.cells || {}, key)
+        ? after.cells[key] : occupationEnvelope(transaction.changes, key).nextCell;
+      if (compareOrderValue(this.publicCellOrders[key] || this.publicMapBaselineOrder, publishedOrder) !== 0
+        || !samePublicCell(this.world.cells[key], expected)) return false;
+    }
+    for (const id of Object.keys(transaction.changes.generals || {})) {
+      const general = this.world.generals[id];
+      const current = general?.status === "deployed" ? publicGeneralState(general) : null;
+      const expected = Object.hasOwn(after.generals || {}, id) ? after.generals[id] : transaction.changes.generals[id];
+      if (compareOrderValue(this.publicGeneralOrders[id] || this.publicMapBaselineOrder, publishedOrder) !== 0
+        || canonicalJson(current) !== canonicalJson(expected)) return false;
+    }
+    for (const id of Object.keys(transaction.changes.marketListings || {})) {
+      const current = Object.hasOwn(this.world.marketListings || {}, id)
+        ? publicMarketListingState(this.world, this.world.marketListings[id]) : null;
+      const expected = Object.hasOwn(after.marketListings || {}, id) ? after.marketListings[id] : transaction.changes.marketListings[id];
+      if (compareOrderValue(this.publicMarketOrders[id] || this.publicMapBaselineOrder, publishedOrder) !== 0
+        || canonicalJson(current) !== canonicalJson(expected)) return false;
+    }
+    for (const id of Object.keys(transaction.changes.marketSales || {})) {
+      const current = this.world.marketSales?.[id] || null;
+      const expected = Object.hasOwn(after.marketSales || {}, id) ? after.marketSales[id] : transaction.changes.marketSales[id];
+      if (compareOrderValue(this.publicMarketSaleOrders[id] || this.publicMapBaselineOrder, publishedOrder) !== 0
+        || canonicalJson(current) !== canonicalJson(expected)) return false;
+    }
+    for (const id of Object.keys(transaction.changes.claimedTreasures || {})) {
+      const current = cloneJson(this.world.claimedTreasures?.[id] || null);
+      const currentOrder = current?.platformOrder;
+      if (current) delete current.platformOrder;
+      const expected = Object.hasOwn(after.claimedTreasures || {}, id)
+        ? after.claimedTreasures[id] : transaction.changes.claimedTreasures[id];
+      if (compareOrderValue(currentOrder, publishedOrder) !== 0
+        || canonicalJson(current) !== canonicalJson(expected)) return false;
+    }
     return true;
   }
 
   resolvePendingIntentTransaction() {
     const transaction = this.pendingIntentTransaction;
     if (!transaction || !this.world) return false;
-    const validSession = String(transaction.workId || "") === String(this.work?.id || "")
-      && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
-      && String(transaction.accountId || "") === this.account().accountId
-      && Math.max(0, Math.trunc(Number(transaction.playerEpoch || 0))) === Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[this.account().accountId] || 0)));
+    const validSession = this.validPendingIntentSession(transaction);
     const published = validSession && this.appliedMapDeltaIds.has(String(transaction.mapDeltaId || ""));
     if (validSession && !published && transaction.changes) return false;
-    const overlay = validSession ? (published ? transaction.afterOverlay : transaction.beforeOverlay) : null;
-    if (validSession && !published && transaction.beforeOverlay?.completeOwnGeneralArchive && transaction.afterOverlay?.completeOwnGeneralArchive) {
-      for (const id of Object.keys(transaction.afterOverlay.generals || {})) {
-        if (!Object.hasOwn(transaction.beforeOverlay.generals || {}, id)
-          && String(this.world.generals?.[id]?.holderAccountId || "") === this.account().accountId) delete this.world.generals[id];
+    const publishedOrder = ledgerOrder(transaction.publishedOrder || this.pendingPublicationRootOrder(transaction));
+    if (published && transaction.changes) this.applyCommittedTransactionChanges(transaction.changes, publishedOrder);
+    const effective = published && this.pendingIntentOutcomeIsEffective(transaction, publishedOrder);
+    if (published) this.applyPendingLocalProjection(transaction, "after", publishedOrder);
+    else if (validSession && !published) this.applyPendingLocalProjection(transaction, "before");
+    if (published) {
+      const recalledGeneralIds = Object.entries(transaction.changes?.generalTransitions || {})
+        .filter(([, transition]) => transition?.reason === "recalled")
+        .map(([generalId]) => generalId)
+        .filter(generalId => compareOrderValue(this.publicGeneralOrders[generalId], publishedOrder) === 0
+          && this.world.generals?.[generalId]?.status === "carried");
+      for (const generalId of recalledGeneralIds) {
+        this.queueLegacyGeneralArchiveRetirement(generalId, { mapDeltaId: transaction.mapDeltaId });
       }
     }
-    if (published && transaction.changes) this.applyCommittedTransactionChanges(transaction.changes, transaction.publishedOrder);
-    if (overlay) this.replaceLocalOverlay(overlay);
     if (validSession && !published && transaction.eventId) {
       this.localEvents = this.localEvents.filter(event => String(event?.eventId || "") !== String(transaction.eventId));
     }
     this.diagnostic({
       event: "intent-transaction-recovered",
-      status: published ? "committed" : validSession ? "rolled-back" : "discarded",
+      status: effective ? "committed" : published ? "committed-superseded" : validSession ? "rolled-back" : "discarded",
       transactionId: transaction.transactionId,
       mapDeltaId: transaction.mapDeltaId,
       intentType: transaction.intentType
@@ -1821,6 +2222,7 @@ class OnlineWorldService {
       publicCellWriteBases: this.publicCellWriteBases,
       publicGeneralOrders: this.publicGeneralOrders,
       publicGeneralRecalls: this.publicGeneralRecalls,
+      pendingCommentRetirements: cloneJson(this.pendingCommentRetirements),
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
       marketSettledSales: [...this.marketSettledSales].slice(-1000),
@@ -2094,6 +2496,7 @@ class OnlineWorldService {
     this.publicCellWriteBases = cached?.publicCellWriteBases && typeof cached.publicCellWriteBases === "object" ? cached.publicCellWriteBases : {};
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicGeneralRecalls = cached?.publicGeneralRecalls && typeof cached.publicGeneralRecalls === "object" ? cached.publicGeneralRecalls : {};
+    this.pendingCommentRetirements = Array.isArray(cached?.pendingCommentRetirements) ? cached.pendingCommentRetirements.slice(-100) : [];
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
     this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
@@ -2275,6 +2678,7 @@ class OnlineWorldService {
     this.publicCellWriteBases = {};
     this.publicGeneralOrders = {};
     this.publicGeneralRecalls = {};
+    this.pendingCommentRetirements = [];
     this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -2296,13 +2700,262 @@ class OnlineWorldService {
 
   async postComment(content, options = {}) {
     if (String(content).length > FYOW_COMMENT_LIMIT) throw new Error(`评论数据超过 ${FYOW_COMMENT_LIMIT} 字符限制`);
-    const body = { is_anonymous: false, biz_type: 1, content: String(content) };
-    if (options.parentId) {
-      body.parent_id = String(options.parentId);
-      body.to_account_id = String(options.toAccountId || "");
-      if (options.toCommentId) body.to_comment_id = String(options.toCommentId);
+    return this.commentOperations.publish({ workId: this.work.id, content, ...options });
+  }
+
+  legacyGeneralArchiveSources(comments, generalId) {
+    const id = String(generalId || "");
+    if (!id) return null;
+    const accountId = this.account().accountId;
+    const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rootPattern = new RegExp(`^§FYOW3§GENERAL§${escapedId}§`);
+    const roots = (comments || []).filter(comment => rootPattern.test(String(comment?.content || "")));
+    const archives = [];
+    let protectedRoots = 0;
+    for (const root of roots) {
+      const rootId = commentId(root);
+      if (!rootId || commentAccountId(root) !== accountId) { protectedRoots += 1; continue; }
+      const replies = (comments || []).filter(comment => commentParentId(comment) === rootId);
+      if (replies.some(comment => commentAccountId(comment) !== accountId || !decodeCommentChunk(comment?.content))) {
+        protectedRoots += 1;
+        continue;
+      }
+      const assembled = assembleCommentRecords(replies);
+      const signingPublicKey = this.world?.players?.[accountId]?.deviceSigningPublicKey;
+      const kinds = new Set(assembled.records.map(item => item.kind));
+      const validRecords = assembled.records.every(item => ["GDEF", "GMEM"].includes(item.kind)
+        && String(item.record?.generalId || "") === id
+        && signingPublicKey
+        && verifySignedRecord(item.record, signingPublicKey));
+      const sourceCount = assembled.records.reduce((count, item) => count + (item.sources || []).length, 0);
+      if (assembled.invalid.length || assembled.incomplete.length || !kinds.has("GDEF") || !kinds.has("GMEM")
+        || !validRecords || sourceCount !== replies.length) {
+        protectedRoots += 1;
+        continue;
+      }
+      const orderedReplies = [...replies].sort((left, right) => {
+        const leftChunk = decodeCommentChunk(left.content);
+        const rightChunk = decodeCommentChunk(right.content);
+        return String(leftChunk?.id || "").localeCompare(String(rightChunk?.id || ""))
+          || Number(rightChunk?.part || 0) - Number(leftChunk?.part || 0);
+      });
+      archives.push({ root, replies: orderedReplies, sources: [...orderedReplies, root] });
     }
-    return this.requestConsole(`/comments/${encodeURIComponent(this.work.id)}/1`, { method: "POST", body, timeout: 20000 });
+    return { archives, protectedRoots, sources: archives.flatMap(archive => archive.sources) };
+  }
+
+  async resolveCommentDeletionSources(ids, sources = []) {
+    if (!this.work?.id) return { items: [], complete: false };
+    const wanted = new Set((ids || []).map(String));
+    const comments = await this.readAllCommentSources({ requireStable: true });
+    const byId = new Map(comments.map(item => [commentId(item), item]));
+    const parentIds = new Set((sources || []).map(commentParentId).filter(Boolean));
+    for (const parentId of parentIds) {
+      const root = byId.get(parentId);
+      if (!root) continue;
+      const expectedReplyIds = new Set((sources || []).filter(source => commentParentId(source) === parentId).map(commentId));
+      // These must be two independent platform reads. Reusing the normal sync
+      // branch cache here would turn the stability check into a comparison of
+      // the same Promise and could delete a branch that changed mid-flight.
+      const replies = await this.readCommentBranches(parentId, REPLY_PAGE_LIMIT, { rootComment: root, strict: true, fresh: true });
+      const confirmedReplies = await this.readCommentBranches(parentId, REPLY_PAGE_LIMIT, { rootComment: root, strict: true, fresh: true });
+      const replyIds = replies.map(commentId).sort();
+      const confirmedIds = confirmedReplies.map(commentId).sort();
+      if (canonicalJson(replyIds) !== canonicalJson(confirmedIds)
+        || replyIds.some(id => !expectedReplyIds.has(id))) {
+        const error = new Error("评论分支在删除前发生变化，已保留原数据");
+        error.code = "PLATFORM_DELETE_BRANCH_CHANGED";
+        throw error;
+      }
+      for (const reply of replies) byId.set(commentId(reply), reply);
+    }
+    return { items: [...wanted].map(id => byId.get(id)).filter(Boolean), complete: true };
+  }
+
+  async verifyPublishedRecall(mapDelta, generalId) {
+    const comments = await this.readAllCommentSources({ requireStable: true });
+    const assembled = assembleCommentRecords(comments);
+    const item = assembled.records.find(candidate => String(candidate.record?.mapDeltaId || "") === String(mapDelta?.mapDeltaId || ""));
+    if (!item) return { verified: false, reason: "map-delta-not-found", comments, archive: null };
+    const record = item.record;
+    const accountId = this.account().accountId;
+    const order = recordPlatformOrder(item);
+    if (record.schema !== FYOW_SCHEMAS.mapDelta || record.gameId !== GRID_GAME_ID
+      || String(record.workId || "") !== String(this.work?.id || "")
+      || String(record.seasonId || "") !== String(this.control?.seasonId || "")
+      || String(record.actorAccountId || "") !== accountId
+      || Number(record.playerEpoch || 0) !== Number(this.world?.playerEpochs?.[accountId] || 0)
+      || !order.timestamp || !(item.sources || []).length
+      || !(item.sources || []).every(source => commentAccountId(source) === accountId)
+      || !verifySignedRecord(record, record.deviceSigningPublicKey)) {
+      return { verified: false, reason: "recall-context-mismatch", comments, archive: null };
+    }
+    const transition = item.record.changes?.generalTransitions?.[String(generalId)] || null;
+    if (!validGeneralTransitionShape(String(generalId), transition)
+      || transition.reason !== "recalled" || String(transition.holderAccountId || "") !== accountId) {
+      return { verified: false, reason: "recall-transition-mismatch", comments, archive: null };
+    }
+    const nextCell = item.record.changes?.cells?.[`${transition.from.x},${transition.from.y}`];
+    if (!nextCell || (nextCell.generalIds || []).map(String).includes(String(generalId))) {
+      return { verified: false, reason: "recall-cell-mismatch", comments, archive: null };
+    }
+    const currentProof = this.publicGeneralRecalls?.[String(generalId)];
+    const proof = mapDelta?.recallProof
+      || (String(currentProof?.mapDeltaId || "") === String(record.mapDeltaId || "") ? currentProof : null);
+    const itemSourceIds = (item.sources || []).map(commentId).filter(Boolean).sort();
+    const proofMatches = proof
+      && String(proof.mapDeltaId || "") === String(record.mapDeltaId || "")
+      && String(proof.recordHash || "") === sha256(Buffer.from(canonicalJson(record)))
+      && canonicalJson(proof.transition) === canonicalJson(transition)
+      && compareOrderValue(proof.order, order) === 0
+      && canonicalJson((proof.sourceIds || []).map(String).sort()) === canonicalJson(itemSourceIds);
+    if (!proofMatches) {
+      return { verified: false, reason: "recall-acceptance-proof-mismatch", comments, archive: null };
+    }
+    const escapedId = String(generalId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rootPattern = new RegExp(`^§FYOW3§GENERAL§${escapedId}§`);
+    const archiveComments = comments.filter(comment => rootPattern.test(String(comment?.content || "")));
+    const archiveRootIds = new Set(archiveComments.map(commentId));
+    for (const comment of comments) {
+      const parentId = commentParentId(comment);
+      if (archiveRootIds.has(parentId)) archiveComments.push(comment);
+    }
+    for (const root of archiveComments.filter(comment => archiveRootIds.has(commentId(comment)))) {
+      const replies = await this.readCommentBranches(commentId(root), REPLY_PAGE_LIMIT, { rootComment: root, strict: true });
+      archiveComments.push(...replies);
+    }
+    const uniqueArchiveComments = [...new Map(archiveComments.map(comment => [commentId(comment), comment])).values()];
+    return {
+      verified: true, reason: "verified", comments,
+      recallProof: cloneJson(proof),
+      archive: this.legacyGeneralArchiveSources(uniqueArchiveComments, generalId)
+    };
+  }
+
+  queueLegacyGeneralArchiveRetirement(generalId, mapDelta) {
+    const accountId = this.account().accountId;
+    if (!generalId || !mapDelta?.mapDeltaId || !this.work?.id || !this.control?.seasonId || !accountId) return null;
+    const matches = item => String(item.generalId) === String(generalId)
+      && String(item.mapDeltaId) === String(mapDelta.mapDeltaId);
+    const currentProof = this.publicGeneralRecalls?.[String(generalId)];
+    const recallProof = mapDelta?.recallProof
+      || (String(currentProof?.mapDeltaId || "") === String(mapDelta.mapDeltaId || "") ? currentProof : null);
+    const existing = this.pendingCommentRetirements.find(matches);
+    if (existing) {
+      if (!existing.recallProof && recallProof) existing.recallProof = cloneJson(recallProof);
+      return existing;
+    }
+    const pending = {
+      version: 2,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      accountId,
+      playerEpoch: Number(this.world?.playerEpochs?.[accountId] || 0),
+      generalId: String(generalId),
+      mapDeltaId: String(mapDelta.mapDeltaId),
+      ...(recallProof ? { recallProof: cloneJson(recallProof) } : {}),
+      sources: [],
+      createdAt: this.now()
+    };
+    this.pendingCommentRetirements = [...this.pendingCommentRetirements.filter(item => !matches(item)), pending].slice(-100);
+    return pending;
+  }
+
+  async retireLegacyGeneralArchive(generalId, mapDelta) {
+    if (!mapDelta || !generalId || !this.work) return { deleted: 0, skipped: true };
+    const accountId = this.account().accountId;
+    const matchesPending = item => String(item.generalId) === String(generalId)
+      && String(item.mapDeltaId) === String(mapDelta.mapDeltaId);
+    const existingPending = this.pendingCommentRetirements.find(matchesPending);
+    let pending = existingPending || this.queueLegacyGeneralArchiveRetirement(generalId, mapDelta);
+    if (!existingPending) {
+      this.pendingCommentRetirements = [...this.pendingCommentRetirements.filter(item => !matchesPending(item)), pending].slice(-100);
+      try { this.saveCache(); }
+      catch (error) {
+        this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), reason: "pending-proof-save-failed", error: error?.message || String(error) });
+        return { deleted: 0, deferred: true };
+      }
+    }
+    let verified;
+    try { verified = await this.verifyPublishedRecall({ ...mapDelta, recallProof: pending.recallProof }, generalId); }
+    catch (error) {
+      this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId, mapDeltaId: mapDelta.mapDeltaId, reason: "cloud-verification-failed", error: error?.message || String(error) });
+      return { deleted: 0, deferred: true };
+    }
+    if (!verified.verified) {
+      this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId, mapDeltaId: mapDelta.mapDeltaId, reason: verified.reason });
+      return { deleted: 0, deferred: true };
+    }
+    if (!pending.recallProof && verified.recallProof) {
+      pending = { ...pending, version: 2, recallProof: cloneJson(verified.recallProof) };
+      this.pendingCommentRetirements = [...this.pendingCommentRetirements.filter(item => !matchesPending(item)), pending].slice(-100);
+      this.saveCache();
+    }
+    const archive = verified.archive;
+    if (!pending.sources.length && (!archive || !archive.sources.length)) {
+      this.pendingCommentRetirements = this.pendingCommentRetirements.filter(item => !matchesPending(item));
+      this.saveCache();
+      if (archive?.protectedRoots) this.diagnostic({ event: "legacy-general-archive-protected", generalId, mapDeltaId: mapDelta.mapDeltaId, protectedRoots: archive.protectedRoots });
+      return { deleted: 0, skipped: true, protected: Boolean(archive?.protectedRoots) };
+    }
+    if (!pending.sources.length) {
+      pending = { ...pending, sources: archive.sources.map(source => cloneJson(source)), ownershipVerifiedAt: this.now() };
+      this.pendingCommentRetirements = [...this.pendingCommentRetirements.filter(item => !matchesPending(item)), pending].slice(-100);
+      try { this.saveCache(); }
+      catch (error) {
+        this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), reason: "ownership-proof-save-failed", error: error?.message || String(error) });
+        return { deleted: 0, deferred: true };
+      }
+    }
+    const persistedProof = this.legacyGeneralArchiveSources(pending.sources, generalId);
+    const pendingSourceIds = pending.sources.map(commentId).sort();
+    const provenSourceIds = (persistedProof?.sources || []).map(commentId).sort();
+    if (persistedProof?.protectedRoots || canonicalJson(pendingSourceIds) !== canonicalJson(provenSourceIds)) {
+      this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), reason: "stored-ownership-proof-invalid" });
+      return { deleted: 0, deferred: true };
+    }
+    if (!pending.sources.some(source => commentParentId(source))) {
+      this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), reason: "no-safe-reply-sources" });
+      return { deleted: 0, deferred: true };
+    }
+    try {
+      const result = await this.commentOperations.deleteMany({
+        workId: this.work.id,
+        sources: pending.sources,
+        knownOwnedCommentIds: pending.sources.map(commentId)
+      });
+      const deleted = result.deletedCommentIds.length + result.alreadyMissingCommentIds.length;
+      this.pendingCommentRetirements = this.pendingCommentRetirements.filter(item => !matchesPending(item));
+      this.saveCache();
+      this.diagnostic({ event: "legacy-general-archive-retired", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), deleted });
+      return { deleted };
+    } catch (error) {
+      this.pendingCommentRetirements = [...this.pendingCommentRetirements.filter(item => !matchesPending(item)), pending].slice(-100);
+      try { this.saveCache(); } catch {}
+      this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId: String(generalId), mapDeltaId: String(mapDelta.mapDeltaId), reason: "delete-failed", error: error?.message || String(error) });
+      return { deleted: 0, deferred: true };
+    }
+  }
+
+  async retryPendingCommentRetirements() {
+    if (!Array.isArray(this.pendingCommentRetirements) || !this.pendingCommentRetirements.length) return 0;
+    if (this.commentRetirementInFlight) return this.commentRetirementInFlight;
+    const running = (async () => {
+      const pending = [...this.pendingCommentRetirements];
+      let completed = 0;
+      for (const item of pending) {
+        if (String(item.workId || "") !== String(this.work?.id || "")
+          || String(item.seasonId || "") !== String(this.control?.seasonId || "")
+          || String(item.accountId || "") !== this.account().accountId
+          || Number(item.playerEpoch || 0) !== Number(this.world?.playerEpochs?.[this.account().accountId] || 0)) continue;
+        const result = await this.retireLegacyGeneralArchive(item.generalId, { mapDeltaId: item.mapDeltaId });
+        if (result.deleted) completed += 1;
+      }
+      return completed;
+    })();
+    this.commentRetirementInFlight = running;
+    try { return await running; }
+    finally { if (this.commentRetirementInFlight === running) this.commentRetirementInFlight = null; }
   }
 
   async postRecord(record, options = {}) {
@@ -2318,7 +2971,7 @@ class OnlineWorldService {
       const saved = savedSources[index];
       const matchingSaved = saved && commentId(saved) && saved.content === content
         && commentAccountId(saved) === this.account().accountId
-        && (index === 0 || String(saved._fyowRootId || saved.parent_id || saved.root_comment_id || "") === rootId);
+        && (index === 0 || commentParentId(saved) === rootId);
       // Pending transactions reconcile ambiguous writes on the next sync. An
       // immediate POST retry could create another root or duplicate replies.
       const response = matchingSaved ? saved
@@ -2326,10 +2979,16 @@ class OnlineWorldService {
       const source = firstObject(response, item => Boolean(item.id || item.comment_id) && typeof item.content === "string")
         || firstObject(response, item => Boolean(item.id || item.comment_id)) || response || {};
       const timestampSource = firstObject(response, item => commentTimestamp(item) > 0);
-      if (typeof source?.content === "string" && source.content !== content) throw new Error("平台返回的评论正文与提交分片不一致");
-      if (commentAccountId(source) && commentAccountId(source) !== this.account().accountId) throw new Error("平台返回的评论作者与当前账号不一致");
-      const sourceParentId = String(source?.parent_id || source?.parentId || source?.root_comment_id || source?.rootCommentId || "");
-      if (sourceParentId && sourceParentId !== String(writeOptions.parentId || "")) throw new Error("平台返回的评论分支与提交分片不一致");
+      if (typeof source?.content === "string" && source.content !== content) {
+        throw Object.assign(new Error("平台返回的评论正文与提交分片不一致"), { code: "FYOW_COMMENT_ACK_MISMATCH" });
+      }
+      if (commentAccountId(source) && commentAccountId(source) !== this.account().accountId) {
+        throw Object.assign(new Error("平台返回的评论作者与当前账号不一致"), { code: "FYOW_COMMENT_ACK_MISMATCH" });
+      }
+      const sourceParentId = commentParentId(source);
+      if (sourceParentId && sourceParentId !== String(writeOptions.parentId || "")) {
+        throw Object.assign(new Error("平台返回的评论分支与提交分片不一致"), { code: "FYOW_COMMENT_ACK_MISMATCH" });
+      }
       const normalized = {
         ...(source && typeof source === "object" ? source : {}),
         id: commentId(source) || commentId(response),
@@ -2351,7 +3010,9 @@ class OnlineWorldService {
       if (index === 0 && !rootId) {
         rootId = commentId(normalized);
         rootAccountId = commentAccountId(normalized) || rootAccountId;
-        if (chunks.length > 1 && !rootId) throw new Error("平台没有返回分片根评论编号，无法发布原生回复分片");
+        if (chunks.length > 1 && !rootId) {
+          throw Object.assign(new Error("平台没有返回分片根评论编号，无法发布原生回复分片"), { code: "FYOW_COMMENT_ACK_MISSING" });
+        }
       }
       if (publication) {
         publication.sources ||= [];
@@ -2444,8 +3105,8 @@ class OnlineWorldService {
 
   async readCommentBranches(rootCommentId, maxPages = REPLY_PAGE_LIMIT, options = {}) {
     const session = this.commentReadSession;
-    const key = `${this.work?.id || ""}:${rootCommentId}:${maxPages}`;
-    if (!session) return this.fetchCommentBranches(rootCommentId, maxPages, options);
+    const key = `${this.work?.id || ""}:${rootCommentId}:${maxPages}:${options.strict ? "strict" : "normal"}`;
+    if (!session || options.fresh) return this.fetchCommentBranches(rootCommentId, maxPages, options);
     if (!session.branches.has(key)) session.branches.set(key, this.fetchCommentBranches(rootCommentId, maxPages, options));
     return session.branches.get(key);
   }
@@ -2467,6 +3128,7 @@ class OnlineWorldService {
         this.assertSyncActive();
       } catch (error) {
         if (this.syncPaused) throw error;
+        if (options.strict) throw error;
         this.commentReadSession?.failedRoots.set(rootId, error);
         this.diagnostic({
           event: "comment-branch-read-failed", rootCommentId: rootId, page,
@@ -2491,7 +3153,11 @@ class OnlineWorldService {
           || Number(meta.total_pages ?? meta.totalPages ?? 0) > page)
         : commentPageRootCount(items) >= HISTORY_PAGE_SIZE;
       if (!hasMore || !commentPageRootCount(items) || seen.size === beforeCount) break;
-      if (page === maxPages) this.commentReadSession?.failedRoots.set(rootId, new Error("评论回复分页超过读取上限，请重试同步"));
+      if (page === maxPages) {
+        const error = new Error("评论回复分页超过读取上限，请重试同步");
+        if (options.strict) throw error;
+        this.commentReadSession?.failedRoots.set(rootId, error);
+      }
       page += 1;
     }
     const expectedRoot = options.rootComment;
@@ -2506,9 +3172,10 @@ class OnlineWorldService {
       for (const candidate of candidates) {
         let comments;
         try {
-          comments = await this.readHistoryPage(candidate);
+          comments = await this.readHistoryPage(candidate, { fresh: Boolean(options.fresh) });
         } catch (error) {
           if (this.syncPaused) throw error;
+          if (options.strict) throw error;
           this.diagnostic({ event: "comment-root-read-failed", rootCommentId: rootId, page: candidate, error: error?.message || String(error) });
           continue;
         }
@@ -2622,13 +3289,13 @@ class OnlineWorldService {
 
   // Target-ledger verification must enumerate every platform page because a
   // newly created work has no trusted snapshot coverage until it is verified.
-  async readAllCommentSources({ includeAllBranches = false } = {}) {
+  async readAllCommentSources({ includeAllBranches = false, strictBranches = false, requireStable = false, fresh = false } = {}) {
     const comments = [];
     const seen = new Set();
     const fetchedRoots = new Set();
     const pages = new Map();
     const readPage = async page => {
-      if (!pages.has(page)) pages.set(page, await this.readHistoryPage(page));
+      if (!pages.has(page)) pages.set(page, await this.readHistoryPage(page, { fresh }));
       return pages.get(page);
     };
     const tailPage = await this.locateHistoryTailPage(readPage);
@@ -2648,7 +3315,7 @@ class OnlineWorldService {
         const rootId = commentId(root);
         if (!rootId || fetchedRoots.has(rootId)) continue;
         fetchedRoots.add(rootId);
-        const replies = await this.readCommentBranches(rootId, REPLY_PAGE_LIMIT, { rootComment: root });
+        const replies = await this.readCommentBranches(rootId, REPLY_PAGE_LIMIT, { rootComment: root, strict: strictBranches, fresh });
         hydrated.push(...replies);
       }
     } else {
@@ -2659,6 +3326,23 @@ class OnlineWorldService {
       if (!id || seen.has(id)) continue;
       seen.add(id);
       comments.push(item);
+    }
+    if (requireStable) {
+      const pageSignature = items => canonicalJson({
+        roots: commentPageRoots(items).map(commentId),
+        total: items?.pagination?.total ?? null,
+        totalPages: items?.pagination?.totalPages ?? null
+      });
+      const initialFirst = await readPage(1);
+      const initialTail = tailPage === 1 ? initialFirst : await readPage(tailPage);
+      const confirmedFirst = await this.readHistoryPage(1, { fresh: true });
+      const confirmedTail = tailPage === 1 ? confirmedFirst : await this.readHistoryPage(tailPage, { fresh: true });
+      if (pageSignature(initialFirst) !== pageSignature(confirmedFirst)
+        || pageSignature(initialTail) !== pageSignature(confirmedTail)) {
+        const error = new Error("云端评论在核验期间发生变化，请稍后重试");
+        error.code = "FYOW_HISTORY_CHANGED";
+        throw error;
+      }
     }
     return comments;
   }
@@ -3376,10 +4060,9 @@ class OnlineWorldService {
           this.publicGeneralOrders[id] = order;
           continue;
         }
-        if (transition.reason === "recalled") this.publicGeneralRecalls[id] = {
-          transition: cloneJson(transition), order: cloneJson(order), playerEpoch: Number(record.playerEpoch || 0),
-          ...(existing?.status === "deployed" ? { general: publicGeneralState(existing) } : {})
-        };
+        if (transition.reason === "recalled") {
+          this.publicGeneralRecalls[id] = acceptedRecallProof(record, item.sources, id, existing);
+        }
         const viewer = this.account().accountId;
         // A public deployed tombstone is not evidence that a newer private
         // carried/captured/market archive has ceased to exist.
@@ -3462,6 +4145,12 @@ class OnlineWorldService {
     this.world.revision = Number(this.world.revision || 0) + 1;
     this.rememberConquests(record.changes.conquests, order);
     this.appliedMapDeltaIds.add(String(record.mapDeltaId));
+    if (this.pendingIntentTransaction?.mapDeltaId === String(record.mapDeltaId)) {
+      this.pendingIntentTransaction.phase = "published";
+      this.pendingIntentTransaction.publishedAt = this.now();
+      this.pendingIntentTransaction.publishedOrder = cloneJson(order);
+      this.pendingIntentTransaction.projectionState = "base";
+    }
     if (this.appliedMapDeltaIds.size > 4000) this.appliedMapDeltaIds = new Set([...this.appliedMapDeltaIds].slice(-4000));
     if (compareOrderValue(order, this.publicMapOrder) > 0) this.publicMapOrder = order;
     this.publicDeltaCountSinceSnapshot += 1;
@@ -3783,7 +4472,13 @@ class OnlineWorldService {
     const running = this.syncNow(fullScan);
     this.syncInFlight = running;
     try {
-      return await running;
+      await running;
+      if (this.status === "ready" && this.pendingCommentRetirements.length) {
+        await this.retryPendingCommentRetirements().catch(error => {
+          this.diagnostic({ event: "comment-retirement-retry-failed", error: error?.message || String(error) });
+        });
+      }
+      return this.state();
     } finally {
       if (this.syncInFlight === running) this.syncInFlight = null;
     }
@@ -3908,6 +4603,9 @@ class OnlineWorldService {
           if (anchorControl && proof.authoritySigningPublicKey && String(anchorControl.authoritySigningPublicKey || "") !== String(proof.authoritySigningPublicKey)) throw new Error("迁移锚点权威密钥不匹配");
           if (proof.targetSnapshotId && !snapshots.some(item => String(item.record.snapshotId || "") === String(proof.targetSnapshotId))) throw new Error("迁移目标快照不匹配");
         }
+        if (this.pendingIntentTransaction?.phase === "prepared") {
+          this.restorePendingIntentReplayBase(this.pendingIntentTransaction);
+        }
         const snapshotOrder = recordPlatformOrder(snapshotItem);
         const snapshotIsNewer = snapshot && (!this.world || compareOrderValue(snapshotOrder, this.publicMapOrder) > 0);
         if (snapshotIsNewer) {
@@ -3940,9 +4638,14 @@ class OnlineWorldService {
           if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes
             && !this.appliedMapDeltaIds.has(String(this.pendingIntentTransaction.mapDeltaId))) {
             try {
-              await this.retryPendingIntentTransactionPublish({ comments: history.comments || [] });
+              await this.retryPendingIntentTransactionPublish({ comments: history.comments });
             } catch (error) {
-              this.recordPendingPublicationFailure(error);
+              if (error?.code === "FYOW_OUTBOX_STALE" || !deferablePublicationError(error)) {
+                this.cancelPendingIntentTransaction(error?.code || "publication-rejected");
+              } else {
+                this.restorePendingIntentOptimisticProjection(this.pendingIntentTransaction);
+                this.recordPendingPublicationFailure(error);
+              }
             }
             this.assertSyncActive();
           }
@@ -4201,6 +4904,7 @@ class OnlineWorldService {
       error.code = "FYOW_OUTBOX_INVALID";
       throw error;
     }
+    if (transaction && Array.isArray(options.cloudComments)) this.reconcilePendingPublication(options.cloudComments);
     const record = savedRecord || signRecord({
       schema: FYOW_SCHEMAS.mapDelta,
       mapDeltaId: String(options.mapDeltaId || crypto.randomUUID()),
@@ -4220,8 +4924,14 @@ class OnlineWorldService {
     if (options.beforeWorld) {
       const validator = Object.create(this);
       validator.world = options.beforeWorld;
-      const timestamp = Math.max(Math.trunc(this.now()), ...Object.values(changes.cellBases || {}).map(base => Number(base.order?.timestamp || 0) + 1));
-      if (!validator.validMapDelta({ record, sources: [{ id: "local-preflight", account_id: record.actorAccountId, created_at: timestamp }] })) {
+      const timestamp = Math.max(
+        Math.trunc(this.now()),
+        Number(this.publicMapOrder?.timestamp || 0) + 1,
+        ...Object.values(changes.cellBases || {}).map(base => Number(base.order?.timestamp || 0) + 1)
+      );
+      const confirmedRoot = transaction?.publication?.sources?.[0];
+      const source = confirmedRoot || { id: "local-preflight", account_id: record.actorAccountId, created_at: timestamp };
+      if (!validator.validMapDelta({ record, sources: [source] })) {
         this.diagnostic({ event: "map-delta-preflight-failed", code: "FYOW_MAP_DELTA_INVALID", mapDeltaId: record.mapDeltaId, cells: Object.keys(changes.cells || {}) });
         const error = new Error("行动同步校验未通过，请重新同步后重试（FYOW_MAP_DELTA_INVALID）");
         error.code = "FYOW_MAP_DELTA_INVALID";
@@ -4253,10 +4963,7 @@ class OnlineWorldService {
         const transition = changes.generalTransitions?.[id];
         if (transition?.reason === "recalled") {
           const previous = options.beforeWorld?.generals?.[id];
-          this.publicGeneralRecalls[id] = {
-            transition: cloneJson(transition), order: cloneJson(order), playerEpoch: record.playerEpoch,
-            ...(previous?.status === "deployed" ? { general: publicGeneralState(previous) } : {})
-          };
+          this.publicGeneralRecalls[id] = acceptedRecallProof(record, sources, id, previous);
         }
       }
       for (const id of Object.keys(changes.marketListings || {})) this.publicMarketOrders[id] = order;
@@ -4393,11 +5100,42 @@ class OnlineWorldService {
       }
       if (!options.internal) {
         if (!transactionMapDeltaId || this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) this.pendingIntentTransaction = null;
+        const recalledGeneralIds = mapDelta ? Object.entries(mapDelta.changes?.generalTransitions || {})
+          .filter(([, transition]) => transition?.reason === "recalled")
+          .map(([generalId]) => generalId) : [];
+        for (const generalId of recalledGeneralIds) this.queueLegacyGeneralArchiveRetirement(generalId, mapDelta);
         this.saveCache();
         this.notify();
+        if (mapDelta) {
+          for (const generalId of recalledGeneralIds) {
+            await this.retireLegacyGeneralArchive(generalId, mapDelta).catch(error => {
+              this.diagnostic({ event: "legacy-general-archive-retirement-deferred", generalId, mapDeltaId: mapDelta.mapDeltaId, reason: "unexpected-error", error: error?.message || String(error) });
+            });
+          }
+        }
       }
       return { event: localEvent, mapDelta, effects: outcome.effects, deferredEffects, snapshotWarning, dialogue, farewell, state: this.state() };
     } catch (error) {
+      const pendingPublication = !mapDelta && transactionMapDeltaId
+        && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId;
+      if (pendingPublication && deferablePublicationError(error)) {
+        this.status = "degraded";
+        this.error = "行动已保存在本机，正在等待平台同步";
+        this.recordPendingPublicationFailure(error);
+        this.notify();
+        return {
+          event: localEvent,
+          mapDelta: null,
+          effects: outcome.effects,
+          deferredEffects: [],
+          snapshotWarning: null,
+          dialogue: null,
+          farewell: null,
+          pendingSync: true,
+          pendingSyncMessage: this.error,
+          state: this.state()
+        };
+      }
       if (!mapDelta) {
         if (transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) this.pendingIntentTransaction = null;
         this.world = beforeWorld;
@@ -5441,6 +6179,7 @@ class OnlineWorldService {
         this.publicCellWriteBases = {};
         this.publicGeneralOrders = {};
         this.publicGeneralRecalls = {};
+        this.pendingCommentRetirements = [];
         this.localGeneralArchiveOrders = {};
         this.publicMarketOrders = {};
         this.publicMarketSaleOrders = {};

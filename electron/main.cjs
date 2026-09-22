@@ -49,7 +49,7 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates, loginError, assertLoginActive, waitForLoginTask, pauseLogin, platformLoginError, runLoginFailover } = require("./login-failover.cjs");
-const { requestPlatformJson, platformRequestError } = require("./platform-transport.cjs");
+const { requestPlatformJson, platformRequestError, platformRateLimitScope, RATE_LIMIT_MESSAGE } = require("./platform-transport.cjs");
 const {
   OFFICIAL_DOMAIN_DIRECTORY_URLS,
   FALLBACK_PLATFORM_ORIGINS,
@@ -3686,9 +3686,10 @@ class AccountBackend {
     await this.networkReady;
     const origin = this.origin;
     const revision = this.authSessionRevision;
-    const retryAt = this.platformRateLimits?.get(origin) || 0;
+    const rateLimitScope = platformRateLimitScope(origin, pathname, options.method);
+    const retryAt = this.platformRateLimits?.get(rateLimitScope) || 0;
     if (retryAt > Date.now()) {
-      throw platformRequestError("PLATFORM_RATE_LIMIT", "平台请求频繁，正在等待恢复", { status: 429, retryAfterMs: retryAt - Date.now() });
+      throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, { status: 429, retryAfterMs: retryAt - Date.now() });
     }
     let token = "";
     let tokenTimer;
@@ -3715,7 +3716,7 @@ class AccountBackend {
     } catch (error) {
       if (error?.status === 429) {
         this.platformRateLimits ||= new Map();
-        this.platformRateLimits.set(origin, Date.now() + error.retryAfterMs);
+        this.platformRateLimits.set(rateLimitScope, Date.now() + (Number(error.retryAfterMs) || 30000));
       }
       this.appendSessionLog("platform-network", {
         event: "request-failed", origin, path: pathname.split("?")[0], method: options.method || "GET",

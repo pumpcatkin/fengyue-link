@@ -3151,6 +3151,7 @@ document.querySelectorAll(".overlay").forEach(overlay => overlay.addEventListene
 function resultSound(result) {
   const effects = Array.isArray(result?.effects) ? result.effects : [];
   if (result?.joinPreview) return "general";
+  if (result?.pendingSync) return "notice";
   if (result?.deferredEffects?.length) return "notice";
   if (effects.some(effect => effect.type === "battle-lost")) return "defeat";
   if (effects.some(effect => effect.type === "battle-won")) return "victory";
@@ -3282,7 +3283,9 @@ window.addEventListener("message", event => {
         cancel.disabled = false;
         document.querySelector("#deploy-confirmation").removeAttribute("aria-busy");
         document.querySelector("#deploy-confirmation").classList.add("hidden");
-        showToast(`${deployedName}部署成功`);
+        showToast(event.data.result.pendingSync
+          ? `${deployedName}的部署已保存在本机，正在同步`
+          : `${deployedName}部署成功`);
       }
       renderAll();
     }
@@ -3317,6 +3320,9 @@ window.addEventListener("message", event => {
     if (event.data.result?.letter?.text) showToast("书信已生成并发送");
     if (event.data.result?.farewell?.text) showToast("诀别信已发送，处置已完成");
     if (event.data.result?.appearanceSetting) showToast("外观设定已更新");
+    if (event.data.result?.pendingSync && requestState?.key !== "intent:deploy-general") {
+      showToast(event.data.result.pendingSyncMessage || "行动已保存在本机，正在同步");
+    }
     playSound(resultSound(event.data.result));
     if (event.data.result?.deferredEffects?.length) showToast("领地已占领，新将领稍后到来");
   }

@@ -2523,16 +2523,137 @@ describe("online world platform service", () => {
     const instance = service({
       getAccount: () => ({ accountId: "player", username: "玩家" }),
       getIdentity: async () => identity,
-      requestConsole: async () => { throw new Error("comment write failed"); }
+      requestConsole: async () => {
+        throw Object.assign(new Error("invalid deployment payload"), { code: "PLATFORM_HTTP", status: 400 });
+      }
     });
     instance.work = { id: "work", authorAccountId: "authority" };
     instance.control = { seasonId: "season", authorityAccountId: "authority" };
     instance.world = world;
-    await expect(instance.submitIntent({ type: "deploy-general", generalId: "g1", idempotencyKey: "deploy" })).rejects.toThrow(/comment write failed/);
+    await expect(instance.submitIntent({ type: "deploy-general", generalId: "g1", idempotencyKey: "deploy" })).rejects.toThrow(/invalid deployment payload/);
     expect(instance.world.generals.g1.status).toBe("carried");
     expect(instance.world.players.player.carriedGeneralIds).toEqual(["g1"]);
     expect(instance.world.cells["1,1"].generalIds).toEqual([]);
     expect(instance.localEvents).toHaveLength(0);
+  });
+
+  it.each([
+    { label: "deployment", intent: { type: "deploy-general", generalId: "g1", idempotencyKey: "deploy-rate-limited" }, initialStatus: "carried", expectedStatus: "deployed" },
+    { label: "recall", intent: { type: "recall-general", generalId: "g1", idempotencyKey: "recall-rate-limited" }, initialStatus: "deployed", expectedStatus: "carried" }
+  ])("keeps a $label locally and resumes the same signed publication after platform throttling", async ({ intent, initialStatus, expectedStatus }) => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season", startedAt: 1_000_000 });
+    world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0,
+      carriedGeneralIds: initialStatus === "carried" ? ["g1"] : [], position: { x: 1, y: 1 }
+    };
+    world.privatePlayers.player = { orientation: "any" };
+    world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: initialStatus === "deployed" ? ["g1"] : [] };
+    world.generals.g1 = createFallbackGeneral({ id: "g1", name: "试将", gender: "female", holderAccountId: "player", holderName: "玩家", power: 300 });
+    world.generals.g1.status = initialStatus;
+    world.generals.g1.location = initialStatus === "deployed" ? { x: 1, y: 1 } : null;
+    let throttled = true;
+    let posted = 0;
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        if (throttled) throw Object.assign(new Error("请求过于频繁，请稍后"), {
+          code: "PLATFORM_RATE_LIMIT", status: 429, httpStatus: 400, retryAfterMs: 30000
+        });
+        posted += 1;
+        return { id: `published-${posted}`, account_id: "player", created_at: 2_000_000 + posted, ...options.body };
+      },
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+
+    const result = await instance.submitIntent(intent);
+    expect(result).toMatchObject({ pendingSync: true, pendingSyncMessage: "行动已保存在本机，正在等待平台同步" });
+    expect(instance.world.generals.g1.status).toBe(expectedStatus);
+    expect(instance.localEvents).toHaveLength(1);
+    expect(instance.pendingIntentTransaction).toMatchObject({ phase: "prepared", intentType: intent.type });
+    expect(instance.pendingIntentTransaction.lastPublishError).toMatchObject({ code: "PLATFORM_RATE_LIMIT", status: 429 });
+    const transactionId = instance.pendingIntentTransaction.transactionId;
+    const mapDeltaId = instance.pendingIntentTransaction.mapDeltaId;
+
+    throttled = false;
+    await instance.retryPendingIntentTransactionPublish();
+    expect(instance.pendingIntentTransaction).toMatchObject({ transactionId, mapDeltaId, phase: "published" });
+    expect(posted).toBeGreaterThan(0);
+    expect(instance.resolvePendingIntentTransaction()).toBe(true);
+    expect(instance.pendingIntentTransaction).toBeNull();
+    expect(instance.world.generals.g1.status).toBe(expectedStatus);
+    expect(instance.localEvents).toHaveLength(1);
+    expect(instance.pendingCommentRetirements).toHaveLength(intent.type === "recall-general" ? 1 : 0);
+  });
+
+  it.each([
+    { label: "deployment", intentType: "deploy-general", initialStatus: "carried", remoteGeneralPresent: false },
+    { label: "recall", intentType: "recall-general", initialStatus: "deployed", remoteGeneralPresent: true }
+  ])("replays a newer cloud cell before cancelling a stale pending $label", async ({ intentType, initialStatus, remoteGeneralPresent }) => {
+    const identity = generateOnlineWorldIdentity();
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season", startedAt: 1_000_000 });
+    const baseGeneralIds = remoteGeneralPresent ? ["g1"] : [];
+    world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0,
+      carriedGeneralIds: initialStatus === "carried" ? ["g1"] : [], position: { x: 1, y: 1 }
+    };
+    world.privatePlayers.player = { orientation: "any" };
+    world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: baseGeneralIds };
+    world.generals.g1 = createFallbackGeneral({ id: "g1", name: "试将", gender: "female", holderAccountId: "player", holderName: "玩家", power: 300 });
+    world.generals.g1.status = initialStatus;
+    world.generals.g1.location = initialStatus === "deployed" ? { x: 1, y: 1 } : null;
+    let posts = 0;
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestConsole: async () => {
+        posts += 1;
+        throw Object.assign(new Error("请求过于频繁，请稍后"), { code: "PLATFORM_RATE_LIMIT", status: 429 });
+      },
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "authority" };
+    instance.control = { seasonId: "season", authorityAccountId: "authority" };
+    instance.world = world;
+    const pending = await instance.submitIntent({ type: intentType, generalId: "g1", idempotencyKey: `stale-${intentType}` });
+    expect(pending.pendingSync).toBe(true);
+    const eventId = instance.pendingIntentTransaction.eventId;
+
+    const baseCell = { ownerAccountId: "player", soldiers: 10, generalIds: baseGeneralIds, occupationCount: 0 };
+    const remoteRecord = signRecord({
+      schema: "fyow.map-delta/1", mapDeltaId: `remote-${intentType}`,
+      gameId: "cc.aiero.fyow.grid-conquest", workId: "work", seasonId: "season",
+      actorAccountId: "player", participant: { displayName: "玩家" }, playerEpoch: 0,
+      changes: {
+        cells: { "1,1": { ownerAccountId: "player", soldiers: 20, generalIds: baseGeneralIds } },
+        cellBases: { "1,1": { cell: baseCell, nextOccupationCount: 0, order: { timestamp: 0, commentId: "" } } },
+        generals: {}, generalTransitions: {}
+      },
+      deviceSigningPublicKey: identity.signingPublicKey,
+      deviceEncryptionPublicKey: identity.encryptionPublicKey
+    }, identity.signingPrivateKey);
+    const remoteItem = {
+      record: remoteRecord,
+      sources: [{ id: `remote-comment-${intentType}`, account_id: "player", created_at: 2_000_100 }]
+    };
+    instance.calibrateClock = vi.fn(async () => null);
+    instance.readHistory = vi.fn(async () => ({ comments: remoteItem.sources, assembled: { records: [remoteItem] } }));
+    instance.readWorldChatHistory = vi.fn(async () => ({ assembled: { records: [] } }));
+    instance.receiveDirectWakes = vi.fn(async () => []);
+
+    const synced = await instance.sync();
+    expect(synced.status).toBe("ready");
+    expect(instance.pendingIntentTransaction).toBeNull();
+    expect(instance.appliedMapDeltaIds).toContain(`remote-${intentType}`);
+    expect(instance.world.cells["1,1"]).toMatchObject({ soldiers: 20, generalIds: baseGeneralIds });
+    expect(instance.world.generals.g1).toMatchObject({ status: initialStatus });
+    expect(instance.world.players.player.carriedGeneralIds).toEqual(initialStatus === "carried" ? ["g1"] : []);
+    expect(instance.localEvents.some((event: any) => event.eventId === eventId)).toBe(false);
+    expect(posts).toBe(1);
   });
 
   it("defers a failed confirmed general generation and retries it with the same discovery identity", async () => {
@@ -2692,6 +2813,176 @@ describe("online world platform service", () => {
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("recognizes complete legacy general archives and protects unknown branch content", () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "player@example" }) });
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    instance.world.players.player = { accountId: "player", deviceSigningPublicKey: identity.signingPublicKey };
+    const root = { id: "legacy-root", account_id: "player", root_comment_id: "legacy-root", content: "§FYOW3§GENERAL§guard§守将§2,2§r1" };
+    const replies = [
+      ...encodeCommentRecord(signRecord({ schema: "fyow.general-definition/3", id: "definition", generalId: "guard", setting: "x".repeat(3000) }, identity.signingPrivateKey)),
+      ...encodeCommentRecord(signRecord({ schema: "fyow.general-memory/3", id: "memory", generalId: "guard", memory: "y".repeat(3000) }, identity.signingPrivateKey))
+    ].map((content: string, index: number) => ({ id: `reply-${index}`, account_id: "player", parent_id: root.id, content }));
+    const archive = instance.legacyGeneralArchiveSources([root, ...replies], "guard");
+    expect(archive.archives).toHaveLength(1);
+    expect(archive.sources.at(-1)).toBe(root);
+    expect(archive.sources.slice(0, -1).every((source: any) => source.parent_id === root.id)).toBe(true);
+    expect(instance.legacyGeneralArchiveSources([root], "guard")).toMatchObject({ archives: [], protectedRoots: 1 });
+
+    const protectedArchive = instance.legacyGeneralArchiveSources([
+      root, ...replies, { id: "unknown", account_id: "player", parent_id: root.id, content: "普通回复" }
+    ], "guard");
+    expect(protectedArchive.archives).toHaveLength(0);
+    expect(protectedArchive.protectedRoots).toBe(1);
+  });
+
+  it("persists precise legacy archive retirement before deletion and resumes a partial failure", async () => {
+    const deleteMany = vi.fn().mockRejectedValueOnce(new Error("temporary delete failure")).mockResolvedValueOnce({
+      deletedCommentIds: ["legacy-reply"], alreadyMissingCommentIds: [], preservedRootCommentIds: ["legacy-root"]
+    });
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "player@example" }),
+      commentOperations: { publish: vi.fn(), delete: vi.fn(), deleteMany }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    instance.world.playerEpochs.player = 0;
+    instance.legacyGeneralArchiveSources = vi.fn((sources: any[]) => ({ archives: [{}], protectedRoots: 0, sources }));
+    instance.verifyPublishedRecall = vi.fn(async () => ({
+      verified: true,
+      archive: {
+        protectedRoots: 0,
+        sources: [
+          { id: "legacy-reply", account_id: "player", parent_id: "legacy-root" },
+          { id: "legacy-root", account_id: "player" }
+        ]
+      }
+    }));
+    expect(await instance.retireLegacyGeneralArchive("guard", { mapDeltaId: "recall-map" })).toMatchObject({ deferred: true });
+    expect(instance.pendingCommentRetirements).toHaveLength(1);
+    expect(instance.pendingCommentRetirements[0].sources.map((source: any) => source.id)).toEqual(["legacy-reply", "legacy-root"]);
+
+    instance.verifyPublishedRecall = vi.fn(async () => ({ verified: true, archive: { protectedRoots: 0, sources: [] } }));
+    expect(await instance.retryPendingCommentRetirements()).toBe(1);
+    expect(instance.pendingCommentRetirements).toHaveLength(0);
+    expect(deleteMany).toHaveBeenCalledTimes(2);
+    const retriedDeletion = deleteMany.mock.calls.at(1)?.[0];
+    expect(retriedDeletion?.sources.map((source: any) => source.id)).toEqual(["legacy-reply", "legacy-root"]);
+  });
+
+  it("keeps a minimal retirement proof when a just-published recall is not visible yet", async () => {
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "player@example" }),
+      commentOperations: { publish: vi.fn(), delete: vi.fn(), deleteMany: vi.fn() }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+    instance.world.playerEpochs.player = 0;
+    instance.verifyPublishedRecall = vi.fn(async () => ({ verified: false, reason: "map-delta-not-found", archive: null }));
+    expect(await instance.retireLegacyGeneralArchive("guard", { mapDeltaId: "recall-map" })).toMatchObject({ deferred: true });
+    expect(instance.pendingCommentRetirements).toEqual([expect.objectContaining({
+      workId: "work", seasonId: "season", accountId: "player", generalId: "guard", mapDeltaId: "recall-map", sources: []
+    })]);
+  });
+
+  it("verifies an accepted recall proof after a later write advances the same cell", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "player@example" }) });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000_000 });
+    instance.world.playerEpochs.player = 0;
+    instance.world.players.player = { accountId: "player", carriedGeneralIds: ["guard"] };
+    instance.world.cells["2,2"] = { ownerAccountId: "player", soldiers: 99, generalIds: [] };
+    instance.world.generals.guard = {
+      ...createFallbackGeneral({ id: "guard", name: "守将", holderAccountId: "player" }),
+      status: "carried", location: null
+    };
+    const transition = {
+      generalId: "guard", holderAccountId: "player", from: { x: 2, y: 2 },
+      targetStatus: "carried", nextHolderAccountId: "player", reason: "recalled"
+    };
+    const record = signRecord({
+      schema: "fyow.map-delta/1", mapDeltaId: "accepted-recall", gameId: "cc.aiero.fyow.grid-conquest",
+      workId: "work", seasonId: "season", actorAccountId: "player", playerEpoch: 0,
+      participant: { displayName: "玩家" },
+      changes: {
+        cells: { "2,2": { ownerAccountId: "player", soldiers: 10, generalIds: [] } },
+        generals: { guard: null }, generalTransitions: { guard: transition }
+      },
+      deviceSigningPublicKey: identity.signingPublicKey,
+      deviceEncryptionPublicKey: identity.encryptionPublicKey
+    }, identity.signingPrivateKey);
+    const chunks = encodeCommentRecord(record);
+    const sources = chunks.map((content: string, index: number) => ({
+      id: `recall-part-${index + 1}`, account_id: "player", created_at: 2_000_000 + index,
+      ...(index ? { parent_id: "recall-part-1" } : {}), content
+    }));
+    const order = recordPlatformOrder({ sources });
+    const proof = {
+      version: 1, mapDeltaId: record.mapDeltaId, recordHash: sha256(Buffer.from(canonicalJson(record))),
+      sourceIds: sources.map((source: any) => source.id).sort(), actorAccountId: "player",
+      transition, order, playerEpoch: 0
+    };
+    instance.publicGeneralRecalls.guard = proof;
+    instance.publicCellOrders["2,2"] = { timestamp: order.timestamp + 1000, commentId: "later-garrison" };
+    instance.readAllCommentSources = vi.fn(async () => sources);
+    instance.validMapDelta = vi.fn(() => false);
+
+    const verified = await instance.verifyPublishedRecall({ mapDeltaId: record.mapDeltaId, recallProof: proof }, "guard");
+    expect(verified).toMatchObject({ verified: true, reason: "verified", recallProof: proof });
+    expect(instance.validMapDelta).not.toHaveBeenCalled();
+  });
+
+  it("aborts lifecycle deletion when the target branch gains an unknown reply", async () => {
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "player@example" }) });
+    instance.work = { id: "work", authorAccountId: "author" };
+    const root = { id: "legacy-root", account_id: "player", content: "§FYOW3§GENERAL§guard§守将§2,2§r1" };
+    const expected = { id: "legacy-reply", account_id: "player", parent_id: root.id, content: "expected" };
+    instance.readAllCommentSources = vi.fn(async () => [root, expected]);
+    const late = { id: "late-reply", account_id: "player", parent_id: root.id, content: "late" };
+    instance.readCommentBranches = vi.fn()
+      .mockResolvedValueOnce([expected])
+      .mockResolvedValueOnce([expected, late]);
+    await expect(instance.resolveCommentDeletionSources([expected.id, root.id], [expected, root])).rejects.toMatchObject({
+      code: "PLATFORM_DELETE_BRANCH_CHANGED"
+    });
+    expect(instance.readCommentBranches).toHaveBeenNthCalledWith(1, root.id, expect.any(Number), expect.objectContaining({ strict: true, fresh: true }));
+    expect(instance.readCommentBranches).toHaveBeenNthCalledWith(2, root.id, expect.any(Number), expect.objectContaining({ strict: true, fresh: true }));
+  });
+
+  it("retires a recalled general archive only after the local action is committed", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "player@example" }),
+      getIdentity: async () => identity,
+      now: () => 2_000_000
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000_000 });
+    instance.world.players.player = { accountId: "player", displayName: "玩家", gold: 1000, position: { x: 2, y: 2 }, fieldArmySoldiers: 0, carriedGeneralIds: [] };
+    instance.world.privatePlayers.player = {};
+    instance.world.playerEpochs.player = 0;
+    instance.world.cells["2,2"] = { ownerAccountId: "player", soldiers: 10, generalIds: ["guard"] };
+    const guard = createFallbackGeneral({ id: "guard", name: "守将", gender: "female", power: 150, holderAccountId: "player" });
+    guard.status = "deployed";
+    guard.location = { x: 2, y: 2 };
+    instance.world.generals.guard = guard;
+    instance.publishMapChanges = vi.fn(async (changes: any, _identity: any, options: any) => ({ mapDeltaId: options.mapDeltaId, changes }));
+    instance.handleEffects = vi.fn(async () => ({ deferred: [] }));
+    instance.retireLegacyGeneralArchive = vi.fn(async () => {
+      expect(instance.world.generals.guard).toMatchObject({ status: "carried", location: null });
+      expect(instance.pendingIntentTransaction).toBeNull();
+      expect(instance.pendingCommentRetirements).toEqual([expect.objectContaining({ generalId: "guard", sources: [] })]);
+      return { deleted: 3 };
+    });
+    await instance.applyLocalIntent({ type: "recall-general", generalId: "guard", idempotencyKey: "recall-guard" }, "player");
+    expect(instance.retireLegacyGeneralArchive).toHaveBeenCalledWith("guard", expect.objectContaining({ changes: expect.any(Object) }));
   });
 
   it("keeps full deployed-general archives in the owner overlay", () => {
@@ -2927,6 +3218,7 @@ describe("online world platform service", () => {
   it("keeps a completed march locally while its public record waits for reconnect", async () => {
     const identity = generateOnlineWorldIdentity();
     let online = false;
+    let now = 2_000_000;
     let postSequence = 0;
     const instance = service({
       getAccount: () => ({ accountId: "player", username: "玩家" }),
@@ -2935,7 +3227,7 @@ describe("online world platform service", () => {
         if (!online) throw new Error("connection interrupted");
         return { id: `posted-${++postSequence}`, account_id: "player", created_at: 2_000_000 + postSequence, ...options.body };
       },
-      now: () => 2_000_000
+      now: () => now
     });
     instance.work = { id: "work", authorAccountId: "author" };
     instance.control = { seasonId: "season", authorityAccountId: "author" };
@@ -2968,6 +3260,8 @@ describe("online world platform service", () => {
     expect(instance.world.jobs.march).toBeUndefined();
     expect(instance.pendingIntentTransaction.transactionId).toBe(transactionId);
     online = true;
+    now += 2_000;
+    instance.readAllCommentSources = vi.fn(async () => []);
     await instance.retryPendingIntentTransactionPublish();
     expect(instance.pendingIntentTransaction.phase).toBe("published");
     delete instance.world.cells["2,1"];
@@ -2994,6 +3288,10 @@ describe("online world platform service", () => {
       seed.cacheFile = reader.cacheFile = path.join(directory, "cache.json");
       seed.world = structuredClone(fixture.author.world);
       seed.control = structuredClone(fixture.author.control);
+      seed.pendingCommentRetirements = [{
+        version: 1, workId: "pending-work", seasonId: "season", accountId: "player",
+        playerEpoch: 0, generalId: "legacy-guard", mapDeltaId: "verified-recall", sources: [], createdAt: fixture.base
+      }];
       const before = structuredClone(seed.world);
       seed.world.players.player.position = { x: 3, y: 3 };
       seed.world.cells["3,3"] = { ownerAccountId: "player", soldiers: 4, generalIds: [] };
@@ -3016,6 +3314,7 @@ describe("online world platform service", () => {
       expect(state).toMatchObject({ status: "degraded", initialized: true, loadProgress: { phase: "complete", active: false } });
       expect(state.error).toContain("等待同步");
       expect(reader.pollTimer).not.toBeNull();
+      expect(reader.pendingCommentRetirements).toEqual(seed.pendingCommentRetirements);
       expect(reader.pendingIntentTransaction.lastPublishError).toMatchObject({ code: "PLATFORM_RATE_LIMITED", status: 429 });
       const transactionId = reader.pendingIntentTransaction.transactionId;
       const beforePoll = posts;
@@ -3075,6 +3374,8 @@ describe("online world platform service", () => {
     restarted.requestConsole = transport;
     restarted.reconcilePendingPublication(extractCommentItems({ data: roots }));
     expect(restarted.pendingIntentTransaction.publication.sources.filter(Boolean)).toHaveLength(lostPart + 1);
+    restarted.now = () => fixture.base + 12_000;
+    restarted.readAllCommentSources = vi.fn(async () => extractCommentItems({ data: roots }));
     await restarted.retryPendingIntentTransactionPublish();
     const chunks = encodeCommentRecord(saved.publication.record);
     expect(chunks.length).toBeGreaterThan(3);
@@ -3085,6 +3386,55 @@ describe("online world platform service", () => {
     expect(assembled.records[0].record.participant.displayName).toBe("original");
     expect(restarted.resolvePendingIntentTransaction()).toBe(true);
     expect(restarted.world.cells["2,2"].soldiers).toBe(5);
+  });
+
+  it("waits for a second independent cloud read before retrying an ambiguous root write", async () => {
+    const identity = generateOnlineWorldIdentity();
+    let now = 2_000_000;
+    let loseFirstResponse = true;
+    let sequence = 0;
+    const roots: any[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      now: () => now,
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        const source = { id: `cloud-${++sequence}`, account_id: "player", created_at: now, ...options.body };
+        if (options.body.parent_id) roots.find(root => root.id === options.body.parent_id).children.push(source);
+        else roots.push({ ...source, children: [] });
+        if (loseFirstResponse) {
+          loseFirstResponse = false;
+          throw Object.assign(new Error("response lost after platform accepted root"), { code: "PLATFORM_TIMEOUT" });
+        }
+        return source;
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season", startedAt: 1_000_000 });
+    instance.world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 1000, fieldArmySoldiers: 0,
+      carriedGeneralIds: ["g1"], position: { x: 1, y: 1 }
+    };
+    instance.world.privatePlayers.player = {};
+    instance.world.cells["1,1"] = { ownerAccountId: "player", soldiers: 10, generalIds: [] };
+    instance.world.generals.g1 = createFallbackGeneral({ id: "g1", name: "试将", holderAccountId: "player", power: 300 });
+
+    expect((await instance.submitIntent({ type: "deploy-general", generalId: "g1", idempotencyKey: "ambiguous-deploy" })).pendingSync).toBe(true);
+    expect(roots).toHaveLength(1);
+    await expect(instance.retryPendingIntentTransactionPublish()).rejects.toMatchObject({ code: "FYOW_PUBLICATION_RECHECK_PENDING" });
+    expect(roots).toHaveLength(1);
+    expect(instance.world.generals.g1.status).toBe("deployed");
+
+    now += 2_000;
+    const fullRead = vi.fn(async () => extractCommentItems({ data: roots }));
+    instance.readAllCommentSources = fullRead;
+    await instance.retryPendingIntentTransactionPublish();
+    expect(fullRead).toHaveBeenCalledWith(expect.objectContaining({
+      includeAllBranches: true, strictBranches: true, requireStable: true, fresh: true
+    }));
+    expect(roots).toHaveLength(1);
+    expect(instance.pendingIntentTransaction).toMatchObject({ phase: "published" });
   });
 
   it.each(["journal", "legacy"])("resumes %s successful chunks after an explicit failure without creating a second root", async mode => {

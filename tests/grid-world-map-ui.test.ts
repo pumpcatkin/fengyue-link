@@ -242,6 +242,12 @@ describe("grid world map task overlays", () => {
     expect(css).toMatch(/\.area-facts \.power-crest\s*\{[^}]*grid-column:\s*1 \/ -1/);
   });
 
+  it("distinguishes a locally saved action that is still waiting for cloud sync", () => {
+    expect(source).toContain('if (result?.pendingSync) return "notice"');
+    expect(source).toContain('`${deployedName}的部署已保存在本机，正在同步`');
+    expect(source).toContain('event.data.result.pendingSyncMessage || "行动已保存在本机，正在同步"');
+  });
+
   it("uses the same medicine names as the rules proxy", () => {
     for (const label of ["养气丹", "聚灵丹", "凝元丹", "紫府丹", "金髓丹", "赤曜丹"]) {
       expect(source).toContain(label);

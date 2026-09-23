@@ -121,6 +121,7 @@
           <section class="panel player-panel">
             <header><span><small>慧眼之主</small><b id="player-name">尚未加入</b></span><strong id="gold">0 金币</strong></header>
             <button id="edit-preferences" class="preference-button" type="button">修改性癖偏好</button>
+            <button id="open-game-settings" class="game-settings-button" type="button">游戏设置</button>
             <div class="metrics"><span><small>自身战力</small><b id="player-power">0</b></span><span><small>领地</small><b id="territories">0</b></span><span><small>总兵力</small><b id="soldiers">0</b></span><span><small>所在坐标</small><b id="position">—</b></span></div>
           </section>
 
@@ -219,6 +220,19 @@
         <div id="preference-tag-options" class="tag-options"></div>
         <footer><span id="preferences-save-status" class="preferences-save-status" role="status" aria-live="polite"></span><button id="save-preferences" class="primary" type="button">保存偏好</button></footer>
       </form>
+    </section>
+
+    <section id="game-settings-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="game-settings-title">
+      <article class="paper-modal game-settings-modal">
+        <header><span><small>当前账号</small><h1 id="game-settings-title">游戏设置</h1></span><button id="close-game-settings" type="button">关闭</button></header>
+        <section class="settings-danger-block">
+          <h2>重置当前账号</h2>
+          <p>这将抹除该账号的所有数据与记录，你的将领将会游荡在世界各处，确定删除吗？</p>
+          <label>请输入“确认删除”<input id="reset-account-confirmation" type="text" maxlength="4" autocomplete="off" placeholder="确认删除"></label>
+          <small id="reset-account-status" class="preferences-save-status" role="status" aria-live="polite"></small>
+          <button id="reset-account-button" class="danger" type="button">确认删除账号数据</button>
+        </section>
+      </article>
     </section>
 
     <section id="general-modal" class="overlay hidden" role="dialog" aria-modal="true">

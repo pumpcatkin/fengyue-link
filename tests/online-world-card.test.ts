@@ -78,7 +78,8 @@ describe("online world game cards", () => {
     expect(card.companion.configuration.world_book[1].value).toContain("禁止出现未提供");
     expect(card.companion.configuration.world_book[2].value).toContain("recipientKey");
     expect(card.companion.configuration.world_book[3].value).toContain("不得输出其他游戏操作或任何账号编号");
-    expect(card.companion.configuration.world_book[4].value).toContain("不得改写或遗漏");
+    expect(card.companion.configuration.world_book[4].value).toContain("150字符");
+    expect(card.companion.configuration.world_book[4].value).toContain("完整履历由结构化字段保留");
     expect(card.companion.configuration.world_book[5].value).toContain("interactionHistory");
     expect(card.companion.configuration.world_book[6].value).toContain("changeNote");
   });

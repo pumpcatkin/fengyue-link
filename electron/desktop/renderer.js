@@ -1519,7 +1519,7 @@ window.addEventListener("message",async event=>{
     try{
       const next=await api.syncOnlineWorld(false);
       renderOnlineWorld(next);
-      if(next?.status!=="ready")throw new Error(next?.error||"连接暂未恢复，请稍后重试");
+      if(!["ready","pending-sync"].includes(next?.status))throw new Error(next?.error||"连接暂未恢复，请稍后重试");
       replyResult({reconnected:true,state:next});
     }catch(error){replyError(error)}
     return;
@@ -1546,6 +1546,12 @@ window.addEventListener("message",async event=>{
         const result=await api.administerOnlineWorld({type:"scatter-treasures",count,redAscend,redReroll});
         if(result?.state)renderOnlineWorld(result.state);
         replyResult({...result,admin:true});toast("宝物已重新散落");return;
+      }
+      if(command.type==="balance-update"){
+        if(!await confirmAction("将这些平衡设置应用到本局全体玩家？已经开始的行动保留原定耗时和费用。",{title:"保存全局平衡",acceptText:"保存并同步"})){replyResult({cancelled:true});return}
+        const result=await api.administerOnlineWorld({type:"balance-update",balance:command.balance});
+        if(result?.state)renderOnlineWorld(result.state);
+        replyResult({...result,admin:true});toast("全局平衡设置已同步");return;
       }
       if(command.type==="simulate-player-intent"){
         const target=onlineWorldState?.world?.players?.[command.targetAccountId];

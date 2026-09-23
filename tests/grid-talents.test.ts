@@ -3,8 +3,59 @@ import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
 const talents = require("../electron/grid-talents.cjs");
+const game = require("../electron/grid-world-game.cjs");
 
 describe("grid talent catalog", () => {
+  it("reaches every talent effect through the real game's source and cell resolver", () => {
+    const world = game.createWorld({ seed: "talent-audit", seasonId: "audit", authorityAccountId: "a", startedAt: 1 });
+    const cells: any[] = [];
+    for (let y = 1; y < 63; y += 1) for (let x = 1; x < 63; x += 1) cells.push(game.staticCell(world.seed, x, y));
+    const grades = game.RESOURCE_GRADES;
+    for (const definition of talents.TALENT_CATALOG) for (const [effectIndex, effect] of definition.effects.entries()) {
+      const candidate = cells.find(cell => effect.when.every((condition: any) => {
+        switch (condition.op) {
+          case "terrain-in": return condition.values.includes(cell.terrain);
+          case "resource-rank-gte": return cell.resourceRank >= grades.indexOf(condition.value);
+          case "resource-rank-lte": return cell.resourceRank <= grades.indexOf(condition.value);
+          case "population-gte": return cell.population >= condition.value;
+          case "population-lte": return cell.population <= condition.value;
+          default: return true;
+        }
+      }));
+      expect(candidate, definition.id).toBeDefined();
+      let owner: string | null = effect.scope === "neighbor-hostile" ? "enemy" : "a";
+      let armySize = 1000, hour = 12, attacking = false, discoveryKind = "";
+      for (const condition of effect.when) {
+        if (condition.op === "neutral-is") owner = condition.value ? null : owner;
+        if (condition.op === "army-size-gte" || condition.op === "army-size-lte") armySize = condition.value;
+        if (condition.op === "hour-between") hour = condition.start;
+        if (condition.op === "attacking-is") attacking = condition.value;
+        if (condition.op === "discovery-kind-is") discoveryKind = condition.value;
+      }
+      const location = effect.scope === "own-tile" ? { x: candidate.x, y: candidate.y } : { x: candidate.x - 1, y: candidate.y };
+      world.cells = { [`${candidate.x},${candidate.y}`]: { ownerAccountId: owner, soldiers: 0, generalIds: [], occupationCount: 0 } };
+      world.players = { a: { accountId: "a", carriedGeneralIds: ["g"] } };
+      world.generals = { g: {
+        id: "g", holderAccountId: effect.scope === "enemy-neighbor" ? "enemy" : "a",
+        status: effect.scope === "carried" ? "carried" : "deployed", location,
+        talent: talents.normalizeTalent({ instanceId: "g", talentId: definition.id, progress: 1000 })
+      } };
+      const options = { carriedGeneralIds: ["g"], armySize, attacking, discoveryKind,
+        now: Date.parse("2026-09-23T00:00:00+08:00") + hour * 3600000 };
+      const result = game.actionTalentModifiers(world, "a", effect.action, candidate, options);
+      expect(result.applied.some((item: any) => item.talentId === definition.id && item.effectIndex === effectIndex),
+        `${definition.id}#${effectIndex}`).toBe(true);
+      expect(game.actionTalentModifiers(world, "a", "unrelated", candidate, options).applied).toEqual([]);
+    }
+  });
+
+  it("uses Beijing wall time and explains conditional talent requirements", () => {
+    const context = { action: "march", actorAccountId: "a", position: { x: 1, y: 1 }, cell: {},
+      talent: { instanceId: "night", talentId: "night-march", progress: 0 }, status: "carried" };
+    expect(talents.talentModifiers({}, { ...context, now: Date.parse("2026-09-23T12:00:00Z") }).marchDuration).toBeLessThan(0);
+    expect(talents.talentModifiers({}, { ...context, now: Date.parse("2026-09-23T04:00:00Z") }).marchDuration).toBe(0);
+    expect(talents.describeTalent(context.talent)).toContain("北京时间20:00至5:59");
+  });
   it("contains 100+ semantically distinct definitions with one talent per general", () => {
     expect(talents.TALENT_CATALOG.length).toBeGreaterThanOrEqual(100);
     expect(new Set(talents.TALENT_CATALOG.map((item: any) => item.id)).size).toBe(talents.TALENT_CATALOG.length);

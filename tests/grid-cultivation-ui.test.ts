@@ -12,7 +12,7 @@ function harness() {
     addEventListener(event: string, callback: () => void) { this.listeners[event] = callback; }
   });
   for (const id of ["training-target", "training-preview", "start-power-training", "cultivation-material-field", "training-level",
-    "cultivation-gold", "cultivation-material", "connection-retry", "connection-notice"]) labels[`#${id}`] = node();
+    "cultivation-gold", "cultivation-material", "connection-retry", "connection-notice", "connection-message"]) labels[`#${id}`] = node();
   labels["#training-target"].value = "general:g";
   labels["#cultivation-material"].value = "white";
   const quote: any = { attempt: 1, remaining: 5, goldMin: 500, goldMax: 8000, experience: 100, experienceRequired: 100, experienceReady: true, modifiers: { cultivationCost: -0.2 } };
@@ -21,7 +21,8 @@ function harness() {
     document: { querySelector: (id: string) => labels[id], createElement: node },
     powerTrainingTargets: () => [target], renderMaterials() {}, hostTime: () => 1000,
     ownPlayer: () => ({ gold: 100_000, materials: { white: 10 } }), formatNumber: (value: any) => String(value),
-    formatDuration: String, sendIntent: vi.fn(), host: vi.fn(), pendingHostKeys: new Map(), payload: { status: "degraded" }
+    formatDuration: String, sendIntent: vi.fn(), host: vi.fn(), showToast: vi.fn(), playSound: vi.fn(),
+    pendingHostKeys: new Map(), payload: { status: "degraded" }
   };
   runInNewContext(source.slice(source.indexOf("function generalExperienceLabel("), source.indexOf("function battleReportMarker("))
     + source.slice(source.indexOf("function renderPowerTraining()"), source.indexOf("function marchAvailable()"))
@@ -96,5 +97,16 @@ describe("cultivation controls", () => {
     context.renderConnectionNotice();
     expect(labels["#connection-notice"].classList.toggle).toHaveBeenLastCalledWith("hidden", true);
     expect(labels["#connection-retry"].disabled).toBe(false);
+  });
+
+  it("shows the platform cooldown and does not immediately repeat a throttled write", () => {
+    const { context, labels } = harness();
+    context.payload = { status: "pending-sync", pendingSync: { rateLimited: true, retryAt: 31_000 } };
+    context.renderConnectionNotice();
+    expect(labels["#connection-message"].textContent).toContain("30 秒后自动重试");
+    expect(labels["#connection-retry"].textContent).toBe("30秒");
+    labels["#connection-retry"].listeners.click();
+    expect(context.host).not.toHaveBeenCalled();
+    expect(context.showToast).toHaveBeenCalledWith("平台正在冷却，30 秒后将自动重试");
   });
 });

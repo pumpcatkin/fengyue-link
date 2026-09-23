@@ -635,7 +635,7 @@ describe("grid conquest rules", () => {
     const publicState = game.projectWorldState(state, null);
     expect(publicState.generals.deployed).toMatchObject({ name: "守城将", setting: "公开的守城设定。", power: 700, status: "deployed" });
     expect(publicState.generals.deployed.memoryText).toBe("仅本人可见的交谈记忆。");
-    expect(publicState.generals.deployed.memory).toEqual({ intimacy: { a: 9 } });
+    expect(publicState.generals.deployed.memory).toEqual({ entries: [], intimacy: { a: 9 } });
     const ownState = game.projectWorldState(state, "a");
     expect(ownState.generals.deployed.memoryText).toBe("仅本人可见的交谈记忆。");
   });

@@ -120,6 +120,7 @@ function ownPlayer() {
   return players[id] || Object.values(players).find(player => String(player?.accountId || "") === id) || null;
 }
 function allGenerals() { return payload?.world?.generals || {}; }
+function balanceValue(key, fallback) { return payload?.world?.balance?.[key] ?? fallback; }
 function pendingGeneralDiscoveries() { return payload?.world?.privatePlayers?.[ownAccountId()]?.pendingGeneralDiscoveries || []; }
 function battleReports() {
   return [...(payload?.world?.privatePlayers?.[ownAccountId()]?.battleReports || [])]
@@ -689,7 +690,7 @@ function localMarchPath(from, to, attack = false) {
       const nextKey = routeKey(next);
       const owner = dynamicCell(next.x, next.y).ownerAccountId;
       if (owner && String(owner) !== accountId && !(attack && nextKey === targetKey)) continue;
-      const weightQuarters = current.weightQuarters + (String(owner || "") === accountId ? 1 : 4);
+      const weightQuarters = current.weightQuarters + (String(owner || "") === accountId ? balanceValue("ownMarchRatio", .25) * 4 : 4);
       const steps = current.steps + 1;
       const prior = best.get(nextKey);
       if (prior && (prior.weightQuarters < weightQuarters
@@ -713,7 +714,7 @@ function localMarchRouteBreakdown(path) {
   const accountId = ownAccountId();
   const ownDistance = path.filter(point => String(dynamicCell(point.x, point.y).ownerAccountId || "") === accountId).length;
   const ordinaryDistance = path.length - ownDistance;
-  const weightQuarters = ownDistance + ordinaryDistance * 4;
+  const weightQuarters = ownDistance * balanceValue("ownMarchRatio", .25) * 4 + ordinaryDistance * 4;
   return { ownDistance, ordinaryDistance, weightQuarters, weightedDistance: weightQuarters / 4 };
 }
 function marchMapRoute(from, to, options = {}) {
@@ -722,7 +723,7 @@ function marchMapRoute(from, to, options = {}) {
   if (!path) return null;
   const breakdown = localMarchRouteBreakdown(path);
   const points = [{ x: from.x + .5, y: from.y + .5 }, ...path.map(point => ({ x: point.x + .5, y: point.y + .5 }))];
-  return { from, to, path, points, distance: path.length, ...breakdown, durationMs: breakdown.weightQuarters * 15000 / 4 };
+  return { from, to, path, points, distance: path.length, ...breakdown, durationMs: breakdown.weightQuarters * balanceValue("marchSeconds", 15) * 1000 / 4 };
 }
 function marchDraftValue() {
   return Math.max(0, Math.trunc(Number(ownPlayer()?.fieldArmySoldiers) || 0));
@@ -747,7 +748,7 @@ function selectedMarchQuote(route, target = marchTarget()) {
   const soldiers = marchDraftValue();
   const generalCount = new Set((ownPlayer()?.carriedGeneralIds || []).map(String)).size;
   const modifiers = ownPlayer()?.marchModifiers || {};
-  const baseCostPerCell = 1 + Math.ceil(soldiers / 10) + generalCount * 2;
+  const baseCostPerCell = balanceValue("marchBaseGold", 1) + Math.ceil(soldiers / balanceValue("marchSoldiersPerGold", 10)) + generalCount * balanceValue("marchGeneralGold", 2);
   const baseCost = Math.ceil(Number(route.weightQuarters || route.distance * 4) * baseCostPerCell / 4);
   const cost = Math.max(1, Math.round(baseCost * Number(modifiers.costMultiplier ?? 1)));
   return { cost, durationMs: Math.max(1000, Math.round(route.durationMs * Number(modifiers.durationMultiplier ?? 1))) };
@@ -1737,7 +1738,7 @@ function trainingGoldCost(amountValue, cell, remainingValue) {
     : requested;
   if (!amount) return 0;
   const multiplier = Number(cell?.trainingCostMultiplier);
-  return Math.max(1, Math.round(amount * 2 * (Number.isFinite(multiplier) ? multiplier : 1)));
+  return Math.max(1, Math.round(amount * balanceValue("trainingSoldierGold", 2) * (Number.isFinite(multiplier) ? multiplier : 1)));
 }
 function renderTrainingCost(value = document.querySelector("#train-amount")?.value) {
   const cell = selected ? dynamicCell(selected.x, selected.y) : null;
@@ -1840,7 +1841,7 @@ function renderCell() {
   document.querySelector("#map-actions-coordinate").textContent = selected ? `${selected.x}, ${selected.y}` : "—";
   const miningButton = document.querySelector("#start-mining");
   const miningCooldown = document.querySelector("#mining-cooldown");
-  miningButton.disabled = !player || !mine || activeTerritoryJob || miningCoolingDown || activeMiningCount >= 3;
+  miningButton.disabled = !player || !mine || activeTerritoryJob || miningCoolingDown || activeMiningCount >= balanceValue("miningConcurrent", 3);
   miningButton.textContent = "开采资源";
   if (miningCoolingDown) {
     miningCooldown.dataset.cooldownUntil = String(miningCooldownUntil);
@@ -2072,6 +2073,38 @@ function fillOwnerPlayerSelect(selector, entries) {
   }
   if (entries.some(item => item.accountId === previous)) select.value = previous;
   select.disabled = !entries.length;
+}
+
+function renderBalanceEditor() {
+  const target = document.querySelector("#owner-balance-fields");
+  target.replaceChildren();
+  const groups = new Map();
+  for (const field of payload?.balanceFields || []) {
+    if (!groups.has(field.group)) {
+      const details = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = field.group;
+      details.append(summary);
+      const group = document.createElement("div");
+      group.className = "balance-group";
+      details.append(group);
+      target.append(details);
+      groups.set(field.group, group);
+    }
+    const label = document.createElement("label");
+    const caption = document.createElement("span");
+    caption.textContent = field.label;
+    const input = document.createElement("input");
+    input.name = field.key;
+    input.type = field.type;
+    input.required = true;
+    if (field.type === "number") {
+      input.min = field.min; input.max = field.max; input.step = field.step;
+    }
+    input.value = balanceValue(field.key, field.value);
+    label.append(caption, input);
+    groups.get(field.group).append(label);
+  }
 }
 
 function renderOwnerCommands() {
@@ -2495,12 +2528,22 @@ function openDialogue(id) {
 
 function renderConnectionNotice() {
   const notice = document.querySelector("#connection-notice");
+  const message = document.querySelector("#connection-message");
   const button = document.querySelector("#connection-retry");
   const retrying = pendingHostKeys.has("sync");
-  notice.classList.toggle("hidden", !["degraded", "error"].includes(payload?.status) && !retrying);
+  const pendingSync = payload?.pendingSync;
+  const retryAfterMs = Math.max(0, Number(pendingSync?.retryAt || 0) - hostTime());
+  const coolingDown = Boolean(pendingSync?.rateLimited && retryAfterMs > 0);
+  notice.classList.toggle("hidden", !["pending-sync", "degraded", "error"].includes(payload?.status) && !retrying);
+  message.textContent = pendingSync
+    ? coolingDown
+      ? `请求过于频繁，行动已保存在本机，${Math.ceil(retryAfterMs / 1000)} 秒后自动重试。`
+      : "行动已保存在本机，正在自动同步。"
+    : "连接中断，暂时无法操作。恢复后即可继续。";
   button.disabled = retrying;
-  button.textContent = retrying ? "重试中" : "重试";
+  button.textContent = retrying ? "重试中" : coolingDown ? `${Math.ceil(retryAfterMs / 1000)}秒` : "重试";
   button.setAttribute("aria-busy", String(retrying));
+  button.dataset.retryAt = coolingDown ? String(pendingSync.retryAt) : "";
 }
 function renderAll() {
   renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); renderMarket(); renderBattleReports(); draw();
@@ -2568,7 +2611,7 @@ function renderTagEditor(target, tags, referenceTarget = null) {
       const title = document.createElement("b"); title.textContent = tag;
       const input = document.createElement("input"); input.type = "text"; input.maxLength = 160; input.placeholder = "给这个标签添加注释（可选）"; input.value = note;
       input.addEventListener("input", () => tags.set(tag, input.value.trim().slice(0, 160)));
-      const remove = makeButton("移除", () => { tags.delete(tag); renderTagEditor(target, tags, referenceTarget); if (referenceTarget) renderReferenceTags(referenceTarget, tags); });
+      const remove = makeButton("移除", () => { tags.delete(tag); renderTagEditor(target, tags, referenceTarget); });
       row.append(title, input, remove); target.append(row);
     }
   }
@@ -2609,7 +2652,7 @@ function renderJoinWizard() {
   const questions = [
     ["第一问 · 1 / 4", "选择角色设定作为游戏角色？", "绑定后无法修改。"],
     ["第二问 · 2 / 4", "选择性取向", "这会影响游戏内发现的将领性别。"],
-    ["第三问 · 3 / 4", "添加标签", "请填写自己的性癖。标签大全仅供参考；每次发掘将领时会从你的标签中抽取 1～3 个方向。"],
+    ["第三问 · 3 / 4", "添加标签", "每次发掘将领时，会从你选择的标签中随机抽取 2～6 个方向。"],
     ["第四问 · 4 / 4", "开疆扩土前，你会想要遇到一名怎样的良将？", "此题脱离词条，只保留性取向，并直接生成你的初始将领。"],
     ["初始将领 · 确认", "查看你的初始将领", "可以再次抽取，也可以自由编辑这份初始设定；点击确定进入游戏后便永久锁定。"]
   ];
@@ -2960,7 +3003,24 @@ document.querySelector("#general-discovery-confirm").addEventListener("click", (
     renderGeneralDiscoveryPrompt();
   }
 });
-document.querySelector("#owner-command-toggle").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.remove("hidden"));
+document.querySelector("#clear-join-tags").addEventListener("click", () => { joinDraft.tags.clear(); renderTagOptions(); });
+document.querySelector("#clear-preference-tags").addEventListener("click", () => { preferenceDraft.tags.clear(); renderPreferenceTags(); });
+document.querySelector("#owner-command-toggle").addEventListener("click", () => {
+  renderBalanceEditor();
+  document.querySelector("#owner-command-modal").classList.remove("hidden");
+});
+document.querySelector("#owner-balance-form").addEventListener("submit", event => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const balance = {};
+  for (const field of payload?.balanceFields || []) {
+    const input = event.currentTarget.elements.namedItem(field.key);
+    balance[field.key] = field.type === "number" ? Number(input.value) : input.value;
+  }
+  host("admin", { command: { type: "balance-update", balance } }, {
+    expectResult: true, key: "admin:balance-update", control: document.querySelector("#owner-balance-save")
+  });
+});
 document.querySelector("#close-owner-command").addEventListener("click", () => document.querySelector("#owner-command-modal").classList.add("hidden"));
 document.querySelector("#owner-ban-player").addEventListener("change", renderOwnerCommands);
 document.querySelector("#owner-simulate-player").addEventListener("change", renderOwnerCommands);
@@ -3032,6 +3092,13 @@ document.querySelector("#start-power-training").addEventListener("click", () => 
 });
 document.querySelector("#connection-retry").addEventListener("click", () => {
   if (pendingHostKeys.has("sync")) return;
+  const retryAt = Number(payload?.pendingSync?.retryAt || 0);
+  const retryAfterMs = Math.max(0, retryAt - hostTime());
+  if (payload?.pendingSync?.rateLimited && retryAfterMs > 0) {
+    showToast(`平台正在冷却，${Math.ceil(retryAfterMs / 1000)} 秒后将自动重试`);
+    playSound("notice");
+    return;
+  }
   host("sync", {}, { expectResult: true, key: "sync", control: document.querySelector("#connection-retry"), timeoutMs: 120000 });
   renderConnectionNotice();
 });
@@ -3330,6 +3397,7 @@ window.addEventListener("message", event => {
 
 setInterval(() => {
   renderClock();
+  renderConnectionNotice();
   const now = hostTime();
   document.querySelectorAll("[data-finish]").forEach(node => { node.textContent = formatDuration(Number(node.dataset.finish) - now); });
   const miningCooldown = document.querySelector("#mining-cooldown");

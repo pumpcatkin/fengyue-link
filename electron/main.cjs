@@ -3050,23 +3050,28 @@ class AccountBackend {
             readOptional('/console/api/account/' + encodeURIComponent(accountId) + '/personal-profile')
           ]);
         }
-        const username = profile.username ?? profile.user_name ?? profile.account_name ?? profile.name ?? profile.nickname ?? profile.email ?? null;
-        const email = profile.email ?? profile.mail ?? profile.account_email ?? profile.accountEmail ?? (/^[^@\\s]+@[^@\\s]+$/.test(String(username || "")) ? username : null);
-        const guestName = /^(guest|游客)$/i.test(String(username || '').trim());
+        const rawUsername = profile.username ?? profile.user_name ?? profile.account_name ?? profile.name ?? profile.nickname ?? null;
+        const rawEmail = profile.email ?? profile.mail ?? profile.account_email ?? profile.accountEmail ?? (/^[^@\\s]+@[^@\\s]+$/.test(String(rawUsername || "")) ? rawUsername : null);
+        const emailLikeUsername = /^[^@\\s]+@[^@\\s]+$/.test(String(rawUsername || "").trim());
+        const guestName = /^(guest|游客)$/i.test(String(rawUsername || '').trim());
         // The unauthenticated profile endpoint can return a Guest/trial
         // profile with HTTP 200. Treat it as logged out rather than as a real
         // account session.
         if (trialAccount || guestName || !accountIdText) {
           return { authenticated:false, reason: trialAccount || guestName ? 'guest-account' : 'missing-account-id' };
         }
+        const publicUsername = !emailLikeUsername && String(rawUsername || "").trim()
+          ? String(rawUsername).trim()
+          : '玩家-' + accountIdText.slice(-8);
         const rawPoints = point.points ?? point.point ?? point.balance ?? profile.points ?? null;
         const personal = personalProfile?.personal_profile ?? personalProfile?.profile ?? personalProfile;
         const rawLevel = personal?.level_info?.current_level ?? personal?.current_level ?? profile?.level_info?.current_level ?? profile?.current_level ?? profile?.level ?? null;
         return {
           authenticated:true,
           accountId: accountIdText,
-          username: username == null ? null : String(username),
-          email: email == null ? null : String(email).trim().toLocaleLowerCase(),
+          username: publicUsername,
+          displayName: publicUsername,
+          email: rawEmail == null ? null : String(rawEmail).trim().toLocaleLowerCase(),
           points: rawPoints == null ? null : String(rawPoints),
           level: rawLevel == null || !Number.isFinite(Number(rawLevel)) ? null : Number(rawLevel)
         };

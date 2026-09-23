@@ -12,6 +12,8 @@ const { assembleCommentRecords, encodeCommentRecord, extractCommentItems, signRe
 const { createWorld, createFallbackGeneral, applyIntent, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
 const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
+const { normalizeBalance } = require("../electron/grid-balance.cjs");
+const { dailyRedTreasureBatch } = require("../electron/grid-world-game.cjs");
 
 const completePersona = "慧眼之主出身边境商旅之家，熟悉乱世中的人情与资源流向。性格沉稳果断，重视承诺，也愿意倾听不同立场；志在建立能让追随者安身的领地，擅长观察人才、统筹物资与化解内部矛盾。面对强敌时谨慎布局，缺点是对亲近之人过度保护，偶尔会独自承担风险。立场上珍视忠诚与互惠，但不会容忍背叛。";
 const completeAppearance = "一头柔软白发衬着醒目的猫耳，浅色眼眸在思考时显得专注。身形轻盈而挺拔，惯穿便于行动的深色短装与披风，腰间带着记录地图和物资的皮袋，整体气质安静、敏锐又带有亲和力。";
@@ -108,6 +110,106 @@ function coverageHarness(workId = "work") {
 }
 
 describe("online world platform service", () => {
+  it("publishes signed balance settings that a fresh player reads from the cloud", async () => {
+    const fixture = coverageHarness();
+    fixture.author.retireBalanceDirectives = vi.fn(async () => ({ deleted: 0 }));
+    const balance = normalizeBalance({ marchSeconds: 7, trainingDiscoveryPity: 50, dailyRedTime: "19:15" });
+    await fixture.author.administerNow({ type: "balance-update", balance });
+    expect(fixture.author.world.balance).toEqual(balance);
+    expect(fixture.author.retireBalanceDirectives).toHaveBeenCalledOnce();
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.world.balance).toEqual(balance);
+    expect(reader.state().balanceFields).toEqual([]);
+    expect(fixture.author.state().balanceFields.length).toBeGreaterThan(70);
+    await expect(reader.administerNow({ type: "balance-update", balance })).rejects.toThrow("作者");
+    await expect(fixture.author.administerNow({ type: "balance-update", balance: { marchSeconds: -5 } })).rejects.toThrow();
+  });
+
+  it("retires only author directives covered by a confirmed replacement snapshot", async () => {
+    const fixture = coverageHarness();
+    const make = (id: string, type: string, extra: any = {}) => signRecord({
+      schema: "fyow.authority/1", authorityId: id, gameId: fixture.author.world.gameId,
+      workId: "work", seasonId: "season", authorityAccountId: "author", type,
+      issuedAt: fixture.base + 20, ...extra
+    }, fixture.identities.author.signingPrivateKey);
+    const old = fixture.append(make("old-balance", "balance-update", { balance: normalizeBalance() }), "author", fixture.base + 20);
+    const ban = fixture.append(make("ban", "player-ban", { targetAccountId: "player" }), "author", fixture.base + 30);
+    const latest = fixture.append(make("new-balance", "balance-update", { balance: normalizeBalance({ marchSeconds: 8 }) }), "author", fixture.base + 50);
+    const uncovered = fixture.append(make("uncovered", "player-unban", { targetAccountId: "player" }), "author", fixture.base + 40);
+    const snapshot = fixture.snapshot(fixture.author.world, 60, {
+      version: 1, through: recordPlatformOrder(ban), appliedAuthorityIds: ["old-balance", "ban"]
+    });
+    const all = extractCommentItems({ data: fixture.roots });
+    fixture.author.readAllCommentSources = vi.fn(async () => all);
+    fixture.author.commentOperations.deleteMany = vi.fn(async () => ({ deletedCommentIds: [] }));
+    await fixture.author.deleteSupersededBalanceDirectives(latest.record, snapshot.record);
+    const deletedSources = fixture.author.commentOperations.deleteMany.mock.calls.flatMap((call: any) => call[0].sources);
+    expect(deletedSources.length).toBeGreaterThan(0);
+    expect(deletedSources.every((source: any) => old.sources.some((s: any) => s.id === source.id)
+      || ban.sources.some((s: any) => s.id === source.id))).toBe(true);
+    expect(deletedSources.map((source: any) => source.id)).not.toContain(old.root.id);
+    expect(deletedSources.some((source: any) => uncovered.sources.some((s: any) => s.id === source.id))).toBe(false);
+    fixture.author.readAllCommentSources = vi.fn(async () => old.sources);
+    await expect(fixture.author.deleteSupersededBalanceDirectives(latest.record, snapshot.record)).rejects.toThrow("旧指令已保留");
+  });
+
+  it("accepts one signed additive daily red batch and persists its date through snapshots", async () => {
+    const fixture = coverageHarness();
+    const author = fixture.author;
+    author.world.balance.dailyRedTime = "00:00";
+    const batch = dailyRedTreasureBatch(author.world, fixture.base + 10_000);
+    const record = signRecord({
+      schema: "fyow.authority/1", authorityId: `red:${batch.day}`, gameId: author.world.gameId,
+      workId: "work", seasonId: "season", authorityAccountId: "author",
+      type: "daily-red-spawn", ...batch, issuedAt: fixture.base + 20
+    }, fixture.identities.author.signingPrivateKey);
+    const item = fixture.append(record, "author", fixture.base + 20);
+    expect(author.applyAuthorityDirective(item)).toBe(true);
+    expect(author.world.treasureSpawns.old).toBeDefined();
+    expect(author.applyAuthorityDirective(item)).toBe(false);
+    expect(author.world.dailyRedDates).toEqual([batch.day]);
+    const duplicate = fixture.append(signRecord({ ...record, authorityId: "other-id" }, fixture.identities.author.signingPrivateKey), "author", fixture.base + 25);
+    expect(author.applyAuthorityDirective(duplicate)).toBe(false);
+    fixture.snapshot(author.world, 50, {
+      version: 1, through: recordPlatformOrder(item), appliedAuthorityIds: [...author.appliedAuthorityIds]
+    });
+    const reader = fixture.create("player");
+    await reader.sync(true);
+    expect(reader.world.dailyRedDates).toEqual([batch.day]);
+    expect(Object.keys(reader.world.treasureSpawns)).toHaveLength(1 + Object.keys(batch.treasureSpawns).length);
+  });
+  it("keeps an email-like platform username out of the game account projection", () => {
+    const instance: any = service({
+      getAccount: () => ({
+        accountId: "account-12345678",
+        username: "player@example.com",
+        email: "player@example.com",
+        token: "secret-token"
+      })
+    });
+    expect(instance.account()).toEqual({
+      accountId: "account-12345678",
+      username: "玩家-12345678",
+      displayName: "玩家-12345678",
+      points: null
+    });
+    expect(instance.state().account).not.toHaveProperty("email");
+    expect(instance.state().account).not.toHaveProperty("token");
+  });
+
+  it("preserves a real public nickname while ignoring a private email field", () => {
+    const instance: any = service({
+      getAccount: () => ({
+        accountId: "account-1",
+        username: "茂密",
+        email: "private@example.com"
+      })
+    });
+    expect(instance.account().username).toBe("茂密");
+    expect(instance.state().account.username).toBe("茂密");
+  });
+
   it("removes a seller-owned market general even when the cached listing id is missing", () => {
     const instance: any = service({ getAccount: () => ({ accountId: "seller" }) });
     instance.world = {
@@ -3119,7 +3221,9 @@ describe("online world platform service", () => {
     await reopened.sync(true);
     expect(reopened.world.generals.guard).toMatchObject({ status: "carried", location: null });
     expect(reopened.world.players.player.carriedGeneralIds).toContain("guard");
-    expect(reopened.world.generals.guard.interactionHistory).toContainEqual({ role: "assistant", content: "云端对话" });
+    expect(reopened.world.generals.guard.interactionHistory).toEqual([]);
+    expect(reopened.world.generals.guard.memoryText.length).toBeLessThanOrEqual(150);
+    expect(reader.world.generals.guard.interactionHistory).toContainEqual({ role: "user", content: "本地对话" });
   });
 
   it("does not infer recalls from foreign tombstones or cells that still contain the general", () => {
@@ -3261,7 +3365,7 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
     expect(instance.world.jobs.march).toBeUndefined();
     expect(instance.pendingIntentTransaction).toMatchObject({ phase: "prepared", intentType: "time-settle" });
-    expect(instance.status).toBe("degraded");
+    expect(instance.status).toBe("pending-sync");
     const transactionId = instance.pendingIntentTransaction.transactionId;
     expect(instance.resolvePendingIntentTransaction()).toBe(false);
     expect(instance.world.players.player.position).toEqual({ x: 2, y: 1 });
@@ -3271,7 +3375,7 @@ describe("online world platform service", () => {
     instance.readHistory = vi.fn(async () => ({ assembled: { records: [] } }));
     instance.readWorldChatHistory = vi.fn(async () => ({ assembled: { records: [] } }));
     instance.receiveDirectWakes = vi.fn(async () => []);
-    await expect(instance.sync()).rejects.toThrow("等待同步");
+    await expect(instance.sync()).resolves.toMatchObject({ status: "pending-sync" });
     expect(instance.world.jobs.march).toBeUndefined();
     expect(instance.pendingIntentTransaction.transactionId).toBe(transactionId);
     online = true;
@@ -3351,6 +3455,8 @@ describe("online world platform service", () => {
     const fixture = coverageHarness("pending-work");
     const seed = fixture.create("player");
     const reader = fixture.create("player");
+    let testNow = fixture.base + 10_000;
+    seed.rawNow = reader.rawNow = () => testNow;
     let online = false;
     let posts = 0;
     try {
@@ -3386,19 +3492,21 @@ describe("online world platform service", () => {
         return source;
       };
       const state = await reader.open({ workUrl: "https://aigirlfriend.baby/zh/explore/installed/pending-work" });
-      expect(state).toMatchObject({ status: "degraded", initialized: true, loadProgress: { phase: "complete", active: false } });
-      expect(state.error).toContain("等待同步");
+      expect(state).toMatchObject({ status: "pending-sync", initialized: true, loadProgress: { phase: "complete", active: false } });
+      expect(state.error).toContain("自动重试");
       expect(reader.pollTimer).not.toBeNull();
       expect(reader.pendingCommentRetirements).toEqual(seed.pendingCommentRetirements);
       expect(reader.pendingIntentTransaction.lastPublishError).toMatchObject({ code: "PLATFORM_RATE_LIMITED", status: 429 });
       const transactionId = reader.pendingIntentTransaction.transactionId;
       const beforePoll = posts;
       await vi.advanceTimersByTimeAsync(5000);
-      expect(posts).toBeGreaterThan(beforePoll);
+      expect(posts).toBe(beforePoll);
       expect(reader.pendingIntentTransaction.transactionId).toBe(transactionId);
-      expect(reader.pollFailureCount).toBe(1);
+      expect(reader.pollFailureCount).toBe(0);
       online = true;
-      const recovered = await reader.sync();
+      testNow += 30_100;
+      await vi.advanceTimersByTimeAsync(30_100);
+      const recovered = reader.state();
       expect(recovered.status).toBe("ready");
       expect(reader.pendingIntentTransaction).toBeNull();
       expect(reader.world.cells["3,3"].soldiers).toBe(4);

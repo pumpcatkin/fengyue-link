@@ -545,14 +545,25 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .choice-grid b { font-size: 11px; } .choice-grid small { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.35; }
 .tag-tools { display: grid; grid-template-columns: 1fr 150px auto; gap: 7px; align-items: center; margin-bottom: 9px; }
 .tag-tools b { color: var(--red-dark); font-size: 10px; white-space: nowrap; }
-.tag-add-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; align-items: end; margin-bottom: 9px; }
-.tag-add-row label { display: grid; gap: 4px; color: var(--red-dark); font-size: 11px; font-weight: 900; }
-.tag-add-row button { min-width: 70px; }
+.tag-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; margin: 14px 0 9px; }
+.tag-add-row label { display: grid; gap: 8px; color: var(--red-dark); font-size: 18px; font-weight: 900; }
+.tag-add-row input { min-width: 0; min-height: 48px; padding: 10px; font-size: 16px; border: 2px solid var(--red-dark); }
+.tag-add-row button { min-width: 86px; min-height: 48px; font-size: 16px; }
+.tag-description-hint { display: block; color: var(--muted); font-size: 12px; line-height: 1.5; margin: 5px 0 10px; }
+.tag-selection-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.tag-selection-tools button, #clear-join-tags { flex-shrink: 0; font-size: 12px; }
+.tag-tools { grid-template-columns: minmax(0, 1fr) auto; }
+.tag-tools input { min-width: 0; }
+@media (max-width: 480px) {
+  .selected-tag-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .selected-tag-row input { grid-row: 2; grid-column: 1 / -1; }
+  .tag-selection-tools { align-items: flex-start; flex-wrap: wrap; }
+}
 .selected-tags { display: grid; min-height: 34px; gap: 6px; margin-bottom: 8px; }
 .selected-tags.empty { display: block; color: var(--muted); font-size: 10px; padding: 5px; }
 .selected-tag-row { display: grid; grid-template-columns: minmax(80px, .6fr) minmax(160px, 1fr) auto; gap: 6px; align-items: center; border: 2px solid var(--red-dark); border-radius: 8px; background: #f3c995; padding: 6px; }
 .selected-tag-row b { font-size: 12px; overflow-wrap: anywhere; }
-.selected-tag-row input { min-width: 0; padding: 5px 7px; font-size: 10px; }
+.selected-tag-row input { min-width: 0; padding: 8px; font-size: 14px; }
 .selected-tag-row button { padding: 4px 7px; border-width: 1px; font-size: 9px; box-shadow: 1px 1px 0 var(--shadow); }
 .tag-reference-title { margin: 8px 0 5px; color: var(--red-dark); font-size: 12px; font-weight: 900; }
 .tag-options { display: flex; max-height: 300px; flex-wrap: wrap; align-content: flex-start; gap: 6px; overflow: auto; border: 2px solid var(--line); border-radius: 9px; background: #efd6a3; padding: 10px; }
@@ -607,6 +618,14 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .dialogue-modal form { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
 .dialogue-modal textarea { min-height: 64px; resize: none; font-size: 13px; }
 .owner-command-modal { width: min(780px, 96vw); }
+.owner-balance-form { margin-top: 14px; border-block: 1px solid var(--line); padding: 14px 0; }
+.owner-balance-form h2 { font-size: 18px; margin: 0 0 10px; }
+.owner-balance-form details { border-bottom: 1px solid #9a713450; padding: 8px 0; }
+.owner-balance-form summary { cursor: pointer; font-weight: 700; }
+.balance-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; padding: 12px 0; }
+.balance-group label { display: grid; gap: 5px; font-size: 13px; }
+.balance-group input { width: 100%; min-width: 0; min-height: 38px; font-size: 15px; }
+#owner-balance-save { margin-top: 12px; }
 .owner-command-modal > header p { font-weight: 800; }
 .owner-server-state { display: flex; align-items: center; justify-content: space-between; border: 2px solid var(--line); border-radius: 9px; background: #ecd096; padding: 9px; }
 .owner-server-state span small, .owner-server-state span b { display: block; }

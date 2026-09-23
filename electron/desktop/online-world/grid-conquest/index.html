@@ -174,7 +174,8 @@
         </div>
         <div class="join-step hidden" data-step="2">
           <div class="tag-add-row"><label><span>添加标签</span><input id="custom-tag-input" maxlength="40" placeholder="填写你的性癖标签"></label><button id="add-custom-tag" type="button" class="primary">添加</button></div>
-          <div class="tag-tools"><input id="tag-search" type="search" placeholder="搜索参考标签"><select id="tag-category"><option value="">全部分类</option></select><b id="tag-count">已添加 0 个</b></div>
+          <small class="tag-description-hint">建议为标签添加描述，让将领更贴合你的偏好。</small>
+          <div class="tag-tools"><input id="tag-search" type="search" placeholder="搜索参考标签"><select id="tag-category"><option value="">全部分类</option></select><b id="tag-count">已添加 0 个</b><button id="clear-join-tags" type="button">取消全部选择</button></div>
           <div id="selected-tags" class="selected-tags"></div>
           <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
           <div id="tag-options" class="tag-options"></div>
@@ -212,6 +213,7 @@
           <label><input type="radio" name="preference-orientation" value="any"><span><b>不限性别</b></span></label>
         </div>
         <div class="tag-add-row"><label><span>添加标签</span><input id="preference-tag-input" maxlength="40" placeholder="填写你的性癖标签"></label><button id="add-preference-tag" type="button" class="primary">添加</button></div>
+        <div class="tag-selection-tools"><small class="tag-description-hint">建议为标签添加描述，让将领更贴合你的偏好。</small><button id="clear-preference-tags" type="button">取消全部选择</button></div>
         <div id="preference-tags" class="selected-tags"></div>
         <p class="tag-reference-title">标签大全（仅供参考，向下滑动查看）</p>
         <div id="preference-tag-options" class="tag-options"></div>
@@ -339,6 +341,11 @@
     <section id="owner-command-modal" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="owner-command-title">
       <article class="paper-modal owner-command-modal">
         <header><span><small>仅本游戏服主可用</small><h1 id="owner-command-title">服主指令</h1><p id="owner-account">—</p></span><button id="close-owner-command" type="button">关闭</button></header>
+        <form id="owner-balance-form" class="owner-balance-form">
+          <h2>全局平衡</h2>
+          <div id="owner-balance-fields"></div>
+          <button id="owner-balance-save" class="primary" type="submit">保存并同步</button>
+        </form>
         <div class="owner-server-state"><span><small>服务器状态</small><b id="owner-server-status">尚未开服</b></span><button id="owner-open-server" class="primary" type="button">开服</button></div>
         <section class="owner-command-section">
           <h2>玩家数据</h2>
@@ -374,7 +381,7 @@
       <article class="paper-modal banned-modal"><small>猎艳疆土</small><h1>该风月账号已被服主封禁</h1><p>你已被禁止加入本游戏。如有疑问，请联系服主。</p><button id="banned-return-library" type="button">返回游戏库</button></article>
     </section>
 
-    <div id="connection-notice" class="connection-notice hidden" role="status"><span>连接中断，暂时无法操作。恢复后即可继续。</span><button id="connection-retry" type="button">重试</button></div>
+    <div id="connection-notice" class="connection-notice hidden" role="status"><span id="connection-message">连接中断，暂时无法操作。恢复后即可继续。</span><button id="connection-retry" type="button">重试</button></div>
     <div id="toast" class="toast hidden" role="status"></div>
     <script src="game.js"></script>
   </body>

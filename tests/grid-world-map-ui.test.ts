@@ -6,6 +6,7 @@ const source = readFileSync(new URL("../electron/desktop/online-world/grid-conqu
 const html = readFileSync(new URL("../electron/desktop/online-world/grid-conquest/index.html", import.meta.url), "utf8");
 const css = readFileSync(new URL("../electron/desktop/online-world/grid-conquest/styles.css", import.meta.url), "utf8");
 const helpers = source.slice(source.indexOf("function validMapPosition("), source.indexOf("function drawMapTasks("));
+const balanceHelper = source.slice(source.indexOf("function balanceValue("), source.indexOf("function pendingGeneralDiscoveries("));
 
 function harness() {
   const jobs: Record<string, any> = {
@@ -35,7 +36,7 @@ function harness() {
     document: { querySelector: () => tooltip, querySelectorAll: () => [], createElement: () => ({}) },
     window: { innerWidth: 1440, innerHeight: 940 }
   };
-  runInNewContext(helpers, ctx);
+  runInNewContext(balanceHelper + helpers, ctx);
   ctx.mapTaskOverlays = ctx.buildMapTaskOverlays();
   return { ctx, jobs, tooltip };
 }

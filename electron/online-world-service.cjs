@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { isTransientPlatformError, platformRequestError } = require("./platform-transport.cjs");
 const { PlatformCommentOperations } = require("./platform-comment-operations.cjs");
+const { BALANCE_FIELDS, normalizeBalance } = require("./grid-balance.cjs");
 const {
   FYOW_SCHEMAS,
   FYOW_COMMENT_LIMIT,
@@ -40,6 +41,7 @@ const {
   recordBattleReport,
   marchQuote,
   scatterTreasures,
+  dailyRedTreasureBatch,
   buildGeneralGenerationRequest,
   buildGeneralLetterRequest,
   buildGeneralAppearanceRequest,
@@ -126,6 +128,18 @@ function normalizeWorkDetail(payload, fallbackId) {
     authorAccountId: String(authorId(authority)),
     authorName: String(authority?.created_by_account_name || authority?.author_account_name || authority?.creator_account_name || authority?.owner_account_name || author?.name || author?.username || "")
   };
+}
+
+function isEmailLikeAccountName(value) {
+  const text = String(value || "").trim();
+  return Boolean(text && /^[^@\s]+@[^@\s]+$/.test(text));
+}
+
+function publicAccountName(account = {}) {
+  const candidate = String(account.displayName || account.publicName || account.username || "").trim();
+  if (candidate && !isEmailLikeAccountName(candidate)) return candidate.slice(0, 80);
+  const accountId = String(account.accountId || account.id || "").trim();
+  return accountId ? `玩家-${accountId.slice(-8)}` : "玩家";
 }
 
 function programFromGameCard(card) {
@@ -281,7 +295,7 @@ function deferablePublicationError(error) {
   const code = String(error?.code || "").toUpperCase();
   const status = Number(error?.status || error?.statusCode || 0);
   if (/^PLATFORM_(?:RATE_LIMIT|NETWORK|TIMEOUT|SERVER)/.test(code)) return true;
-  if (["PLATFORM_INVALID_JSON", "FYOW_COMMENT_ACK_MISSING", "FYOW_COMMENT_ACK_MISMATCH", "FYOW_PUBLICATION_RECHECK_PENDING"].includes(code)) return true;
+  if (["PLATFORM_INVALID_JSON", "FYOW_COMMENT_ACK_MISSING", "FYOW_COMMENT_ACK_MISMATCH", "FYOW_PUBLICATION_RECHECK_PENDING", "FYOW_PUBLICATION_COOLDOWN", "FYOW_UPLOAD_PENDING"].includes(code)) return true;
   if (status === 408 || status === 429 || status >= 500) return true;
   return /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断/i
     .test(String(error?.message || error || ""));
@@ -546,6 +560,7 @@ function publicBattleChanges(beforeWorld, afterWorld, effects = [], actorAccount
       afterSoldiers: Math.max(0, Math.trunc(Number(after.soldiers || 0))),
       attackerSoldiers: Math.max(0, Math.trunc(Number(effect.attackerSoldiers || 0))),
       defenderSoldiers: Math.max(0, Math.trunc(Number(effect.defenderSoldiers || 0))),
+      ...(effect.casualtyRules ? { casualtyRules: cloneJson(effect.casualtyRules) } : {}),
       attackerPower: Math.max(1, Math.trunc(Number(effect.attackerPower || 0))),
       defenderPower: Math.max(1, Math.trunc(Number(effect.defenderPower || 0))),
       attackerLosses: Math.max(0, Math.trunc(Number(effect.attackerLosses || 0))),
@@ -592,6 +607,7 @@ function createPublicMapChanges(beforeWorld, afterWorld, effects = [], actorAcco
           x: effect.at.x, y: effect.at.y, createdAt: Math.trunc(Number(report?.createdAt || 0)),
           attackerPower: effect.attackerPower, defenderPower: effect.defenderPower,
           attackerSoldiers: effect.attackerSoldiers, defenderSoldiers: effect.defenderSoldiers,
+          ...(effect.casualtyRules ? { casualtyRules: cloneJson(effect.casualtyRules) } : {}),
           attackerLosses: effect.attackerLosses, defenderLosses: effect.defenderLosses,
           attackerSurvivors: effect.attackerSurvivors, defenderSurvivors: effect.defenderSurvivors,
           capturedOwnGenerals: (effect.capturedGeneralIds || []).map(id => ({
@@ -789,7 +805,7 @@ function normalizeGeneratedGeneral(value, effect = {}, edits = null) {
     experience: 0,
     experienceRequired: generalExperienceRequirement(0),
     power: effect.generatedPower ?? (effect.generatedSeed
-      ? generatedGeneralPower(effect.generatedSeed, effect.accountId, effect.sourceId || effect.discoveryId || "general")
+      ? generatedGeneralPower(effect.generatedSeed, effect.accountId, effect.sourceId || effect.discoveryId || "general", { balance: effect.balance })
       : DEFAULT_GENERATED_GENERAL_POWER)
   };
 }
@@ -867,7 +883,7 @@ function generalMemoryQualityIssue(value) {
   if (!summary || summary.length > 120) return "将领记忆摘要必须为 1～120 字";
   if (!emotion || emotion.length > 40) return "将领记忆情绪必须为 1～40 字";
   if (!Number.isInteger(intimacyDelta) || intimacyDelta < -5 || intimacyDelta > 5) return "将领亲密度变化必须为 -5～5 的整数";
-  if (!compactMemory || compactMemory.length > 1000 || !compactMemory.includes("言谈：") || !compactMemory.includes("经历：")) return "将领长期记忆必须同时包含言谈和经历且不超过 1000 字";
+  if (!compactMemory || compactMemory.length > 150 || !compactMemory.includes("言谈：") || !compactMemory.includes("经历：")) return "将领记忆概述必须同时包含言谈和经历，且总长度不超过150字符（包含标点与换行）";
   if (ACCOUNT_IDENTIFIER_PATTERN.test(`${summary}\n${emotion}\n${compactMemory}`)) return "将领记忆包含内部账号编号";
   return null;
 }
@@ -967,9 +983,19 @@ function coreConfigMatches(exported, expected) {
   return canonicalJson(fields(exported)) === canonicalJson(fields(expected));
 }
 
+function validCasualtyRules(value) {
+  if (value == null) return true;
+  return typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && ["loserCasualtyRatio", "winnerCasualtyRatio"].every(key =>
+      typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0 && value[key] <= 1);
+}
+
 function normalizeWorldState(value) {
   if (!value || typeof value !== "object") return value;
   value.cells ||= {};
+  value.balance = normalizeBalance(value.balance || {});
+  value.dailyRedDates = Array.isArray(value.dailyRedDates) ? [...new Set(value.dailyRedDates.filter(day => /^\d{4}-\d{2}-\d{2}$/.test(day)))] : [];
   for (const cell of Object.values(value.cells)) {
     if (!cell || typeof cell !== "object" || !Object.hasOwn(cell, "occupationCount")) continue;
     if (!Number.isSafeInteger(cell.occupationCount) || cell.occupationCount < 0 || cell.occupationCount > MAX_OCCUPATION_COUNT) {
@@ -1109,6 +1135,7 @@ class OnlineWorldService {
     this.localEvents = [];
     this.localPreferences = { orientation: "any", characterProfileId: "", characterTags: [], initialGeneralWish: "", characterProfile: null, playerContext: null };
     this.appliedMapDeltaIds = new Set();
+    this.reportedRejectedMapDeltaIds = new Set();
     this.appliedAuthorityIds = new Set();
     this.publicDeltaCountSinceSnapshot = 0;
     this.publicMapOrder = { timestamp: 0, commentId: "" };
@@ -1120,6 +1147,12 @@ class OnlineWorldService {
     this.publicGeneralRecalls = {};
     this.pendingCommentRetirements = [];
     this.commentRetirementInFlight = null;
+    // All platform mutations share one durable FIFO.  Keeping the queue in
+    // the per-account/per-work cache makes an interrupted write resumable on
+    // the next launch without exposing transport details in the UI.
+    this.cloudUploadQueue = [];
+    this.cloudUploadInFlight = null;
+    this.cloudUploadWaiters = new Map();
     this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -1150,9 +1183,11 @@ class OnlineWorldService {
 
   account() {
     const account = this.getAccount?.() || {};
+    const username = publicAccountName(account);
     return {
       accountId: String(account.accountId || account.id || ""),
-      username: String(account.username || ""),
+      username,
+      displayName: username,
       points: account.points == null ? null : String(account.points)
     };
   }
@@ -1218,6 +1253,9 @@ class OnlineWorldService {
   }
 
   summary() {
+    const pendingSync = this.pendingIntentTransaction?.phase === "prepared"
+      ? this.pendingPublicationState(this.pendingIntentTransaction)
+      : null;
     return {
       status: this.status,
       syncing: this.syncing,
@@ -1239,6 +1277,7 @@ class OnlineWorldService {
       localEventCount: this.localEvents.length,
       pendingModelEffectCount: this.pendingModelEffects.length,
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
+      pendingSync,
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
       program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "猎艳疆土", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
@@ -1262,6 +1301,7 @@ class OnlineWorldService {
         startedAt: this.control.startedAt
       } : null,
       world: projection,
+      balanceFields: this.isAuthority() ? BALANCE_FIELDS : [],
       localPreferences: {
         orientation: this.localPreferences.orientation,
         characterProfileId: this.localPreferences.characterProfileId,
@@ -1279,6 +1319,27 @@ class OnlineWorldService {
 
   notify() {
     try { this.onChange(this.state()); } catch {}
+  }
+
+  pendingPublicationState(transaction = this.pendingIntentTransaction) {
+    if (!transaction || transaction.phase !== "prepared") return null;
+    const lastError = transaction.lastPublishError || {};
+    const retryAt = Math.max(0, Number(lastError.retryAt || 0));
+    const retryAfterMs = Math.max(0, retryAt - this.now());
+    return {
+      transactionId: String(transaction.transactionId || ""),
+      intentType: String(transaction.intentType || "unknown"),
+      createdAt: Math.max(0, Number(transaction.createdAt || 0)),
+      retryAt,
+      retryAfterMs,
+      errorCode: String(lastError.code || ""),
+      rateLimited: String(lastError.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+        || Number(lastError.status || 0) === 429
+    };
+  }
+
+  pendingPublicationCoolingDown(transaction = this.pendingIntentTransaction) {
+    return Number(transaction?.lastPublishError?.retryAt || 0) > this.now();
   }
 
   updateLoadProgress(patch = {}) {
@@ -1535,6 +1596,12 @@ class OnlineWorldService {
   }
 
   pendingPublicationWasSuperseded(transaction = this.pendingIntentTransaction) {
+    for (const key of Object.keys(transaction?.changes?.cells || {})) {
+      const envelope = occupationEnvelope(transaction.changes, key);
+      if (envelope.modern && compareOrderValue(
+        this.publicCellOrders[key] || this.publicMapBaselineOrder, envelope.baseOrder
+      ) > 0) return true;
+    }
     const rootOrder = this.pendingPublicationRootOrder(transaction);
     if (!rootOrder) return false;
     const changes = transaction?.changes || {};
@@ -1750,11 +1817,19 @@ class OnlineWorldService {
     if (publication && ambiguousPublicationError(error) && !publication.ambiguousSince) {
       publication.ambiguousSince = failedAt;
     }
+    const code = String(error?.code || "FYOW_PUBLICATION_FAILED");
+    const status = Number(error?.status || error?.statusCode || 0) || null;
+    const rateLimited = code.toUpperCase() === "PLATFORM_RATE_LIMIT" || status === 429;
+    const explicitRetryAt = Math.max(0, Number(error?.retryAt || 0));
+    const retryAfterMs = Math.max(0, Number(error?.retryAfterMs || 0));
+    const retryAt = explicitRetryAt || (rateLimited ? failedAt + Math.max(1000, retryAfterMs || 30000) : 0);
     transaction.lastPublishError = {
-      code: String(error?.code || "FYOW_PUBLICATION_FAILED"),
+      code,
       message: String(error?.message || error).slice(0, 500),
-      status: Number(error?.status || error?.statusCode || 0) || null,
+      status,
       at: failedAt,
+      retryAt,
+      retryAfterMs: Math.max(0, retryAt - failedAt),
       confirmedParts: (publication?.sources || []).filter(Boolean).length,
       totalParts: publication?.record ? encodeCommentRecord(publication.record).length : null
     };
@@ -2237,12 +2312,14 @@ class OnlineWorldService {
       publicGeneralOrders: this.publicGeneralOrders,
       publicGeneralRecalls: this.publicGeneralRecalls,
       pendingCommentRetirements: cloneJson(this.pendingCommentRetirements),
+      cloudUploadQueue: cloneJson(this.cloudUploadQueue),
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
       marketSettledSales: [...this.marketSettledSales].slice(-1000),
       publicParticipantOrders: this.publicParticipantOrders,
       publicAuthorityOrders: this.publicAuthorityOrders,
       publicTreasureSources: this.publicTreasureSources,
+      reportedRejectedMapDeltaIds: [...this.reportedRejectedMapDeltaIds].slice(-4000),
       directSession,
       directInbox,
       directHistory,
@@ -2295,7 +2372,10 @@ class OnlineWorldService {
           this.pollFailureCount += 1;
         } finally {
           const retryDelay = Math.min(POLL_RETRY_MAX_MS, POLL_INTERVAL_MS * (2 ** Math.min(4, this.pollFailureCount)));
-          schedule(retryDelay);
+          const publicationDelay = Math.max(0, Number(this.pendingIntentTransaction?.lastPublishError?.retryAt || 0) - this.now());
+          schedule(publicationDelay > 0
+            ? Math.max(POLL_INTERVAL_MS, Math.min(POLL_RETRY_MAX_MS, publicationDelay + 100))
+            : retryDelay);
         }
       }, delay);
     };
@@ -2494,6 +2574,8 @@ class OnlineWorldService {
       };
     }
     this.appliedMapDeltaIds = new Set(Array.isArray(cached?.appliedMapDeltaIds) ? cached.appliedMapDeltaIds.slice(-4000) : []);
+    this.reportedRejectedMapDeltaIds = new Set(Array.isArray(cached?.reportedRejectedMapDeltaIds)
+      ? cached.reportedRejectedMapDeltaIds.slice(-4000).map(String) : []);
     this.appliedAuthorityIds = new Set(Array.isArray(cached?.appliedAuthorityIds) ? cached.appliedAuthorityIds.slice(-1000) : []);
     this.publicDeltaCountSinceSnapshot = Math.max(0, Number(cached?.publicDeltaCountSinceSnapshot || 0));
     this.publicMapOrder = {
@@ -2511,6 +2593,11 @@ class OnlineWorldService {
     this.publicGeneralOrders = cached?.publicGeneralOrders && typeof cached.publicGeneralOrders === "object" ? cached.publicGeneralOrders : {};
     this.publicGeneralRecalls = cached?.publicGeneralRecalls && typeof cached.publicGeneralRecalls === "object" ? cached.publicGeneralRecalls : {};
     this.pendingCommentRetirements = Array.isArray(cached?.pendingCommentRetirements) ? cached.pendingCommentRetirements.slice(-100) : [];
+    this.cloudUploadQueue = Array.isArray(cached?.cloudUploadQueue)
+      ? cached.cloudUploadQueue.filter(item => item && typeof item === "object" && item.key && item.kind).map(item => cloneJson(item))
+      : [];
+    this.cloudUploadInFlight = null;
+    this.cloudUploadWaiters.clear();
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
     this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
@@ -2594,8 +2681,12 @@ class OnlineWorldService {
     }
     await this.ensureLocalPlayerContext();
     this.assertSyncActive();
-    this.status = this.control && this.world ? (syncError ? "degraded" : "ready") : "needs-initialization";
-    this.error = syncError ? (syncError?.message || String(syncError)) : null;
+    this.status = this.control && this.world
+      ? (this.pendingIntentTransaction?.phase === "prepared" ? "pending-sync" : syncError ? "degraded" : "ready")
+      : "needs-initialization";
+    this.error = this.status === "pending-sync"
+      ? (this.error || "行动结果已保存在本机，正在等待自动同步")
+      : syncError ? (syncError?.message || String(syncError)) : null;
     if (this.migrationProof?.sourceWorkId && previousWorkId && previousWorkId !== this.work.id) {
       this.clearCacheForWork(this.migrationProof.sourceWorkId);
     }
@@ -2693,6 +2784,9 @@ class OnlineWorldService {
     this.publicGeneralOrders = {};
     this.publicGeneralRecalls = {};
     this.pendingCommentRetirements = [];
+    this.cloudUploadQueue = [];
+    this.cloudUploadInFlight = null;
+    this.cloudUploadWaiters.clear();
     this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -2715,6 +2809,217 @@ class OnlineWorldService {
   async postComment(content, options = {}) {
     if (String(content).length > FYOW_COMMENT_LIMIT) throw new Error(`评论数据超过 ${FYOW_COMMENT_LIMIT} 字符限制`);
     return this.commentOperations.publish({ workId: this.work.id, content, ...options });
+  }
+
+  cloudUploadKey(kind, value = {}) {
+    if (kind === "delete") {
+      const ids = (value.sources || []).map(source => commentId(source)).filter(Boolean).sort();
+      return `delete:${String(value.workId || this.work?.id || "")}:${ids.join(",")}`;
+    }
+    if (kind === "chat-messages") {
+      return `chat:${String(value.chatId || "")}:${String(value.messageId || "")}`;
+    }
+    const record = value.record || {};
+    const recordId = record.mapDeltaId || record.eventId || record.snapshotId || record.id
+      || sha256(Buffer.from(canonicalJson(record)));
+    return `record:${String(record.schema || "unknown")}:${String(recordId)}:${String(value.options?.parentId || "")}:${String(value.options?.toAccountId || "")}`;
+  }
+
+  uploadQueueError(error, item) {
+    const wrapped = error instanceof Error ? error : new Error(String(error || "平台写入失败"));
+    wrapped.code = String(wrapped.code || "FYOW_UPLOAD_PENDING");
+    wrapped.queueKey = item?.key || "";
+    wrapped.retryAt = Number(item?.nextAttemptAt || 0);
+    return wrapped;
+  }
+
+  waitForCloudUpload(key) {
+    return new Promise((resolve, reject) => {
+      const waiters = this.cloudUploadWaiters.get(key) || [];
+      waiters.push({ resolve, reject });
+      this.cloudUploadWaiters.set(key, waiters);
+    });
+  }
+
+  settleCloudUploadWaiters(key, error, value) {
+    const waiters = this.cloudUploadWaiters.get(key) || [];
+    this.cloudUploadWaiters.delete(key);
+    for (const waiter of waiters) {
+      if (error) waiter.reject(error);
+      else waiter.resolve(value);
+    }
+  }
+
+  rejectBlockedCloudUploads(error) {
+    for (const item of this.cloudUploadQueue) this.settleCloudUploadWaiters(item.key, error);
+  }
+
+  async enqueueCloudUpload(item) {
+    const key = String(item.key || "");
+    if (!key) throw new Error("云端写入缺少幂等编号");
+    const existing = this.cloudUploadQueue.find(candidate => candidate.key === key);
+    if (existing) {
+      // An explicit retry (for example the pending-action retry path) wakes
+      // this item immediately; automatic polling still honours backoff.
+      existing.nextAttemptAt = 0;
+      this.saveCache();
+    }
+    if (!existing) {
+      this.cloudUploadQueue.push({
+        ...cloneJson(item),
+        attempts: Math.max(0, Number(item.attempts || 0)),
+        nextAttemptAt: Math.max(0, Number(item.nextAttemptAt || 0)),
+        createdAt: Number(item.createdAt || this.now())
+      });
+      this.saveCache();
+    }
+    const position = this.cloudUploadQueue.findIndex(candidate => candidate.key === key);
+    const head = this.cloudUploadQueue[0];
+    if (position > 0 && Number(head?.nextAttemptAt || 0) > this.now()) {
+      const blocked = new Error("云端写入队列正在等待重试");
+      blocked.code = "FYOW_UPLOAD_PENDING";
+      blocked.retryAt = Number(head.nextAttemptAt || 0);
+      throw blocked;
+    }
+    const waiting = this.waitForCloudUpload(key);
+    if (position === 0 && Number(this.cloudUploadQueue[0]?.nextAttemptAt || 0) > this.now()) {
+      const blocked = new Error("云端写入队列正在等待重试");
+      blocked.code = "FYOW_UPLOAD_PENDING";
+      blocked.retryAt = Number(this.cloudUploadQueue[0].nextAttemptAt || 0);
+      this.settleCloudUploadWaiters(key, blocked);
+      return waiting;
+    }
+    this.processCloudUploadQueue();
+    return waiting;
+  }
+
+  async processCloudUploadQueue() {
+    if (this.cloudUploadInFlight) return this.cloudUploadInFlight;
+    const running = (async () => {
+      while (this.cloudUploadQueue.length) {
+        const item = this.cloudUploadQueue[0];
+        const waitUntil = Number(item.nextAttemptAt || 0);
+        if (waitUntil > this.now()) return;
+        try {
+          let result;
+          if (item.kind === "balance-retire") {
+            result = await this.deleteSupersededBalanceDirectives(item.record, item.snapshot);
+          } else if (item.kind === "delete") {
+            result = await this.commentOperations.deleteMany({
+              workId: item.workId,
+              sources: item.sources || [],
+              knownOwnedCommentIds: item.knownOwnedCommentIds || []
+            });
+          } else if (item.kind === "chat-messages") {
+            const contents = Array.isArray(item.contents) ? item.contents : [];
+            while (contents.length) {
+              const content = String(contents[0] || "");
+              const wasInFlight = Boolean(item.inFlightAt) && String(item.inFlightContent || "") === content;
+              if (wasInFlight && await this.chatContainsContent(item.chatId, content)) {
+                contents.shift();
+                item.inFlightContent = "";
+                item.inFlightAt = "";
+                this.saveCache();
+                continue;
+              }
+              item.inFlightContent = content;
+              item.inFlightAt = this.now();
+              this.saveCache();
+              await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", {
+                method: "POST", body: { chat_id: item.chatId, content }, timeout: 20000
+              }));
+              contents.shift();
+              item.inFlightContent = "";
+              item.inFlightAt = "";
+              this.saveCache();
+            }
+            result = { sent: true };
+          } else {
+            // Mark the item as in-flight before the network call. If the
+            // process dies after the server accepted it but before the cache
+            // could be updated, the next launch performs a read-back by the
+            // signed record id instead of posting a duplicate.
+            const hadPriorAttempt = Boolean(item.inFlightAt);
+            item.attempts = Math.max(1, Number(item.attempts || 0));
+            item.inFlightAt = this.now();
+            this.saveCache();
+            const publication = this.pendingIntentTransaction?.mapDeltaId
+              && String(this.pendingIntentTransaction.mapDeltaId) === String(item.record?.mapDeltaId || "")
+              ? this.pendingIntentTransaction.publication
+              : item.options?.publication;
+            const options = {
+              ...(item.options || {}),
+              ...(publication ? { publication } : {}),
+              skipQueue: true
+            };
+            let recovered = null;
+            if (hadPriorAttempt) recovered = await this.findPublishedRecordSources(item.record);
+            result = recovered?.length ? recovered : await this.postRecordNow(item.record, options);
+            if (publication) item.options = { ...(item.options || {}), publication: cloneJson(publication) };
+          }
+          this.cloudUploadQueue.shift();
+          this.saveCache();
+          this.settleCloudUploadWaiters(item.key, null, result);
+        } catch (error) {
+          const terminalAckError = ["FYOW_COMMENT_ACK_MISMATCH", "FYOW_COMMENT_ACK_MISSING"].includes(String(error?.code || ""));
+          if (terminalAckError) {
+            // The platform answered with an invalid acknowledgement. Retrying
+            // that POST could duplicate an already accepted comment, so keep
+            // the diagnostic in the caller's transaction but do not block all
+            // later FIFO entries behind an unsafe duplicate.
+            this.cloudUploadQueue.shift();
+            this.saveCache();
+            this.settleCloudUploadWaiters(item.key, error);
+            continue;
+          }
+          // A returned error is a known failed attempt rather than an
+          // interrupted process. Keep the payload queued, but let the next
+          // retry issue a fresh request; an in-flight marker is reserved for
+          // crash recovery between two cache writes.
+          item.inFlightAt = "";
+          item.attempts = Math.max(0, Number(item.attempts || 0)) + 1;
+          const retryAfter = Math.max(1000, Number(error?.retryAfterMs || 0));
+          const backoff = Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(8, item.attempts - 1)));
+          item.nextAttemptAt = this.now() + Math.max(retryAfter, backoff);
+          item.lastError = { code: String(error?.code || "FYOW_UPLOAD_PENDING"), message: String(error?.message || error).slice(0, 500), at: this.now() };
+          this.saveCache();
+          const queuedError = this.uploadQueueError(error, item);
+          this.rejectBlockedCloudUploads(queuedError);
+          this.diagnostic({ event: "cloud-upload-queued", kind: item.kind, key: item.key, attempts: item.attempts, nextAttemptAt: item.nextAttemptAt, code: queuedError.code });
+          return;
+        }
+      }
+    })();
+    this.cloudUploadInFlight = running;
+    try { return await running; }
+    finally { if (this.cloudUploadInFlight === running) this.cloudUploadInFlight = null; }
+  }
+
+  async findPublishedRecordSources(record) {
+    try {
+      const comments = await this.readAllCommentSources({ requireStable: true });
+      const targetId = String(record?.mapDeltaId || record?.eventId || record?.snapshotId || record?.authorityId || record?.id || "");
+      if (!targetId) return null;
+      const match = assembleCommentRecords(comments).records.find(item => {
+        const candidate = item.record || {};
+        const candidateId = String(candidate.mapDeltaId || candidate.eventId || candidate.snapshotId || candidate.authorityId || candidate.id || "");
+        return candidate.schema === record.schema && candidateId === targetId && canonicalJson(candidate) === canonicalJson(record);
+      });
+      return match?.sources?.length ? cloneJson(match.sources) : null;
+    } catch (error) {
+      this.diagnostic({ event: "cloud-upload-readback-deferred", error: error?.message || String(error) });
+      return null;
+    }
+  }
+
+  async chatContainsContent(chatId, content) {
+    try {
+      const payload = await this.requestConsole(`/chats/messages?chat_id=${encodeURIComponent(String(chatId || ""))}&page=1&limit=500`, { timeout: 15000 });
+      return extractContentItems(payload).some(item => String(item?.content || "") === String(content || ""));
+    } catch (error) {
+      this.diagnostic({ event: "cloud-chat-readback-deferred", error: error?.message || String(error) });
+      return false;
+    }
   }
 
   legacyGeneralArchiveSources(comments, generalId) {
@@ -2933,9 +3238,11 @@ class OnlineWorldService {
       return { deleted: 0, deferred: true };
     }
     try {
-      const result = await this.commentOperations.deleteMany({
+      const result = await this.enqueueCloudUpload({
+        kind: "delete",
+        key: this.cloudUploadKey("delete", { workId: this.work.id, sources: pending.sources }),
         workId: this.work.id,
-        sources: pending.sources,
+        sources: cloneJson(pending.sources),
         knownOwnedCommentIds: pending.sources.map(commentId)
       });
       const deleted = result.deletedCommentIds.length + result.alreadyMissingCommentIds.length;
@@ -2973,6 +3280,23 @@ class OnlineWorldService {
   }
 
   async postRecord(record, options = {}) {
+    if (options.skipQueue) return this.postRecordNow(record, options);
+    const queueOptions = {
+      ...(options.parentId ? { parentId: String(options.parentId) } : {}),
+      ...(options.toAccountId ? { toAccountId: String(options.toAccountId) } : {}),
+      ...(options.publication ? { publication: cloneJson(options.publication) } : {})
+    };
+    const sources = await this.enqueueCloudUpload({
+      kind: "record",
+      key: this.cloudUploadKey("record", { record, options: queueOptions }),
+      record: cloneJson(record),
+      options: queueOptions
+    });
+    if (options.publication && Array.isArray(sources)) options.publication.sources = cloneJson(sources);
+    return sources;
+  }
+
+  async postRecordNow(record, options = {}) {
     const responses = [];
     const chunks = encodeCommentRecord(record);
     const publication = options.publication;
@@ -3045,7 +3369,10 @@ class OnlineWorldService {
       } catch (error) {
         lastError = error;
         if (!isTransientPlatformError(error)) throw error;
-        if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+        if (attempt < attempts) {
+          const retryAfter = Math.max(0, Number(error?.retryAfterMs || 0));
+          await new Promise(resolve => setTimeout(resolve, Math.max(200 * attempt, Math.min(30000, retryAfter))));
+        }
       }
     }
     throw lastError;
@@ -3608,11 +3935,12 @@ class OnlineWorldService {
 
   collectTreasureSources(records) {
     const snapshots = this.verifiedSnapshots(records);
-    const scatters = (records || []).filter(item => item.record?.type === "treasure-scatter" && this.validAuthorityDirective(item));
+    const scatters = (records || []).filter(item => ["treasure-scatter", "daily-red-spawn"].includes(item.record?.type) && this.validAuthorityDirective(item));
     for (const item of [...snapshots, ...scatters].sort(comparePlatformOrder)) {
       if (item.record.schema === FYOW_SCHEMAS.snapshot) {
         this.rememberTreasureSources(item.record.state?.treasureSpawns, recordPlatformOrder(item));
-      } else this.rememberTreasureSources(item.record.treasureSpawns, recordPlatformOrder(item), item.record.treasureEpoch);
+      } else this.rememberTreasureSources(item.record.treasureSpawns, recordPlatformOrder(item),
+        item.record.type === "treasure-scatter" ? item.record.treasureEpoch : null);
     }
   }
 
@@ -3674,7 +4002,8 @@ class OnlineWorldService {
       const fields = ["attackerSoldiers", "defenderSoldiers", "attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"];
       if (fields.some(field => safeBattleInteger(battle[field]) == null)
         || ["attackerPower", "defenderPower"].some(field => safeBattleInteger(battle[field], MAX_PUBLIC_BATTLE_POWER, 1) == null)) return false;
-      const expected = battleCasualties(battle.attackerPower, battle.defenderPower, battle.attackerSoldiers, battle.defenderSoldiers);
+      if (!validCasualtyRules(battle.casualtyRules)) return false;
+      const expected = battleCasualties(battle.attackerPower, battle.defenderPower, battle.attackerSoldiers, battle.defenderSoldiers, { balance: battle.casualtyRules });
       if (!expected.attackerWon || ["attackerLosses", "defenderLosses", "attackerSurvivors", "defenderSurvivors"].some(field => battle[field] !== expected[field])
         || next.soldiers !== Math.min(cellGarrisonCap(this.world, battle.x, battle.y, next), expected.attackerSurvivors)) return false;
       if (!Array.isArray(battle.capturedOwnGenerals) || battle.capturedOwnGenerals.length > 2
@@ -3723,7 +4052,8 @@ class OnlineWorldService {
       const defenderSurvivors = safeBattleInteger(battle.defenderSurvivors);
       if ([attackerSoldiers, defenderSoldiers, attackerPower, defenderPower, attackerLosses, defenderLosses, attackerSurvivors, defenderSurvivors].some(value => value == null)) return false;
       if (defenderSoldiers !== beforeSoldiers || attackerSoldiers < 1) return false;
-      const expected = battleCasualties(attackerPower, defenderPower, attackerSoldiers, defenderSoldiers);
+      if (!validCasualtyRules(battle.casualtyRules)) return false;
+      const expected = battleCasualties(attackerPower, defenderPower, attackerSoldiers, defenderSoldiers, { balance: battle.casualtyRules });
       if (expected.attackerWon
         || attackerLosses !== expected.attackerLosses
         || defenderLosses !== expected.defenderLosses
@@ -3879,9 +4209,16 @@ class OnlineWorldService {
     if (record?.schema !== FYOW_SCHEMAS.authority || record.gameId !== GRID_GAME_ID || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
     if (!this.work?.authorAccountId || String(record.authorityAccountId || "") !== this.work.authorAccountId || String(this.control?.authorityAccountId || "") !== this.work.authorAccountId) return false;
     if (!this.validAuthorSource(item) || !recordPlatformOrder(item).timestamp || !verifySignedRecord(record, this.control.authoritySigningPublicKey)) return false;
-    if (record.type === "treasure-scatter") {
+    if (record.type === "balance-update") {
+      try { return canonicalJson(normalizeBalance(record.balance, true)) === canonicalJson(record.balance); }
+      catch { return false; }
+    }
+    if (["treasure-scatter", "daily-red-spawn"].includes(record.type)) {
       const spawns = record.treasureSpawns;
       if (!Number.isSafeInteger(record.treasureEpoch) || record.treasureEpoch < 0 || !spawns || typeof spawns !== "object" || Array.isArray(spawns) || Object.keys(spawns).length > GRID_SIZE * GRID_SIZE) return false;
+      if (record.type === "daily-red-spawn" && (!/^\d{4}-\d{2}-\d{2}$/.test(record.day)
+        || Object.keys(spawns).length > 20 || !Object.values(spawns).every(spawn => ["red-ascend", "red-reroll"].includes(spawn.materialId)
+          && String(spawn.id || "").startsWith(`daily-red-${record.day}-`)))) return false;
       return Object.entries(spawns).every(([id, spawn]) => spawn && spawn.id === id && validPosition(spawn)
         && Number.isSafeInteger(spawn.epoch) && spawn.epoch > 0 && spawn.epoch <= record.treasureEpoch && MATERIAL_BY_ID[String(spawn.materialId || "")]);
     }
@@ -3954,13 +4291,25 @@ class OnlineWorldService {
     if (!id || this.appliedAuthorityIds.has(id) || compareOrderValue(order, this.publicMapBaselineOrder) <= 0) return false;
     normalizeWorldState(this.world);
     const target = String(record.targetAccountId || "");
-    const authorityKey = record.type === "treasure-scatter"
+    const authorityKey = record.type === "balance-update" ? "balance-update"
+      : record.type === "daily-red-spawn" ? `daily-red:${record.day}`
+      : record.type === "treasure-scatter"
       ? "treasure-scatter"
       : record.type === "simulate-player-intent"
         ? `simulate:${id}`
         : `${record.type === "player-reset" ? "reset" : "ban"}:${target}`;
     if (compareOrderValue(order, this.publicAuthorityOrders[authorityKey] || this.publicMapBaselineOrder) <= 0) return false;
-    if (record.type === "treasure-scatter") {
+    if (record.type === "balance-update") {
+      this.world.balance = normalizeBalance(record.balance, true);
+    } else if (record.type === "daily-red-spawn") {
+      if ((this.world.dailyRedDates || []).includes(record.day)) return false;
+      this.world.dailyRedDates.push(record.day);
+      this.world.treasureEpoch = Math.max(this.world.treasureEpoch, record.treasureEpoch);
+      for (const [treasureId, spawn] of Object.entries(record.treasureSpawns)) {
+        if (!this.world.claimedTreasures[treasureId]) this.world.treasureSpawns[treasureId] = cloneJson(spawn);
+      }
+      this.rememberTreasureSources(record.treasureSpawns, order);
+    } else if (record.type === "treasure-scatter") {
       if (record.treasureEpoch < this.world.treasureEpoch) return false;
       this.rememberTreasureSources(this.world.treasureSpawns);
       this.rememberTreasureSources(record.treasureSpawns, order, record.treasureEpoch);
@@ -4032,9 +4381,16 @@ class OnlineWorldService {
   applyMapDelta(item) {
     if (!this.validMapDelta(item)) {
       if (item?.record?.schema === FYOW_SCHEMAS.mapDelta && item.record.workId === this.work?.id) {
-        this.diagnostic({ event: "map-delta-rejected", code: "FYOW_MAP_DELTA_INVALID",
-          mapDeltaId: item.record.mapDeltaId, actorAccountId: item.record.actorAccountId,
-          cells: Object.keys(item.record.changes?.cells || {}), order: recordPlatformOrder(item) });
+        const rejectedId = String(item.record.mapDeltaId || recordPlatformOrder(item).commentId || "");
+        if (!this.reportedRejectedMapDeltaIds.has(rejectedId)) {
+          this.reportedRejectedMapDeltaIds.add(rejectedId);
+          if (this.reportedRejectedMapDeltaIds.size > 4000) {
+            this.reportedRejectedMapDeltaIds = new Set([...this.reportedRejectedMapDeltaIds].slice(-4000));
+          }
+          this.diagnostic({ event: "map-delta-rejected", code: "FYOW_MAP_DELTA_INVALID",
+            mapDeltaId: item.record.mapDeltaId, actorAccountId: item.record.actorAccountId,
+            cells: Object.keys(item.record.changes?.cells || {}), order: recordPlatformOrder(item) });
+        }
       }
       return false;
     }
@@ -4502,9 +4858,20 @@ class OnlineWorldService {
     this.syncInFlight = running;
     try {
       await running;
+      const recoveringDailySpawn = this.cloudUploadQueue.some(item => item.record?.type === "daily-red-spawn");
+      // Drain durable platform writes only after the cloud read has completed;
+      // this preserves FIFO ordering while still allowing startup recovery.
+      await this.processCloudUploadQueue().catch(error => {
+        this.diagnostic({ event: "cloud-upload-queue-drain-failed", error: error?.message || String(error) });
+      });
       if (this.status === "ready" && this.pendingCommentRetirements.length) {
         await this.retryPendingCommentRetirements().catch(error => {
           this.diagnostic({ event: "comment-retirement-retry-failed", error: error?.message || String(error) });
+        });
+      }
+      if (this.status === "ready" && this.isAuthority() && !recoveringDailySpawn) {
+        await this.publishDailyRedTreasures().catch(error => {
+          this.diagnostic({ event: "daily-red-spawn-deferred", error: error?.message || String(error) });
         });
       }
       return this.state();
@@ -4542,7 +4909,9 @@ class OnlineWorldService {
       try {
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
-            history = await this.readHistory(Boolean(fullScan || !this.control || this.pendingIntentTransaction || this.pendingTreasureRewards().length));
+            const pendingNeedsRecheck = Boolean(this.pendingIntentTransaction
+              && ambiguousPublicationError(this.pendingIntentTransaction.lastPublishError));
+            history = await this.readHistory(Boolean(fullScan || !this.control || pendingNeedsRecheck || this.pendingTreasureRewards().length));
             break;
           } catch (error) {
             if (error.code !== "FYOW_HISTORY_CHANGED" || attempt === 2) throw error;
@@ -4666,14 +5035,20 @@ class OnlineWorldService {
           this.recoverLegacyGeneralRecalls(history.assembled.records);
           if (this.pendingIntentTransaction?.phase === "prepared" && this.pendingIntentTransaction?.changes
             && !this.appliedMapDeltaIds.has(String(this.pendingIntentTransaction.mapDeltaId))) {
-            try {
-              await this.retryPendingIntentTransactionPublish({ comments: history.comments });
-            } catch (error) {
-              if (error?.code === "FYOW_OUTBOX_STALE" || !deferablePublicationError(error)) {
-                this.cancelPendingIntentTransaction(error?.code || "publication-rejected");
-              } else {
-                this.restorePendingIntentOptimisticProjection(this.pendingIntentTransaction);
-                this.recordPendingPublicationFailure(error);
+            if (this.pendingPublicationWasSuperseded(this.pendingIntentTransaction)) {
+              this.cancelPendingIntentTransaction("FYOW_OUTBOX_STALE");
+            } else if (this.pendingPublicationCoolingDown()) {
+              this.restorePendingIntentOptimisticProjection(this.pendingIntentTransaction);
+            } else {
+              try {
+                await this.retryPendingIntentTransactionPublish({ comments: history.comments });
+              } catch (error) {
+                if (error?.code === "FYOW_OUTBOX_STALE" || !deferablePublicationError(error)) {
+                  this.cancelPendingIntentTransaction(error?.code || "publication-rejected");
+                } else {
+                  this.restorePendingIntentOptimisticProjection(this.pendingIntentTransaction);
+                  this.recordPendingPublicationFailure(error);
+                }
               }
             }
             this.assertSyncActive();
@@ -4712,9 +5087,19 @@ class OnlineWorldService {
         });
         this.assertSyncActive();
         if (this.pendingIntentTransaction?.phase === "prepared") {
-          const error = new Error("行动结果已保存在本机，等待同步，请重试连接");
-          error.code = "FYOW_PUBLICATION_PENDING";
-          throw error;
+          const pending = this.pendingPublicationState();
+          this.status = "pending-sync";
+          this.error = pending?.rateLimited && pending.retryAfterMs > 0
+            ? `请求过于频繁，行动已保存在本机，将在 ${Math.ceil(pending.retryAfterMs / 1000)} 秒后自动重试`
+            : "行动结果已保存在本机，正在等待自动同步";
+          this.updateLoadProgress({
+            phase: "complete", active: false,
+            totalComments: this.loadProgress?.readComments || 0
+          });
+          this.lastSyncAt = this.now();
+          this.saveCache();
+          this.notify();
+          return this.state();
         }
       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
@@ -4794,7 +5179,7 @@ class OnlineWorldService {
       label: "初始将领生成",
       validate: value => generalGenerationQualityIssue(value, effect)
     });
-    const seededEffect = { ...effect, generatedSeed: this.world.seed };
+    const seededEffect = { ...effect, generatedSeed: this.world.seed, balance: this.world.balance };
     const general = normalizeGeneratedGeneral(parsed, seededEffect);
     this.pendingJoinPreview = {
       previewId,
@@ -4836,11 +5221,11 @@ class OnlineWorldService {
     if (this.migrationActive) throw new Error("游戏服务器正在搬迁，请稍后再试");
     if (this.pendingMigration?.workId && this.pendingMigration.workId !== this.work?.id) throw new Error("游戏服务器正在搬迁，请等待自动转入新服务器");
     if (this.pendingIntentTransaction) {
-      try { await this.sync(true); }
+      try { await this.sync(false); }
       catch (error) { throw actionConnectionError(error); }
       if (this.pendingIntentTransaction) throw new Error("上一项行动正在核对提交结果，请稍后再试");
     }
-    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏暂时未连接，请稍后再试");
+    if (["opening", "pending-sync", "degraded", "error"].includes(this.status)) throw new Error("游戏暂时未连接，请稍后再试");
     const normalized = { ...intent, idempotencyKey: String(intent?.idempotencyKey || crypto.randomUUID()) };
     const key = `${String(normalized.type || "unknown")}:${normalized.idempotencyKey}`;
     if (this.intentInFlight) {
@@ -5021,7 +5406,11 @@ class OnlineWorldService {
     const actionTime = this.now();
     if (!options.internal) await this.settleLocalClock(actionTime);
     if (!options.internal && this.pendingIntentTransaction) throw new Error("上一项行动正在同步，请稍后重试");
-    const identity = await this.getIdentity();
+    let identity = null;
+    const ensureIdentity = async () => {
+      if (!identity) identity = await this.getIdentity();
+      return identity;
+    };
     bindWorldAuthority(this.world, this.control);
     const beforeWorld = cloneJson(this.world);
     const outcome = applyIntent(this.world, intent, {
@@ -5033,13 +5422,27 @@ class OnlineWorldService {
       requireExpectedMarchQuote: String(intent.type || "") === "march"
     });
     if (outcome.duplicate) return { duplicate: true, state: this.state() };
+    if (String(intent.type) === "deploy-general") {
+      const general = outcome.state.generals[intent.generalId];
+      if (String(general?.memoryText || "").length > 150
+        || (!general?.memoryText && general?.interactionHistory?.length)) {
+        const request = buildGeneralMemoryUpdateRequest(outcome.state, general, outcome.state.players[actorAccountId],
+          { idempotencyKey: `deploy-summary:${intent.idempotencyKey || crypto.randomUUID()}`, userText: "压缩已有经历，不添加新事件。" }, actionTime);
+        const summary = await this.requestStructuredModel(request, {
+          manualRetry: true, label: "部署将领记忆概述", validate: generalMemoryQualityIssue
+        });
+        general.memoryText = String(summary.compactMemory).trim();
+      }
+      general.publicMemoryText = String(general.memoryText || "");
+    }
     this.world = outcome.state;
     this.holdTreasureRewards(beforeWorld);
     if (intent.type === "join") {
       const player = this.world.players[actorAccountId];
       player.accountName = this.account().username;
-      player.deviceSigningPublicKey = identity.signingPublicKey;
-      player.deviceEncryptionPublicKey = identity.encryptionPublicKey;
+      const joinIdentity = await ensureIdentity();
+      player.deviceSigningPublicKey = joinIdentity.signingPublicKey;
+      player.deviceEncryptionPublicKey = joinIdentity.encryptionPublicKey;
     }
     const localEvent = this.sanitizedEvent(outcome.event);
     const localEventStart = this.localEvents.length;
@@ -5088,7 +5491,7 @@ class OnlineWorldService {
       // it before publishing the public delta so a failed request rolls back
       // the removed candidate and the UI can ask before every retry.
       if (outcome.effects.some(effect => effect.type === "general-generation-request" && effect.confirmed)) {
-        const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: false });
+        const handled = await this.handleEffects(outcome.effects, await ensureIdentity(), { deferOnFailure: false });
         deferredEffects = handled.deferred;
         effectsHandledEarly = true;
       }
@@ -5110,7 +5513,11 @@ class OnlineWorldService {
         eventId: localEvent?.eventId,
         changes
       });
-      mapDelta = options.internal ? null : await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId, beforeWorld });
+      mapDelta = options.internal ? null : await this.publishMapChanges(
+        changes,
+        hasPublicMapChanges(changes) ? await ensureIdentity() : null,
+        { mapDeltaId: transactionMapDeltaId, beforeWorld }
+      );
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
@@ -5119,8 +5526,9 @@ class OnlineWorldService {
         }
         this.saveCache();
       }
-      if (intent.type !== "join" && !effectsHandledEarly) {
-        const handled = await this.handleEffects(outcome.effects, identity, { deferOnFailure: Boolean(mapDelta) });
+      if (intent.type !== "join" && !effectsHandledEarly
+        && outcome.effects.some(effect => effect.type === "general-generation-request" && (effect.initial || effect.confirmed))) {
+        const handled = await this.handleEffects(outcome.effects, await ensureIdentity(), { deferOnFailure: Boolean(mapDelta) });
         deferredEffects = handled.deferred;
       }
       let snapshotWarning = null;
@@ -5148,7 +5556,7 @@ class OnlineWorldService {
       const pendingPublication = !mapDelta && transactionMapDeltaId
         && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId;
       if (pendingPublication && deferablePublicationError(error)) {
-        this.status = "degraded";
+        this.status = "pending-sync";
         this.error = "行动已保存在本机，正在等待平台同步";
         this.recordPendingPublicationFailure(error);
         this.notify();
@@ -5211,7 +5619,11 @@ class OnlineWorldService {
     };
     const localEventStart = this.localEvents.length;
     this.recordLocalEvent(event);
-    const identity = await this.getIdentity();
+    let identity = null;
+    const ensureIdentity = async () => {
+      if (!identity) identity = await this.getIdentity();
+      return identity;
+    };
     let mapDelta = null;
     let transactionMapDeltaId = "";
     try {
@@ -5223,7 +5635,11 @@ class OnlineWorldService {
         eventId: event.eventId,
         changes
       });
-      mapDelta = await this.publishMapChanges(changes, identity, { mapDeltaId: transactionMapDeltaId, beforeWorld });
+      mapDelta = await this.publishMapChanges(
+        changes,
+        hasPublicMapChanges(changes) ? await ensureIdentity() : null,
+        { mapDeltaId: transactionMapDeltaId, beforeWorld }
+      );
       if (mapDelta && this.pendingIntentTransaction?.mapDeltaId === mapDelta.mapDeltaId) {
         this.pendingIntentTransaction.phase = "published";
         this.pendingIntentTransaction.publishedAt = this.now();
@@ -5232,14 +5648,16 @@ class OnlineWorldService {
         }
         this.saveCache();
       }
-      await this.handleEffects(settled.effects, identity, { deferOnFailure: Boolean(mapDelta) });
+      if (settled.effects.some(effect => effect.type === "general-generation-request" && (effect.initial || effect.confirmed))) {
+        await this.handleEffects(settled.effects, await ensureIdentity(), { deferOnFailure: Boolean(mapDelta) });
+      }
       if (!transactionMapDeltaId || this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId) this.pendingIntentTransaction = null;
       this.saveCache();
       return settled.effects;
     } catch (error) {
       if (!mapDelta && transactionMapDeltaId && this.pendingIntentTransaction?.mapDeltaId === transactionMapDeltaId
         && deferablePublicationError(error)) {
-        this.status = "degraded";
+        this.status = "pending-sync";
         this.error = "行动结果已保存在本机，等待同步，请重试连接";
         this.recordPendingPublicationFailure(error);
         this.notify();
@@ -5422,6 +5840,58 @@ class OnlineWorldService {
     }
   }
 
+  async retireBalanceDirectives(record, snapshot) {
+    return this.enqueueCloudUpload({
+      kind: "balance-retire", key: `balance-retire:${record.workId}:${record.authorityId}`,
+      workId: record.workId, record, snapshot
+    });
+  }
+
+  async deleteSupersededBalanceDirectives(record, snapshot) {
+    if (record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId
+      || record.authorityAccountId !== this.account().accountId) throw new Error("设置清理的服务器或账号已变更");
+    const comments = await this.readAllCommentSources({ requireStable: true });
+    const assembled = assembleCommentRecords(comments);
+    const confirmed = assembled.records.find(item => canonicalJson(item.record) === canonicalJson(record) && this.validAuthorityDirective(item));
+    const confirmedSnapshot = assembled.records.find(item => canonicalJson(item.record) === canonicalJson(snapshot)
+      && this.validAuthorSource(item) && verifySignedRecord(item.record, this.control.authoritySigningPublicKey));
+    if (!confirmed || !confirmedSnapshot) throw new Error("新设置与快照尚未完成云端回读，旧指令已保留");
+    const covered = new Set(snapshot.ledgerCoverage?.appliedAuthorityIds || []);
+    const old = assembled.records.filter(item => item.record?.schema === FYOW_SCHEMAS.authority
+      && item.record.workId === record.workId && item.record.seasonId === record.seasonId
+      && covered.has(String(item.record.authorityId || item.record.id || ""))
+      && this.validAuthorSource(item) && verifySignedRecord(item.record, this.control.authoritySigningPublicKey)
+      && comparePlatformOrder(item, confirmed) < 0
+      && compareOrderValue(recordPlatformOrder(item), snapshot.ledgerCoverage.through) <= 0);
+    const sources = old.flatMap(item => item.sources || [])
+      .filter(source => commentAccountId(source) === this.account().accountId && commentParentId(source));
+    for (let index = 0; index < sources.length; index += 100) {
+      const batch = sources.slice(index, index + 100);
+      await this.commentOperations.deleteMany({ workId: record.workId, sources: batch, knownOwnedCommentIds: batch.map(commentId) });
+    }
+    return { deleted: sources.length };
+  }
+
+  async publishDailyRedTreasures() {
+    if (!this.world || !this.control || !this.isAuthority() || this.account().accountId !== this.work?.authorAccountId
+      || this.pendingIntentTransaction || this.migrationActive || this.cloudUploadQueue.length) return null;
+    const batch = dailyRedTreasureBatch(this.world, this.now());
+    if (!batch) return null;
+    const identity = await this.getIdentity();
+    if (identity.signingPublicKey !== this.control.authoritySigningPublicKey) return null;
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.authority, authorityId: `daily-red:${this.control.seasonId}:${batch.day}`,
+      gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId,
+      authorityAccountId: this.account().accountId, type: "daily-red-spawn",
+      ...batch, issuedAt: this.now()
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    if (!this.applyAuthorityDirective({ record, sources })) throw new Error("每日素材记录尚未通过验证");
+    this.saveCache();
+    this.notify();
+    return record;
+  }
+
   async scatterPublicTreasures(options = {}) {
     if (!this.world || !this.control || !this.isAuthority() || this.account().accountId !== this.work?.authorAccountId) return null;
     const next = cloneJson(this.world);
@@ -5453,7 +5923,7 @@ class OnlineWorldService {
     if (this.syncInFlight) await this.syncInFlight;
     if (this.migrationActive) throw new Error("游戏服务器正在搬迁，请稍后再试");
     if (this.pendingMigration?.workId && this.pendingMigration.workId !== this.work?.id) throw new Error("游戏服务器正在搬迁，请等待自动转入新服务器");
-    if (["opening", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
+    if (["opening", "pending-sync", "degraded", "error"].includes(this.status)) throw new Error("游戏连接暂时不可用，请稍后再试");
     if (this.intentInFlight) throw new Error("上一项行动仍在处理中，请等待完成");
     const running = this.administerNow(command);
     this.intentInFlight = running;
@@ -5473,6 +5943,25 @@ class OnlineWorldService {
     const account = this.account();
     if (!this.work.authorAccountId || account.accountId !== this.work.authorAccountId || !this.isAuthority()) throw new Error("服主指令仅对伴生作品作者开放");
     const type = String(command.type || "");
+    if (type === "balance-update") {
+      const balance = normalizeBalance(command.balance, true);
+      const identity = await this.getIdentity();
+      if (identity.signingPublicKey !== this.control.authoritySigningPublicKey) throw new Error("当前设备不是本赛季登记的作者设备");
+      const record = signRecord({
+        schema: FYOW_SCHEMAS.authority, authorityId: crypto.randomUUID(),
+        gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId,
+        authorityAccountId: account.accountId, type, balance, issuedAt: this.now()
+      }, identity.signingPrivateKey);
+      const sources = await this.postRecord(record);
+      if (!this.applyAuthorityDirective({ record, sources })) throw new Error("平衡设置尚未通过云端验证");
+      this.saveCache();
+      this.notify();
+      const snapshot = await this.publishSnapshot();
+      await this.retireBalanceDirectives(record, snapshot).catch(error => {
+        this.diagnostic({ event: "balance-retirement-deferred", error: error?.message || String(error) });
+      });
+      return { command: { type, authorityId: record.authorityId }, state: this.state() };
+    }
     if (["scatter-treasures", "treasure-scatter"].includes(type)) {
       const record = await this.scatterPublicTreasures(command);
       this.saveCache();
@@ -5660,7 +6149,7 @@ class OnlineWorldService {
           label: effect.initial ? "初始将领生成" : "将领生成",
           validate: value => generalGenerationQualityIssue(value, effect)
         });
-        const seededEffect = { ...effect, generatedSeed: this.world.seed };
+        const seededEffect = { ...effect, generatedSeed: this.world.seed, balance: this.world.balance };
         const general = normalizeGeneratedGeneral(parsed, seededEffect);
         await this.applyLocalIntent({
           type: "grant-general",
@@ -5959,7 +6448,13 @@ class OnlineWorldService {
     await this.postRecord(wake, { parentId: target.commentRootId, toAccountId: String(toAccountId) });
     const chat = await this.ensurePrivateChat(toAccountId);
     const chunks = encodeCommentRecord(direct);
-    for (const content of chunks) await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: chat.id, content }, timeout: 20000 }));
+    await this.enqueueCloudUpload({
+      kind: "chat-messages",
+      key: this.cloudUploadKey("chat-messages", { chatId: chat.id, messageId }),
+      chatId: String(chat.id),
+      messageId,
+      contents: cloneJson(chunks)
+    });
     const sentItem = {
       messageId, direction: "out", gameId: GRID_GAME_ID, workId: this.work.id,
       seasonId: this.control.seasonId, controlId, toAccountId: recipient, type: messageType,
@@ -6421,4 +6916,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, publicAccountName, isEmailLikeAccountName, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { balanceValue } = require("./grid-balance.cjs");
 
 const TALENT_SCHEMA = "fyow.grid-talent/1";
 const RESOURCE_GRADES = Object.freeze(["D-", "D", "D+", "C-", "C", "C+", "B-", "B", "B+", "A-", "A", "A+", "S-", "S", "S+"]);
@@ -278,11 +279,12 @@ function progressForPotency(value) {
   return Math.round(rarity.progressMin + ratio * (rarity.progressMax - rarity.progressMin));
 }
 
-function pickRarity(seed, id) {
-  const total = RARITIES.reduce((sum, rarity) => sum + rarity.weight, 0);
+function pickRarity(seed, id, balance) {
+  const weight = rarity => balanceValue({ balance }, `talentWeight_${rarity.id}`);
+  const total = RARITIES.reduce((sum, rarity) => sum + weight(rarity), 0);
   let ticket = hashUnit(seed, "rarity", id) * total;
   for (const rarity of RARITIES) {
-    ticket -= rarity.weight;
+    ticket -= weight(rarity);
     if (ticket < 0) return rarity;
   }
   return RARITIES[0];
@@ -304,7 +306,7 @@ function rollTalent(seedOrOptions, idValue) {
   const options = normalizedOptions(seedOrOptions, idValue);
   const talentId = TALENT_BY_ID[options.talentId] ? options.talentId : pickCatalogId(options.seed, options.id);
   const requestedRarity = RARITY_BY_ID[options.rarity];
-  const rarity = requestedRarity || pickRarity(options.seed, options.id);
+  const rarity = requestedRarity || pickRarity(options.seed, options.id, options.balance);
   const width = rarity.progressMax - rarity.progressMin + 1;
   const progress = rarity.progressMin + (hash(options.seed, "quality", options.id, talentId).readUInt32BE(0) % width);
   return deepFreeze({
@@ -362,15 +364,35 @@ function formatPercent(value) {
   return `${(Math.abs(Number(value)) * 100).toFixed(2)}%`;
 }
 
-function describeTalent(talent) {
+function conditionLabel(condition) {
+  const terrainNames = { plain: "平原", forest: "森林", mountain: "山地", river: "河流", coast: "海岸" };
+  switch (condition.op) {
+    case "terrain-in": return condition.values.map(value => terrainNames[value] || value).join("/");
+    case "resource-rank-gte": return `资源等级≥${condition.value}`;
+    case "resource-rank-lte": return `资源等级≤${condition.value}`;
+    case "population-gte": return `人口≥${condition.value}`;
+    case "population-lte": return `人口≤${condition.value}`;
+    case "occupation-count-lte": return `占领次数≤${condition.value}`;
+    case "neutral-is": return condition.value ? "中立地块" : "已占领地块";
+    case "attacking-is": return condition.value ? "进攻时" : "非进攻时";
+    case "army-size-gte": return `兵力≥${condition.value}`;
+    case "army-size-lte": return `兵力≤${condition.value}`;
+    case "discovery-kind-is": return condition.value === "training" ? "练兵时" : "攻打时";
+    case "hour-between": return `北京时间${condition.start}:00至${condition.end}:59`;
+    default: return "";
+  }
+}
+
+function describeTalent(talent, state) {
   const normalized = normalizeTalent(talent, talent?.instanceId || "describe");
   const definition = TALENT_BY_ID[normalized.talentId];
   const rarity = RARITY_BY_ID[normalized.rarity];
   const clauses = definition.effects.map(item => {
-    const scopeMultiplier = item.scope === "carried" ? 1 : DEPLOYED_EFFECT_MULTIPLIER;
+    const scopeMultiplier = item.scope === "carried" ? 1 : balanceValue(state, "deployedTalentRatio");
     const amount = normalized.potency * Math.abs(item.scale) * scopeMultiplier;
     const direction = item.scale < 0 ? "降低" : "提高";
-    return `${SCOPE_LABELS[item.scope]}${KEY_LABELS[item.key]}${direction}${formatPercent(amount)}`;
+    const conditions = item.when.map(conditionLabel).filter(Boolean);
+    return `${SCOPE_LABELS[item.scope]}${KEY_LABELS[item.key]}${direction}${formatPercent(amount)}${conditions.length ? `（${conditions.join("，")}）` : ""}`;
   });
   return `【${rarity.label}】${definition.name}：${clauses.join("；")}。`;
 }
@@ -405,7 +427,7 @@ function evaluationFacts(state, context) {
   const now = Number(context.now);
   const hour = Number.isFinite(Number(context.hour))
     ? ((Math.trunc(Number(context.hour)) % 24) + 24) % 24
-    : (Number.isFinite(now) ? new Date(now).getUTCHours() : 12);
+    : (Number.isFinite(now) ? new Date(now + 8 * 3600000).getUTCHours() : 12);
   return {
     action, position, cell, actorAccountId, relation,
     terrain: String(context.terrain ?? cell.terrain ?? "plain"),
@@ -510,7 +532,7 @@ function talentModifiers(state = {}, context = {}) {
       const item = definition.effects[index];
       if (item.action !== facts.action || !scopeMatches(item.scope, source, facts)) continue;
       if (!item.when.every(condition => conditionMatches(condition, facts))) continue;
-      const scopeMultiplier = item.scope === "carried" ? 1 : DEPLOYED_EFFECT_MULTIPLIER;
+      const scopeMultiplier = item.scope === "carried" ? 1 : balanceValue(state, "deployedTalentRatio");
       const value = round6(talent.potency * item.scale * scopeMultiplier);
       totals[item.key] += value;
       applied.push(Object.freeze({ generalId: source.generalId || null, talentId: talent.talentId, effectIndex: index, scope: item.scope, key: item.key, value, enemyDebuff: item.scope === "enemy-neighbor" }));
@@ -534,7 +556,10 @@ function upgradeTalent(talent, materialValue, params = {}) {
     const seed = String(params.seed ?? current.instanceId);
     const nonce = String(params.nonce ?? 0);
     const talentId = pickCatalogId(seed, `${current.instanceId}:reroll:${nonce}`, current.talentId);
-    next = rollTalent({ seed, id: current.instanceId, talentId });
+    const growth = upgradeTalent(current, "gold", params);
+    randomFactor = growth.randomFactor;
+    rolledProgressDelta = growth.rolledProgressDelta;
+    next = normalizeTalent({ ...current, talentId, progress: growth.talent.progress }, seed);
   } else {
     let progress = current.progress;
     if (material.mode === "ascend") {
@@ -544,8 +569,11 @@ function upgradeTalent(talent, materialValue, params = {}) {
     } else {
       const seed = String(params.seed ?? current.instanceId);
       const nonce = String(params.nonce ?? 0);
-      randomFactor = 0.9 + hashUnit(seed, "material-growth", current.instanceId, nonce, material.id) * 0.2;
-      rolledProgressDelta = Math.max(1, Math.round(material.progress * randomFactor));
+      const state = { balance: params.balance };
+      const minimum = balanceValue(state, "materialGrowthRandomMin");
+      randomFactor = minimum + hashUnit(seed, "material-growth", current.instanceId, nonce, material.id)
+        * (balanceValue(state, "materialGrowthRandomMax") - minimum);
+      rolledProgressDelta = Math.max(1, Math.round(balanceValue(state, `materialProgress_${material.id}`) * randomFactor));
       progress = clamp(progress + rolledProgressDelta, 0, 1000);
     }
     next = normalizeTalent({ ...current, progress }, params.seed || current.instanceId, current.instanceId);

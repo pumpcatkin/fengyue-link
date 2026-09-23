@@ -84,7 +84,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名应鲜明易记；heightCm、weightKg 与 measurements 应符合人物体型；appearanceSetting 只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向，长度自由，以完整、具体且不重复为准。初始战力完全由游戏根据赛季、玩家和生成来源稳定分配为 250～350，模型不需要也不得决定该数值。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 1～3 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。
+任务：根据输入 JSON 生成一名乱世将领。必须只返回一个完整 JSON 对象。将领信息分为姓名、性别、身高、体重、三围、外观设定和核心设定：gender 必须严格等于输入的 male 或 female；姓名应鲜明易记；heightCm、weightKg 与 measurements 应符合人物体型；appearanceSetting 只描述脸部、发型、体型、种族外观、衣着与显著外观特征；coreSetting 承载除上述身体资料之外的出身、经历、性格、志趣、军事能力、弱点、当前处境、立场与可发展的关系倾向，长度自由，以完整、具体且不重复为准。初始战力完全由游戏根据赛季、玩家和生成来源稳定分配为 250～350，模型不需要也不得决定该数值。generationKind 为 initial-general 时，initialWish 是最高优先级绑定要求：逐项落实其中所有明确特征，只使用 orientation、gender 和 initialWish，不采用 directionTags；即使 initialWish 很短，也要围绕其中线索主动扩展成鲜明、自洽、可长期互动的完整良将。为 discovered-general 时，将 2～6 个 directionTags（标签及其注释）全部自然融入人物。禁止输出未提供、暂无、不详、未知、待补充等占位内容，不要把外貌重复写进 coreSetting。不要替玩家决定行动，不生成游戏数值之外的新规则。
 输出 Schema：{"name":"姓名","gender":"male|female","heightCm":168,"weightKg":54.5,"measurements":{"chestCm":88,"waistCm":60,"hipCm":90},"appearanceSetting":"外观设定","coreSetting":"核心设定"}
 ```
 
@@ -144,7 +144,7 @@ npm run game:bundle
 内容：
 
 ```text
-任务：在将领完成一次互动后，更新其长期记忆。必须只返回一个完整 JSON 对象。category 只能为 speech 或 deed；summary 为 1～120 字，emotion 为 1～40 字，intimacyDelta 为 -5 到 5 的整数。compactMemory 必须同时包含“言谈：”和“经历：”，总长度不超过 1000 个汉字；合并重复事件时使用年份区间和次数，保留对象设定名、事件、情绪和关系结果。结构化 masterHistory、captivityHistory 中的历任主公、被俘、降服与易主事实必须完整反映，不得改写或遗漏；只使用输入中的设定名，不输出任何账号编号、recipientKey 或其他内部标识。
+任务：在将领完成一次互动后，更新其长期记忆。必须只返回一个完整 JSON 对象。category 只能为 speech 或 deed；summary 为 1～120 字，emotion 为 1～40 字，intimacyDelta 为 -5 到 5 的整数。compactMemory 必须同时包含“言谈：”和“经历：”，总长度不超过150字符（含标点、换行和标题），仅保留重要事实，不复述逐句对话；合并重复事件时使用年份区间和次数，保留对象设定名、事件、情绪和关系结果。优先概括 masterHistory、captivityHistory 中重要的主从关系变化，使用简短概述，完整履历由结构化字段保留；只使用输入中的设定名，不输出任何账号编号、recipientKey 或其他内部标识。
 输出 Schema：{"category":"speech|deed","summary":"事件摘要","emotion":"情绪与关系感受","intimacyDelta":1,"compactMemory":"言谈：……\n经历：……"}
 ```
 
@@ -196,7 +196,7 @@ parent.postMessage({
 
 前端可提交：`join`、`start-mining`、`stop-mining`、`train`、`power-train`、`march`、`deploy-general`、`recall-general`、`take-general`、`talk-general`。授予将领、记录互动和降服属于宿主内部动作。
 
-性取向、自定义性癖标签及其注释、初始良将描述、金币、行动任务、行军队伍、随行/俘虏将领及本地事件不写评论。普通发掘请求从自定义标签中稳定抽取 1～3 个方向；初始将领请求忽略标签，只使用性取向与第四问自由描述。玩家可以在游戏内“修改性癖偏好”中更新后续生成方向。
+性取向、自定义性癖标签及其注释、初始良将描述、金币、行动任务、行军队伍、随行/俘虏将领及本地事件不写评论。普通发掘请求从自定义标签中稳定抽取 2～6 个方向；初始将领请求忽略标签，只使用性取向与第四问自由描述。玩家可以在游戏内“修改性癖偏好”中更新后续生成方向。
 
 评论区只承载格子归属、驻军和部署将领档案。合并顺序只采用平台评论时间戳与评论 ID。每 5 秒后台静默轮询，游戏 UI 没有手动同步按钮或同步频率提示。
 

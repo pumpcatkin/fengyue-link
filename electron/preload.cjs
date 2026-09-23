@@ -77,6 +77,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message),
   migrateOnlineWorld: () => ipcRenderer.invoke("online-world:migrate"),
   administerOnlineWorld: command => ipcRenderer.invoke("online-world:administer", command),
+  resetOnlineWorldData: () => ipcRenderer.invoke("online-world:reset-own-data"),
   updateOnlineWorldPreferences: preferences => ipcRenderer.invoke("online-world:update-preferences", preferences),
   newInstance: profileId => ipcRenderer.invoke("backend:new-instance", profileId),
   onState: callback => ipcRenderer.on("backend:state", (_event, state) => callback(state)),

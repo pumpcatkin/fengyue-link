@@ -231,8 +231,9 @@ function onlineWorldIdentityPath(profileId, accountId) {
   return path.join(app.getPath("userData"), "online-world", "identities", `${safeProfileId(profileId)}-${safeProfileId(accountId || "unknown")}.json`);
 }
 
-function onlineWorldCachePath(profileId) {
-  return path.join(app.getPath("userData"), "online-world", "cache", `${safeProfileId(profileId)}.json`);
+function onlineWorldCachePath(profileId, accountId = "") {
+  const suffix = accountId ? `-${safeProfileId(accountId)}` : "";
+  return path.join(app.getPath("userData"), "online-world", "cache", `${safeProfileId(profileId)}${suffix}.json`);
 }
 
 function onlineWorldCardLibraryPath(profileId) {
@@ -694,6 +695,8 @@ class AccountBackend {
       getOrigin: () => this.origin,
       readPlatformTime: () => this.platformServerTime(),
       cacheFile: onlineWorldCachePath(this.profileId),
+      legacyCacheFile: onlineWorldCachePath(this.profileId),
+      cacheFileForAccount: accountId => onlineWorldCachePath(this.profileId, accountId),
       onDiagnostic: detail => this.appendSessionLog("online-world", detail),
       onChange: worldState => {
         if (!this.destroying && this.window && !this.window.isDestroyed()) this.window.webContents.send("online-world:state", worldState);
@@ -9861,6 +9864,7 @@ handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineW
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
 handleLocalIpc("online-world:migrate", () => backend.migrateOnlineWorldCard());
 handleLocalIpc("online-world:administer", (_event, command) => backend.onlineWorldService.administer(command || {}));
+handleLocalIpc("online-world:reset-own-data", () => backend.onlineWorldService.resetOwnPlayerData());
 handleLocalIpc("online-world:update-preferences", (_event, preferences) => backend.onlineWorldService.updateLocalPreferences(preferences || {}));
 handleLocalIpc("backend:new-instance", (_event, requested) => {
   backend.assertAdminAccount();

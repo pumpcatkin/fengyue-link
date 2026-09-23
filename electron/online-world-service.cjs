@@ -1097,6 +1097,8 @@ class OnlineWorldService {
     this.onChange = options.onChange || (() => {});
     this.onDiagnostic = options.onDiagnostic || (() => {});
     this.cacheFile = options.cacheFile;
+    this.cacheFileForAccount = typeof options.cacheFileForAccount === "function" ? options.cacheFileForAccount : null;
+    this.legacyCacheFile = options.legacyCacheFile || null;
     this.rawNow = options.now || (() => Date.now());
     this.monotonicNow = options.monotonicNow || (() => performance.now());
     this.clockAnchor = null;
@@ -1190,6 +1192,14 @@ class OnlineWorldService {
       displayName: username,
       points: account.points == null ? null : String(account.points)
     };
+  }
+
+  scopedCacheFile() {
+    if (!this.cacheFileForAccount) return this.cacheFile;
+    const accountId = String(this.getAccount?.()?.accountId || this.getAccount?.()?.id || "").trim();
+    if (!accountId) return this.cacheFile;
+    this.cacheFile = this.cacheFileForAccount(accountId);
+    return this.cacheFile;
   }
 
   isAuthority() {
@@ -2199,24 +2209,34 @@ class OnlineWorldService {
   }
 
   loadCache(workId) {
-    if (!this.cacheFile || !fs.existsSync(this.cacheFile)) return null;
-    try {
-      const root = readJsonWithBackupSync(fs, this.cacheFile, value => (
-        value?.version === 1 && value?.worlds && typeof value.worlds === "object"
-      ) || (
-        value?.version === 2 && value?.accounts && typeof value.accounts === "object"
-      )).value;
-      const accountId = this.account().accountId;
-      if (!accountId) return null;
-      if (root?.version === 2) {
-        const cached = root.accounts?.[accountId]?.worlds?.[workId];
-        if (cached) return cached;
-        const legacy = root.legacyWorlds?.[workId];
-        return this.cacheOwnerAccountId(legacy) === accountId ? legacy : null;
-      }
-      const legacy = root?.worlds?.[workId];
-      return this.cacheOwnerAccountId(legacy) === accountId ? legacy : null;
-    } catch { return null; }
+    const activeFile = this.scopedCacheFile();
+    const accountId = this.account().accountId;
+    if (!activeFile || !accountId) return null;
+    const files = [activeFile];
+    // Migrate the old profile-scoped cache only after proving that it belongs
+    // to the account that just authenticated. Never use it as a fallback for
+    // another account on the same device.
+    if (this.legacyCacheFile && this.legacyCacheFile !== activeFile && fs.existsSync(this.legacyCacheFile)) files.push(this.legacyCacheFile);
+    for (const file of files) {
+      if (!fs.existsSync(file)) continue;
+      try {
+        const root = readJsonWithBackupSync(fs, file, value => (
+          value?.version === 1 && value?.worlds && typeof value.worlds === "object"
+        ) || (
+          value?.version === 2 && value?.accounts && typeof value.accounts === "object"
+        )).value;
+        if (root?.version === 2) {
+          const cached = root.accounts?.[accountId]?.worlds?.[workId];
+          if (cached) return cached;
+          const legacy = root.legacyWorlds?.[workId];
+          if (this.cacheOwnerAccountId(legacy) === accountId) return legacy;
+        } else {
+          const legacy = root?.worlds?.[workId];
+          if (this.cacheOwnerAccountId(legacy) === accountId) return legacy;
+        }
+      } catch {}
+    }
+    return null;
   }
 
   verifiedCachedServer(card, cached = null) {
@@ -2239,9 +2259,10 @@ class OnlineWorldService {
   clearCacheForWork(workId) {
     const targetWorkId = String(workId || "");
     const accountId = this.account().accountId;
-    if (!this.cacheFile || !targetWorkId || !accountId || !fs.existsSync(this.cacheFile)) return false;
+    const cacheFile = this.scopedCacheFile();
+    if (!cacheFile || !targetWorkId || !accountId || !fs.existsSync(cacheFile)) return false;
     try {
-      const root = readJsonWithBackupSync(fs, this.cacheFile, value => (
+      const root = readJsonWithBackupSync(fs, cacheFile, value => (
         value?.version === 2 && value?.accounts && typeof value.accounts === "object"
       ) || (
         value?.version === 1 && value?.worlds && typeof value.worlds === "object"
@@ -2253,7 +2274,7 @@ class OnlineWorldService {
       } else if (root?.version === 1 && Object.hasOwn(root.worlds || {}, targetWorkId)) {
         delete root.worlds[targetWorkId];
       } else return false;
-      atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: true });
+      atomicWriteJsonSync(fs, cacheFile, root, { pretty: true });
       return true;
     } catch { return false; }
   }
@@ -2269,13 +2290,14 @@ class OnlineWorldService {
   }
 
   saveCache() {
-    if (!this.cacheFile || !this.work || !this.world) return;
+    const cacheFile = this.scopedCacheFile();
+    if (!cacheFile || !this.work || !this.world) return;
     const accountId = this.account().accountId;
     if (!accountId) return;
     let root = { version: 2, accounts: {}, legacyWorlds: {} };
     try {
-      if (fs.existsSync(this.cacheFile)) {
-        const existing = readJsonWithBackupSync(fs, this.cacheFile, value => (
+      if (fs.existsSync(cacheFile)) {
+        const existing = readJsonWithBackupSync(fs, cacheFile, value => (
           value?.version === 1 && value?.worlds && typeof value.worlds === "object"
         ) || (
           value?.version === 2 && value?.accounts && typeof value.accounts === "object"
@@ -2339,7 +2361,7 @@ class OnlineWorldService {
       updatedAt: this.now()
     };
     if (this.cacheOwnerAccountId(root.legacyWorlds[this.work.id]) === accountId) delete root.legacyWorlds[this.work.id];
-    atomicWriteJsonSync(fs, this.cacheFile, root, { pretty: false });
+    atomicWriteJsonSync(fs, cacheFile, root, { pretty: false });
   }
 
   saveMigrationDraftForSource(sourceWork, sourceControl) {
@@ -2904,6 +2926,12 @@ class OnlineWorldService {
           let result;
           if (item.kind === "balance-retire") {
             result = await this.deleteSupersededBalanceDirectives(item.record, item.snapshot);
+          } else if (item.kind === "self-reset-cleanup") {
+            result = await this.commentOperations.deleteMany({
+              workId: item.workId,
+              sources: item.sources || [],
+              knownOwnedCommentIds: item.knownOwnedCommentIds || []
+            });
           } else if (item.kind === "delete") {
             result = await this.commentOperations.deleteMany({
               workId: item.workId,
@@ -2959,6 +2987,7 @@ class OnlineWorldService {
           }
           this.cloudUploadQueue.shift();
           this.saveCache();
+          if (item.kind === "self-reset-cleanup") this.clearCacheForWork(item.workId);
           this.settleCloudUploadWaiters(item.key, null, result);
         } catch (error) {
           const terminalAckError = ["FYOW_COMMENT_ACK_MISMATCH", "FYOW_COMMENT_ACK_MISSING"].includes(String(error?.code || ""));
@@ -4207,6 +4236,7 @@ class OnlineWorldService {
   validAuthorityDirective(item) {
     const record = item?.record;
     if (record?.schema !== FYOW_SCHEMAS.authority || record.gameId !== GRID_GAME_ID || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
+    if (record.type === "player-self-reset") return this.validSelfResetDirective(item);
     if (!this.work?.authorAccountId || String(record.authorityAccountId || "") !== this.work.authorAccountId || String(this.control?.authorityAccountId || "") !== this.work.authorAccountId) return false;
     if (!this.validAuthorSource(item) || !recordPlatformOrder(item).timestamp || !verifySignedRecord(record, this.control.authoritySigningPublicKey)) return false;
     if (record.type === "balance-update") {
@@ -4237,6 +4267,45 @@ class OnlineWorldService {
     return Boolean(String(record.targetAccountId || "").trim());
   }
 
+  validSelfResetDirective(item) {
+    const record = item?.record;
+    const target = String(record?.targetAccountId || "").trim();
+    const player = this.world?.players?.[target];
+    const expectedKey = String(player?.deviceSigningPublicKey || "");
+    if (!target || target !== String(record?.authorityAccountId || "") || !player
+      || !expectedKey || String(record.deviceSigningPublicKey) !== expectedKey
+      || !verifySignedRecord(record, record.deviceSigningPublicKey)
+      || !recordPlatformOrder(item).timestamp || !Array.isArray(item.sources) || !item.sources.length
+      || !item.sources.every(source => commentAccountId(source) === target)) return false;
+    const scattered = Array.isArray(record.scatteredGenerals) ? record.scatteredGenerals : [];
+    if (scattered.length > 100) return false;
+    const locations = new Set();
+    for (const general of scattered) {
+      const id = String(general?.id || "");
+      const original = this.world.generals?.[id];
+      const x = Number(general?.location?.x);
+      const y = Number(general?.location?.y);
+      const key = `${x},${y}`;
+      if (!id || general.status !== "deployed" || String(general.holderAccountId || "")
+        || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE
+        || locations.has(key) || JSON.stringify(general).length > 30000
+        || !original || String(original.holderAccountId || "") !== target) return false;
+      const expected = publicGeneralState(original, this.world);
+      expected.holderAccountId = "";
+      expected.loyalToAccountId = "";
+      expected.status = "deployed";
+      expected.location = { x, y };
+      expected.marketListingId = null;
+      if (canonicalJson(expected) !== canonicalJson(general)) return false;
+      const cell = this.world.cells?.[key];
+      if (cell?.ownerAccountId || (cell?.generalIds || []).length) return false;
+      locations.add(key);
+    }
+    const currentEpoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[target] || 0)));
+    const nextEpoch = Math.max(0, Math.trunc(Number(record.playerEpoch || 0)));
+    return nextEpoch === currentEpoch + 1 && Boolean(this.world?.players?.[target]);
+  }
+
   clearResetLocalPlayer(targetAccountId) {
     if (String(targetAccountId) !== this.account().accountId) return;
     this.localEvents = [];
@@ -4246,6 +4315,83 @@ class OnlineWorldService {
     this.seenDirectMessageIds.clear();
     this.modelConversationIds.clear();
     this.pendingJoinPreview = null;
+    this.pendingModelEffects = [];
+    this.localDeployedGeneralProgress = {};
+    this.modelUsageEvents = [];
+    this.modelUsageSequence = 0;
+    this.pendingIntentTransaction = null;
+  }
+
+  scatteredGeneralsForReset(targetAccountId) {
+    const target = String(targetAccountId || "");
+    const candidates = [];
+    for (let y = 0; y < GRID_SIZE; y += 1) for (let x = 0; x < GRID_SIZE; x += 1) {
+      const key = `${x},${y}`;
+      const cell = this.world.cells?.[key];
+      if (cell?.ownerAccountId || (cell?.generalIds || []).length) continue;
+      candidates.push({ x, y, key });
+    }
+    const available = candidates.sort((left, right) => sha256(Buffer.from(`${this.world.seed}|self-reset|${target}|${left.key}`))
+      .localeCompare(sha256(Buffer.from(`${this.world.seed}|self-reset|${target}|${right.key}`))));
+    const owned = Object.values(this.world.generals || {})
+      .filter(general => String(general?.holderAccountId || "") === target)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    return owned.slice(0, available.length).map((general, index) => {
+      const location = { x: available[index].x, y: available[index].y };
+      const scattered = publicGeneralState(general, this.world);
+      scattered.holderAccountId = "";
+      scattered.loyalToAccountId = "";
+      scattered.status = "deployed";
+      scattered.location = location;
+      scattered.marketListingId = null;
+      return scattered;
+    });
+  }
+
+  async resetOwnPlayerData() {
+    if (!this.work || !this.control || !this.world) throw new Error("请先进入在线游戏");
+    const accountId = this.account().accountId;
+    if (!accountId || !this.world.players?.[accountId]) throw new Error("当前账号尚未加入本局");
+    if (this.syncInFlight) await this.syncInFlight;
+    if (this.intentInFlight || this.pendingIntentTransaction || this.cloudUploadQueue.length) throw new Error("还有云端操作正在处理中，请稍后重试");
+    await this.sync(true);
+    if (!this.world.players?.[accountId]) throw new Error("当前账号已经完成重置");
+    const identity = await this.getIdentity();
+    const playerEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[accountId] || 0))) + 1;
+    const record = signRecord({
+      schema: FYOW_SCHEMAS.authority,
+      authorityId: crypto.randomUUID(),
+      gameId: GRID_GAME_ID,
+      workId: this.work.id,
+      seasonId: this.control.seasonId,
+      authorityAccountId: accountId,
+      type: "player-self-reset",
+      targetAccountId: accountId,
+      playerEpoch,
+      scatteredGenerals: this.scatteredGeneralsForReset(accountId),
+      deviceSigningPublicKey: identity.signingPublicKey,
+      issuedAt: this.now()
+    }, identity.signingPrivateKey);
+    const sources = await this.postRecord(record);
+    if (!this.applyAuthorityDirective({ record, sources })) throw new Error("账号重置记录发布后未通过云端验证");
+    const resetSourceIds = new Set((sources || []).map(commentId).filter(Boolean));
+    const comments = await this.readAllCommentSources({ requireStable: true, fresh: true });
+    const deletable = comments.filter(comment => commentAccountId(comment) === accountId
+      && commentParentId(comment) && !resetSourceIds.has(commentId(comment)));
+    if (deletable.length) {
+      await this.enqueueCloudUpload({
+        kind: "self-reset-cleanup",
+        key: `self-reset-cleanup:${this.work.id}:${this.control.seasonId}:${record.authorityId}`,
+        workId: this.work.id,
+        sources: deletable,
+        knownOwnedCommentIds: deletable.map(commentId)
+      });
+    } else {
+      this.clearCacheForWork(this.work.id);
+    }
+    this.clearResetLocalPlayer(accountId);
+    this.notify();
+    return { reset: true, scatteredGenerals: record.scatteredGenerals.length, state: this.state() };
   }
 
   applyAuthorityPlayerActions() {
@@ -4297,7 +4443,7 @@ class OnlineWorldService {
       ? "treasure-scatter"
       : record.type === "simulate-player-intent"
         ? `simulate:${id}`
-        : `${record.type === "player-reset" ? "reset" : "ban"}:${target}`;
+        : `${record.type === "player-reset" ? "reset" : record.type === "player-self-reset" ? "self-reset" : "ban"}:${target}`;
     if (compareOrderValue(order, this.publicAuthorityOrders[authorityKey] || this.publicMapBaselineOrder) <= 0) return false;
     if (record.type === "balance-update") {
       this.world.balance = normalizeBalance(record.balance, true);
@@ -4342,7 +4488,7 @@ class OnlineWorldService {
         .slice(0, 500);
       this.world.authorityPlayerActions = Object.fromEntries(retained);
       this.applyAuthorityPlayerActions();
-    } else if (record.type === "player-reset") {
+    } else if (record.type === "player-reset" || record.type === "player-self-reset") {
       const targetEpoch = Number(record.playerEpoch);
       if (Number.isSafeInteger(targetEpoch) && targetEpoch <= Number(this.world.playerEpochs[target] || 0)) {
         this.appliedAuthorityIds.add(id);
@@ -4357,6 +4503,24 @@ class OnlineWorldService {
         delete this.publicCellWriteBases[key];
       }
       for (const generalId of ownedGenerals) this.publicGeneralOrders[generalId] = order;
+      if (record.type === "player-self-reset") {
+        const seenLocations = new Set();
+        for (const scattered of Array.isArray(record.scatteredGenerals) ? record.scatteredGenerals : []) {
+          const id = String(scattered?.id || "");
+          const x = Number(scattered?.location?.x);
+          const y = Number(scattered?.location?.y);
+          const key = `${x},${y}`;
+          if (!id || seenLocations.has(key)) continue;
+          seenLocations.add(key);
+          this.world.generals[id] = cloneJson(scattered);
+          this.world.cells[key] = {
+            ownerAccountId: null, soldiers: 0, generalIds: [id], occupationCount: 0
+          };
+          this.publicGeneralOrders[id] = order;
+          this.publicCellOrders[key] = order;
+          delete this.publicCellWriteBases[key];
+        }
+      }
       this.publicParticipantOrders[target] = order;
       this.clearResetLocalPlayer(target);
     } else {

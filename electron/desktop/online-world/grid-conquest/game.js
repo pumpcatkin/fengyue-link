@@ -1062,6 +1062,7 @@ function renderModelUsage() {
 function renderPlayer() {
   const player = ownPlayer();
   document.querySelector("#edit-preferences").disabled = !player;
+  document.querySelector("#open-game-settings").disabled = !player;
   document.querySelector("#center-player").disabled = !player?.position;
   document.querySelector("#player-name").textContent = player?.displayName || "尚未加入";
   document.querySelector("#gold").textContent = `${formatNumber(player?.gold)} 金币`;
@@ -2819,6 +2820,30 @@ document.querySelector("#add-custom-tag").addEventListener("click", () => {
 });
 document.querySelector("#edit-preferences").addEventListener("click", openPreferences);
 document.querySelector("#close-preferences").addEventListener("click", () => document.querySelector("#preferences-modal").classList.add("hidden"));
+document.querySelector("#open-game-settings").addEventListener("click", () => {
+  document.querySelector("#reset-account-confirmation").value = "";
+  document.querySelector("#reset-account-status").textContent = "";
+  document.querySelector("#game-settings-modal").classList.remove("hidden");
+});
+document.querySelector("#close-game-settings").addEventListener("click", () => document.querySelector("#game-settings-modal").classList.add("hidden"));
+document.querySelector("#reset-account-button").addEventListener("click", () => {
+  const input = document.querySelector("#reset-account-confirmation");
+  const status = document.querySelector("#reset-account-status");
+  if (input.value.trim() !== "确认删除") {
+    status.textContent = "请输入“确认删除”后再继续";
+    status.className = "preferences-save-status error";
+    input.focus();
+    playSound("notice");
+    return;
+  }
+  if (pendingHostKeys.has("self-reset")) return;
+  status.textContent = "正在上传散落记录…";
+  status.className = "preferences-save-status";
+  host("self-reset", { confirmationText: "确认删除" }, {
+    expectResult: true, key: "self-reset", control: document.querySelector("#reset-account-button"), timeoutMs: 30000,
+    timeoutMessage: "账号重置仍在同步，请稍后查看结果"
+  });
+});
 document.querySelectorAll('input[name="preference-orientation"]').forEach(input => input.addEventListener("change", () => { preferenceDraft.orientation = input.value; }));
 document.querySelector("#add-preference-tag").addEventListener("click", () => {
   const input = document.querySelector("#preference-tag-input");
@@ -3284,6 +3309,11 @@ window.addEventListener("message", event => {
       if (marchConfirmationTarget) renderMarchConfirmation();
     }
     if (requestState?.key === "preferences") setPreferencesSaveStatus("保存失败，请重试", "error");
+    if (requestState?.key === "self-reset") {
+      const status = document.querySelector("#reset-account-status");
+      status.textContent = event.data.message || "账号重置失败，请稍后重试";
+      status.className = "preferences-save-status error";
+    }
     joinSubmitting = false;
     playSound("error");
     if (requestState?.key === "intent:march" && /金币不足/.test(event.data.message || "")) showMapFeedback("金币不足");
@@ -3373,6 +3403,14 @@ window.addEventListener("message", event => {
       document.querySelector("#preferences-modal").classList.add("hidden");
       playSound("success");
       showToast("性癖偏好已保存");
+      return;
+    }
+    if (event.data.result?.selfReset) {
+      document.querySelector("#game-settings-modal").classList.add("hidden");
+      document.querySelector("#reset-account-confirmation").value = "";
+      playSound("notice");
+      showToast(`账号已重置，将领已散落 ${Number(event.data.result.scatteredGenerals || 0)} 处`);
+      if (!ownPlayer()) renderJoinWizard();
       return;
     }
     const dialogue = event.data.result?.dialogue;

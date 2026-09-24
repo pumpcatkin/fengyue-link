@@ -5218,23 +5218,84 @@ class OnlineWorldService {
           });
           throw new Error("云端控制记录尚未读取完整，请重试同步");
         }
-        const snapshots = this.verifiedSnapshots(history.assembled.records);
-        const snapshotItem = snapshots[0];
-        const snapshot = snapshotItem?.record;
+        let snapshots = this.verifiedSnapshots(history.assembled.records);
+        let snapshotItem = snapshots[0];
+        let snapshot = snapshotItem?.record;
         if (this.loadProgress?.active && !snapshot) throw new Error("云端状态记录尚未读取完整，请重试同步");
         if (this.migrationProof) {
           const proof = this.migrationProof;
-          const anchorControl = proof.targetControlId
+          let anchorControl = proof.targetControlId
             ? controls.find(item => String(item.record.id || "") === String(proof.targetControlId))?.record
             : null;
-          if (proof.targetControlId && !anchorControl) throw new Error("迁移目标控制记录不匹配");
+          let proofRebound = false;
+          if (proof.targetControlId && !anchorControl) {
+            // A retrying migration can publish the target control more than
+            // once, or resume from a draft whose ID predates the record that
+            // is actually visible in the target ledger. The signed target
+            // work, authority and season remain the trust boundary; bind to
+            // the newest compatible control instead of trapping the client in
+            // a permanent degraded state.
+            const compatible = controls.find(item => {
+              const record = item.record || {};
+              return (!proof.seasonId || String(record.seasonId || "") === String(proof.seasonId))
+                && (!proof.authoritySigningPublicKey
+                  || String(record.authoritySigningPublicKey || "") === String(proof.authoritySigningPublicKey));
+            });
+            if (!compatible) throw new Error("迁移目标控制记录不匹配");
+            anchorControl = compatible.record;
+            proofRebound = true;
+            this.diagnostic({
+              event: "migration-proof-control-rebound",
+              expectedControlId: String(proof.targetControlId || ""),
+              actualControlId: String(anchorControl.id || ""),
+              workId: this.work?.id || ""
+            });
+            this.control = anchorControl;
+            this.controlPlatformOrder = recordPlatformOrder(compatible);
+            snapshots = this.verifiedSnapshots(history.assembled.records, this.control);
+            snapshotItem = snapshots[0];
+            snapshot = snapshotItem?.record;
+          }
           if (proof.seasonId && String(this.control.seasonId || "") !== String(proof.seasonId)) throw new Error("迁移目标赛季不匹配");
           if (proof.authoritySigningPublicKey && String(this.control.authoritySigningPublicKey || "") !== String(proof.authoritySigningPublicKey)) throw new Error("迁移目标权威密钥不匹配");
-          if (anchorControl && proof.targetProgramHash && String(anchorControl.programHash || "") !== String(proof.targetProgramHash)) throw new Error("迁移目标程序摘要不匹配");
+          if (anchorControl && proof.targetProgramHash && String(anchorControl.programHash || "") !== String(proof.targetProgramHash)) {
+            // The target work may have received a valid program refresh after
+            // the reset record was written. Keep the signed target control,
+            // but record the drift rather than rejecting the whole server.
+            proofRebound = true;
+            this.diagnostic({
+              event: "migration-proof-program-rebound",
+              expectedProgramHash: String(proof.targetProgramHash || ""),
+              actualProgramHash: String(anchorControl.programHash || ""),
+              workId: this.work?.id || ""
+            });
+          }
           if (anchorControl && proof.seasonId && String(anchorControl.seasonId || "") !== String(proof.seasonId)) throw new Error("迁移锚点赛季不匹配");
           if (anchorControl && proof.authoritySigningPublicKey && String(anchorControl.authoritySigningPublicKey || "") !== String(proof.authoritySigningPublicKey)) throw new Error("迁移锚点权威密钥不匹配");
-          if (proof.targetSnapshotId && !snapshots.some(item => String(item.record.snapshotId || "") === String(proof.targetSnapshotId))) throw new Error("迁移目标快照不匹配");
+          if (proof.targetSnapshotId && !snapshots.some(item => String(item.record.snapshotId || "") === String(proof.targetSnapshotId))) {
+            if (!snapshot) throw new Error("迁移目标快照不匹配");
+            proofRebound = true;
+            this.diagnostic({
+              event: "migration-proof-snapshot-rebound",
+              expectedSnapshotId: String(proof.targetSnapshotId || ""),
+              actualSnapshotId: String(snapshot.snapshotId || ""),
+              workId: this.work?.id || ""
+            });
+          }
+          if (proofRebound) {
+            this.migrationProof = {
+              ...proof,
+              targetControlId: String(this.control?.id || proof.targetControlId || ""),
+              targetProgramHash: String(this.control?.programHash || proof.targetProgramHash || ""),
+              targetSnapshotId: String(snapshot?.snapshotId || proof.targetSnapshotId || "")
+            };
+          }
         }
+        if (this.loadProgress?.active && !snapshot) throw new Error("云端状态记录尚未读取完整，请重试同步");
+        // The migration proof is an entry-time binding, not a permanent
+        // polling requirement. Once the target ledger has passed validation,
+        // retaining a stale source-side ID would make every later sync fail.
+        if (this.migrationProof) this.migrationProof = null;
         if (this.pendingIntentTransaction?.phase === "prepared") {
           this.restorePendingIntentReplayBase(this.pendingIntentTransaction);
         }
@@ -5320,9 +5381,9 @@ class OnlineWorldService {
           return [];
         });
         this.assertSyncActive();
-        if (this.pendingIntentTransaction?.phase === "prepared") {
-          const pending = this.pendingPublicationState();
-          this.status = "pending-sync";
+         if (this.pendingIntentTransaction?.phase === "prepared") {
+           const pending = this.pendingPublicationState();
+           this.status = "pending-sync";
           this.error = pending?.rateLimited && pending.retryAfterMs > 0
             ? `请求过于频繁，行动已保存在本机，将在 ${Math.ceil(pending.retryAfterMs / 1000)} 秒后自动重试`
             : "行动结果已保存在本机，正在等待自动同步";
@@ -5332,10 +5393,10 @@ class OnlineWorldService {
           });
           this.lastSyncAt = this.now();
           this.saveCache();
-          this.notify();
-          return this.state();
-        }
-      }
+           this.notify();
+           return this.state();
+         }
+       }
       this.status = this.control && this.world ? "ready" : "needs-initialization";
       this.updateLoadProgress({
         phase: "complete", active: false,

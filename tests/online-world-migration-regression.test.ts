@@ -375,6 +375,83 @@ describe("online world migration regressions", () => {
     }
   });
 
+  it("rebinds a stale migration proof to the signed target ledger and clears it after entry", async () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = new OnlineWorldService({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      getIdentity: async () => identity,
+      requestConsole: async () => ({ data: [] }),
+      cacheFile: null,
+      onChange: () => {}
+    });
+    const targetWork = { id: "target-work", authorAccountId: "author" };
+    const state = createWorld({ authorityAccountId: "author", seasonId: "season-1" });
+    const control = signRecord({
+      schema: "fyow.control/3",
+      id: "actual-target-control",
+      gameId: "cc.aiero.fyow.grid-conquest",
+      workId: targetWork.id,
+      seasonId: "season-1",
+      programHash: "refreshed-program",
+      authorityAccountId: "author",
+      authoritySigningPublicKey: identity.signingPublicKey,
+      authorityEncryptionPublicKey: identity.encryptionPublicKey,
+      startedAt: 1,
+      updatedAt: 2
+    }, identity.signingPrivateKey);
+    const snapshot = signRecord({
+      schema: "fyow.snapshot/3",
+      snapshotId: "actual-target-snapshot",
+      gameId: "cc.aiero.fyow.grid-conquest",
+      workId: targetWork.id,
+      seasonId: "season-1",
+      revision: 0,
+      state,
+      stateHash: sha256(Buffer.from(canonicalJson(state))),
+      createdAt: 3
+    }, identity.signingPrivateKey);
+    const records = [control, snapshot].flatMap((record: any, recordIndex: number) =>
+      encodeCommentRecord(record).map((content: string, index: number) => ({
+        id: `migration-proof-${recordIndex}-${index}`,
+        account_id: "author",
+        created_at: 3_000 + recordIndex * 10 + index,
+        content
+      }))
+    );
+    instance.work = targetWork;
+    instance.migrationProof = {
+      sourceWorkId: "source-work",
+      targetControlId: "stale-target-control",
+      targetSnapshotId: "stale-target-snapshot",
+      targetProgramHash: "old-program",
+      seasonId: "season-1",
+      authorityAccountId: "author",
+      authoritySigningPublicKey: identity.signingPublicKey
+    };
+    instance.readHistory = vi.fn(async () => ({
+      comments: records,
+      assembled: { records: [
+        { record: control, sources: records },
+        { record: snapshot, sources: records }
+      ], incomplete: [], invalid: [] },
+      pages: new Map(),
+      tailPage: 1,
+      pageOrder: "newest-first",
+      completeThrough: null
+    }));
+    instance.readWorldChatHistory = vi.fn(async () => ({ assembled: { records: [] }, comments: [] }));
+    instance.receiveDirectWakes = vi.fn(async () => []);
+    instance.settleLocalClock = vi.fn(async () => {});
+    try {
+      const stateAfterSync = await instance.syncNow(false);
+      expect(stateAfterSync.status).toBe("ready");
+      expect(instance.control?.id).toBe("actual-target-control");
+      expect(instance.migrationProof).toBeNull();
+    } finally {
+      instance.close();
+    }
+  });
+
   it("enumerates every root branch during target-ledger verification", async () => {
     const instance = new OnlineWorldService({
       getAccount: () => ({ accountId: "author" }),

@@ -893,7 +893,6 @@ function followOnlineWorldMigration(next){
     if(onlineWorldMigrationRetryTimer){clearTimeout(onlineWorldMigrationRetryTimer);onlineWorldMigrationRetryTimer=null}
     return;
   }
-  if(migration.requiresPublish){onlineWorldMigrationTarget=null;return}
   if(onlineWorldInLibrary){onlineWorldMigrationTarget=null;return}
   if(onlineWorldMigrationTarget===migration.workId)return;
   const wait=Math.max(0,onlineWorldMigrationRetryAt-Date.now());

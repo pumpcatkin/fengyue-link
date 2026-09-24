@@ -2539,22 +2539,45 @@ class OnlineWorldService {
       const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(reference.workId)}`);
       this.work = { ...normalizeWorkDetail(payload, reference.workId), url: reference.url };
     } catch (error) {
-      if (!verifiedCachedServer || this.migrationProof) throw error;
-      workDetailError = error;
-      this.work = {
-        id: reference.workId,
-        name: String(normalizedCard.companion.name || normalizedCard.title || "在线游戏世界"),
-        description: String(normalizedCard.companion.configuration?.app?.description || ""),
-        authorAccountId: String(normalizedCard.companion.authorAccountId),
-        authorName: String(normalizedCard.companion.authorName || ""),
-        url: reference.url
-      };
-      this.diagnostic({
-        event: "work-detail-cache-fallback",
-        status: "degraded",
-        error: error?.message || String(error),
-        workId: reference.workId
-      });
+      // A migrated work may be directly available before it appears in the
+      // installed-apps listing. Use the public app-detail route as the
+      // second authoritative source, then retain the signed card author.
+      let publicDetail = null;
+      try {
+        const publicPayload = await this.requestGo(`/apps/${encodeURIComponent(reference.workId)}`, { timeout: 15000 });
+        publicDetail = normalizeWorkDetail(publicPayload, reference.workId);
+      } catch {}
+      if (publicDetail?.id && (publicDetail.authorAccountId || publicDetail.description || publicDetail.name !== "在线游戏世界")) {
+        this.work = {
+          ...publicDetail,
+          authorAccountId: publicDetail.authorAccountId || String(normalizedCard?.companion?.authorAccountId || ""),
+          url: reference.url
+        };
+        workDetailError = error;
+        this.diagnostic({
+          event: "work-detail-public-route-fallback",
+          status: "degraded",
+          error: error?.message || String(error),
+          workId: reference.workId
+        });
+      } else {
+        if (!verifiedCachedServer || this.migrationProof) throw error;
+        workDetailError = error;
+        this.work = {
+          id: reference.workId,
+          name: String(normalizedCard.companion.name || normalizedCard.title || "在线游戏世界"),
+          description: String(normalizedCard.companion.configuration?.app?.description || ""),
+          authorAccountId: String(normalizedCard.companion.authorAccountId),
+          authorName: String(normalizedCard.companion.authorName || ""),
+          url: reference.url
+        };
+        this.diagnostic({
+          event: "work-detail-cache-fallback",
+          status: "degraded",
+          error: error?.message || String(error),
+          workId: reference.workId
+        });
+      }
     }
     if (normalizedCard?.companion?.authorAccountId && this.work.authorAccountId !== normalizedCard.companion.authorAccountId) throw new Error("伴生作品当前作者与游戏卡绑定的服主账号不一致");
     if (this.migrationProof?.authorityAccountId && String(this.work.authorAccountId || "") !== String(this.migrationProof.authorityAccountId)) {
@@ -2743,6 +2766,53 @@ class OnlineWorldService {
     const payload = await this.requestConsole(`/apps/${encodeURIComponent(card.companion.workId)}/model-config/export`, { timeout: 30000 });
     const exported = exportedConfig(payload);
     return createExportedGameCard(card, exported);
+  }
+
+  async ensureMigrationTargetAvailable(workId) {
+    const targetId = String(workId || "");
+    if (!targetId) return { available: false, changed: false };
+    const exportedPayload = await this.requestConsole(
+      `/apps/${encodeURIComponent(targetId)}/model-config/export`,
+      { timeout: 30000 }
+    );
+    const exported = exportedConfig(exportedPayload);
+    const currentFlag = exported?.app?.is_available_not_public
+      ?? exported?.is_available_not_public
+      ?? exported?.avail_not_pub
+      ?? exported?.is_avail_np
+      ?? exported?.avail_np
+      ?? exported?.ianp;
+    if (currentFlag === true) return { available: true, changed: false };
+    const targetModelPayload = await this.requestGo(
+      `/apps/config?app_id=${encodeURIComponent(targetId)}`,
+      { timeout: 15000 }
+    );
+    const targetModel = firstObject(targetModelPayload, item => typeof item.provider === "string"
+      && typeof (item.name || item.model) === "string");
+    if (!targetModel) throw new Error("迁移目标作品没有可用模型配置");
+    const name = String(exported?.name || exported?.app?.name || this.work?.name || "在线游戏世界");
+    const description = String(exported?.desc || exported?.descr || exported?.dsc || exported?.intro
+      || exported?.description || exported?.app?.description || "");
+    const payload = modelConfigSavePayload(exported, targetId, name, description, targetModel);
+    payload.app.is_available_not_public = true;
+    payload.app.schedule_publish_or_not = false;
+    await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(targetId)}/model-config`,
+      { method: "POST", body: payload, timeout: 30000 }
+    ));
+    const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(targetId)}/model-config/export`,
+      { timeout: 30000 }
+    )));
+    const verifiedFlag = verified?.app?.is_available_not_public
+      ?? verified?.is_available_not_public
+      ?? verified?.avail_not_pub
+      ?? verified?.is_avail_np
+      ?? verified?.avail_np
+      ?? verified?.ianp;
+    if (verifiedFlag !== true) throw new Error("迁移目标作品仍未开放直接访问");
+    this.diagnostic({ event: "migration-target-availability-repaired", workId: targetId });
+    return { available: true, changed: true };
   }
 
   loadWorkProgram(card = this.card, pageDescription = null) {
@@ -6826,6 +6896,13 @@ class OnlineWorldService {
           newWork.description,
           targetModel
         );
+        // A freshly-created companion work starts as a draft. Do not copy the
+        // source publication flag into the target: a public source commonly
+        // exports false here, which makes the new target inaccessible until a
+        // manual authoring-page publish. Direct-link availability is the
+        // platform-supported migration mode.
+        targetPayload.app.is_available_not_public = true;
+        targetPayload.app.schedule_publish_or_not = false;
         await this.retryPlatformWrite(() => this.requestConsole(`/apps/${encodeURIComponent(newWork.id)}/model-config`, {
           method: "POST",
           body: targetPayload,

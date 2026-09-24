@@ -3981,7 +3981,7 @@ class AccountBackend {
   async followOnlineWorldMigration(options = {}) {
     const current = this.onlineWorldService?.card;
     const migration = this.onlineWorldService?.pendingMigration;
-    if (!current || !migration?.workId || migration.requiresPublish
+    if (!current || !migration?.workId
       || migration.workId === this.onlineWorldService?.work?.id) return this.onlineWorldService.state();
     return this.followOnlineWorldMigrationChain(current, migration, options);
   }
@@ -4001,6 +4001,19 @@ class AccountBackend {
         if (visited.has(targetWorkId)) throw new Error("迁移指针形成循环");
         visited.add(targetWorkId);
         if (migration.sourceWorkId) retiredWorkIds.add(String(migration.sourceWorkId));
+        if (typeof this.onlineWorldService.ensureMigrationTargetAvailable === "function") {
+          try {
+            await this.onlineWorldService.ensureMigrationTargetAvailable(targetWorkId);
+          } catch (error) {
+            // Non-author clients cannot repair a private target; they still
+            // try to open it, while the host gets a repair opportunity first.
+            this.onlineWorldService.diagnostic?.({
+              event: "migration-target-availability-check-failed",
+              workId: targetWorkId,
+              error: error?.message || String(error)
+            });
+          }
+        }
         const reboundCard = rebindGameCard(card, targetWorkId, this.origin);
         const targetLibraryId = gameCardLibraryKey(reboundCard);
         const storedTargetCard = this.onlineWorldCards.get(targetLibraryId);
@@ -4026,6 +4039,11 @@ class AccountBackend {
         });
         const onward = next?.migration;
         if (onward?.workId && String(onward.workId) !== String(next?.work?.id || "")) {
+          // A target that still carries its own local migration draft must
+          // remain on that intermediate server until its owner finishes the
+          // redirect. The initial source-side requiresPublish flag is still
+          // followed; only an onward flag from the newly opened target stops
+          // the chain and lets the owner retry later.
           if (onward.requiresPublish) {
             chainCompleted = true;
             break;

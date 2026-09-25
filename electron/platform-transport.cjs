@@ -2,6 +2,88 @@
 
 const RATE_LIMIT_MESSAGE = "请求过于频繁，请稍后";
 
+class PlatformRequestQueue {
+  constructor({ readConcurrency = 4, writeConcurrency = 1, maxPending = 256, onEvent = () => {} } = {}) {
+    this.lanes = {
+      read: { limit: Math.max(1, Math.trunc(readConcurrency)), running: 0, queue: [] },
+      write: { limit: Math.max(1, Math.trunc(writeConcurrency)), running: 0, queue: [] }
+    };
+    this.maxPending = Math.max(8, Math.trunc(maxPending));
+    this.sequence = 0;
+    this.closed = false;
+    this.readInFlight = new Map();
+    this.onEvent = typeof onEvent === "function" ? onEvent : () => {};
+  }
+
+  laneFor(method) {
+    return String(method || "GET").toUpperCase() === "GET" ? "read" : "write";
+  }
+
+  queueError(message = "平台请求队列已满") {
+    return platformRequestError("PLATFORM_QUEUE_FULL", message, { retryable: true, retryAfterMs: 1000 });
+  }
+
+  enqueue(task, { method = "GET", key = "", signal = null, priority = 0 } = {}) {
+    if (typeof task !== "function") return Promise.reject(this.queueError("平台请求任务无效"));
+    if (this.closed) return Promise.reject(platformRequestError("PLATFORM_CANCELLED", "平台请求已取消"));
+    if (signal?.aborted) return Promise.reject(platformRequestError("PLATFORM_CANCELLED", "平台请求已取消"));
+    const laneName = this.laneFor(method);
+    const lane = this.lanes[laneName];
+    const dedupeKey = laneName === "read" && key ? String(key) : "";
+    if (dedupeKey && this.readInFlight.has(dedupeKey)) return this.readInFlight.get(dedupeKey);
+    const pendingCount = Object.values(this.lanes).reduce((total, item) => total + item.queue.length + item.running, 0);
+    if (pendingCount >= this.maxPending) return Promise.reject(this.queueError());
+    const enqueuedAt = Date.now();
+    const promise = new Promise((resolve, reject) => {
+      lane.queue.push({ task, resolve, reject, signal, priority: Number(priority) || 0, sequence: ++this.sequence, enqueuedAt });
+      lane.queue.sort((left, right) => right.priority - left.priority || left.sequence - right.sequence);
+      this.onEvent({ event: "request-queued", lane: laneName, depth: lane.queue.length, method: String(method || "GET").toUpperCase() });
+      this.pump(laneName);
+    });
+    if (dedupeKey) {
+      this.readInFlight.set(dedupeKey, promise);
+      promise.finally(() => {
+        if (this.readInFlight.get(dedupeKey) === promise) this.readInFlight.delete(dedupeKey);
+      }).catch(() => {});
+    }
+    return promise;
+  }
+
+  pump(laneName) {
+    const lane = this.lanes[laneName];
+    while (!this.closed && lane.running < lane.limit && lane.queue.length) {
+      const job = lane.queue.shift();
+      if (job.signal?.aborted) {
+        job.reject(platformRequestError("PLATFORM_CANCELLED", "平台请求已取消"));
+        continue;
+      }
+      lane.running += 1;
+      const waitMs = Math.max(0, Date.now() - job.enqueuedAt);
+      if (waitMs >= 250) this.onEvent({ event: "request-dequeued", lane: laneName, waitMs, method: laneName === "read" ? "GET" : "WRITE" });
+      Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+        lane.running -= 1;
+        this.pump(laneName);
+      });
+    }
+  }
+
+  close() {
+    this.closed = true;
+    for (const lane of Object.values(this.lanes)) {
+      for (const job of lane.queue.splice(0)) job.reject(platformRequestError("PLATFORM_CANCELLED", "平台请求已取消"));
+    }
+    this.readInFlight.clear();
+  }
+
+  snapshot() {
+    return {
+      closed: this.closed,
+      read: { running: this.lanes.read.running, queued: this.lanes.read.queue.length },
+      write: { running: this.lanes.write.running, queued: this.lanes.write.queue.length }
+    };
+  }
+}
+
 function platformRequestError(code, message, detail = {}) {
   return Object.assign(new Error(code === "PLATFORM_RATE_LIMIT" ? message : `[${code}] ${message}`), { code, ...detail });
 }
@@ -150,5 +232,6 @@ async function requestPlatformJson({ fetch, origin, pathname, token = "", method
 
 module.exports = {
   requestPlatformJson, platformRequestError, isTransientPlatformError,
-  platformMessage, isRateLimitMessage, platformRateLimitScope, RATE_LIMIT_MESSAGE
+  platformMessage, isRateLimitMessage, platformRateLimitScope, RATE_LIMIT_MESSAGE,
+  PlatformRequestQueue
 };

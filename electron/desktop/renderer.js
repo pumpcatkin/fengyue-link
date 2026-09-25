@@ -1488,9 +1488,9 @@ window.addEventListener("message",async event=>{
   let messageSize=0;
   try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
   const requestId=onlineWorldRequestId(event.data);
-  const supportedTypes=["ready","sound","library","admin","self-reset","preferences","direct","confirm","intent","sync"];
+  const supportedTypes=["ready","sound","library","admin","self-reset","preferences","direct","confirm","intent","sync","reconnect"];
   if(!supportedTypes.includes(event.data.type)){if(requestId)postOnlineWorldFrame("error",{message:"未知游戏通讯请求"},requestId);return}
-  const expectsResult=["admin","self-reset","preferences","direct","confirm","intent","sync"].includes(event.data.type);
+  const expectsResult=["admin","self-reset","preferences","direct","confirm","intent","sync","reconnect"].includes(event.data.type);
   if(messageSize>ONLINE_WORLD_HOST_MESSAGE_LIMIT){if(requestId)postOnlineWorldFrame("error",{message:"游戏请求内容过长"},requestId);return}
   if(expectsResult&&!requestId)return;
   const replyResult=result=>postOnlineWorldFrame("result",{result},requestId);
@@ -1524,9 +1524,9 @@ window.addEventListener("message",async event=>{
     }catch(error){replyError(error)}
     return;
   }
-  if(event.data.type==="sync"){
+  if(event.data.type==="sync"||event.data.type==="reconnect"){
     try{
-      const next=await api.syncOnlineWorld(false);
+      const next=await api.reconnectOnlineWorld(false);
       renderOnlineWorld(next);
       if(!["ready","pending-sync"].includes(next?.status))throw new Error(next?.error||"连接暂未恢复，请稍后重试");
       replyResult({reconnected:true,state:next});

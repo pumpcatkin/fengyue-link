@@ -4933,7 +4933,7 @@ class OnlineWorldService {
     return true;
   }
 
-  applyMapDelta(item) {
+  applyMapDelta(item, { rejectedMapDeltas = null } = {}) {
     if (!this.validMapDelta(item)) {
       if (item?.record?.schema === FYOW_SCHEMAS.mapDelta && item.record.workId === this.work?.id) {
         const rejectedId = String(item.record.mapDeltaId || recordPlatformOrder(item).commentId || "");
@@ -4942,9 +4942,11 @@ class OnlineWorldService {
           if (this.reportedRejectedMapDeltaIds.size > 4000) {
             this.reportedRejectedMapDeltaIds = new Set([...this.reportedRejectedMapDeltaIds].slice(-4000));
           }
-          this.diagnostic({ event: "map-delta-rejected", code: "FYOW_MAP_DELTA_INVALID",
+          const detail = { event: "map-delta-rejected", code: "FYOW_MAP_DELTA_INVALID",
             mapDeltaId: item.record.mapDeltaId, actorAccountId: item.record.actorAccountId,
-            cells: Object.keys(item.record.changes?.cells || {}), order: recordPlatformOrder(item) });
+            cells: Object.keys(item.record.changes?.cells || {}), order: recordPlatformOrder(item) };
+          if (Array.isArray(rejectedMapDeltas)) rejectedMapDeltas.push(detail);
+          else this.diagnostic(detail);
         }
       }
       return false;
@@ -5182,10 +5184,28 @@ class OnlineWorldService {
   }
 
   applyMapDeltas(records) {
-    return records
+    const rejectedMapDeltas = [];
+    const applied = records
       .filter(item => item.record?.schema === FYOW_SCHEMAS.mapDelta)
       .sort(comparePlatformOrder)
-      .reduce((count, item) => count + Number(this.applyMapDelta(item)), 0);
+      .reduce((count, item) => count + Number(this.applyMapDelta(item, { rejectedMapDeltas })), 0);
+    this.reportRejectedMapDeltaBatch(rejectedMapDeltas);
+    return applied;
+  }
+
+  reportRejectedMapDeltaBatch(rejectedMapDeltas) {
+    if (!rejectedMapDeltas.length) return;
+    const first = rejectedMapDeltas[0];
+    const last = rejectedMapDeltas.at(-1);
+    this.diagnostic({
+      event: "map-delta-rejected-summary",
+      code: "FYOW_MAP_DELTA_INVALID",
+      count: rejectedMapDeltas.length,
+      sampleMapDeltaIds: rejectedMapDeltas.slice(0, 10).map(item => item.mapDeltaId),
+      sampleCells: [...new Set(rejectedMapDeltas.flatMap(item => item.cells || []))].slice(0, 20),
+      firstOrder: first.order,
+      lastOrder: last.order
+    });
   }
 
   currentWorldChat() {
@@ -5411,12 +5431,15 @@ class OnlineWorldService {
   }
 
   applyPublicLedger(records) {
-    return records
+    const rejectedMapDeltas = [];
+    const applied = records
       .filter(item => [FYOW_SCHEMAS.mapDelta, FYOW_SCHEMAS.authority].includes(item.record?.schema))
       .sort(comparePlatformOrder)
       .reduce((count, item) => count + Number(item.record.schema === FYOW_SCHEMAS.authority
         ? this.applyAuthorityDirective(item)
-        : this.applyMapDelta(item)), 0);
+        : this.applyMapDelta(item, { rejectedMapDeltas })), 0);
+    this.reportRejectedMapDeltaBatch(rejectedMapDeltas);
+    return applied;
   }
 
   async reconnect(fullScan = false) {

@@ -2761,6 +2761,34 @@ describe("online world platform service", () => {
     expect(instance.world.revision).toBe(0);
   });
 
+  it("summarizes invalid historical map records instead of logging every record", () => {
+    const diagnostics: any[] = [];
+    const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });
+    const instance = service({
+      getAccount: () => ({ accountId: "authority", username: "服主" }),
+      onDiagnostic: (detail: any) => diagnostics.push(detail)
+    });
+    instance.work = { id: "current-work", authorAccountId: "authority" };
+    instance.control = { id: "control", seasonId: world.seasonId, authorityAccountId: "authority" };
+    instance.world = world;
+    const invalid = (mapDeltaId: string, index: number) => ({
+      record: {
+        schema: "fyow.map-delta/1", mapDeltaId, workId: "current-work", gameId: "cc.aiero.fyow.grid-conquest",
+        seasonId: world.seasonId, actorAccountId: "player", changes: { cells: { [`${index},${index}`]: null }, generals: {} }
+      },
+      sources: [{ id: `comment-${index}`, account_id: "player", created_at: `2026-09-25T00:00:0${index}Z` }]
+    });
+
+    expect(instance.applyMapDeltas([invalid("bad-1", 1), invalid("bad-2", 2), invalid("bad-3", 3)])).toBe(0);
+    expect(diagnostics.filter(item => item.event === "map-delta-rejected")).toHaveLength(0);
+    expect(diagnostics.filter(item => item.event === "map-delta-rejected-summary")).toEqual([
+      expect.objectContaining({ code: "FYOW_MAP_DELTA_INVALID", count: 3, sampleMapDeltaIds: ["bad-1", "bad-2", "bad-3"] })
+    ]);
+
+    instance.applyMapDeltas([invalid("bad-1", 1), invalid("bad-2", 2), invalid("bad-3", 3)]);
+    expect(diagnostics.filter(item => item.event === "map-delta-rejected-summary")).toHaveLength(1);
+  });
+
   it("does not post a comment for an action that changes only local private state", async () => {
     const identity = generateOnlineWorldIdentity();
     const world = createWorld({ authorityAccountId: "authority", seasonId: "season" });

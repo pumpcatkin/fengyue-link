@@ -1107,4 +1107,11 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain('appVersion: this.appVersion');
     expect(main).toContain("请在访客端更新风月联机工具");
   });
+
+  it("fully releases the isolated platform connectivity verifier", () => {
+    const verifier = readFileSync(new URL("../scripts/verify-platform-connectivity.cjs", import.meta.url), "utf8");
+    expect(verifier).toContain("reader?.close()");
+    expect(verifier).toContain("instance.anchor.destroy()");
+    expect(verifier).toContain("await partition.clearStorageData()");
+  });
 });

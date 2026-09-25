@@ -77,6 +77,7 @@ app.whenReady().then(async () => {
     return instance.anchor;
   };
   const watchdog = setTimeout(() => instance.cancelLogin(), 90000);
+  let reader = null;
   const diagnostic = setInterval(() => {
     const contents = instance.anchor?.webContents;
     if (!contents || contents.isDestroyed()) return;
@@ -122,7 +123,7 @@ app.whenReady().then(async () => {
       const branch = root ? await instance.platformChatApi(`/comments/branches/${encodeURIComponent(root.id)}`) : null;
       samples.push({ pass: pass + 1, elapsedMs: Date.now() - before, rootPageItems: comments.length, branchItems: branch ? extractCommentItems(branch).length : 0 });
     }
-    const reader = new OnlineWorldService({
+    reader = new OnlineWorldService({
       getAccount: () => instance.account, onChange() {}, cacheFile: null,
       requestConsole: (endpoint, options = {}) => {
         assert(!options.method || options.method === "GET", "Live verification must stay read-only");
@@ -147,7 +148,12 @@ app.whenReady().then(async () => {
   } finally {
     clearTimeout(watchdog);
     clearInterval(diagnostic);
-    instance.stopLoginPage();
+    try { reader?.close(); } catch {}
+    try { instance.stopLoginPage(); } catch {}
+    try {
+      if (instance.anchor && !instance.anchor.isDestroyed()) instance.anchor.destroy();
+    } catch {}
+    try { await partition.clearStorageData(); } catch {}
   }
   app.quit();
 }).catch(error => { console.error(error?.message || String(error)); app.exit(1); });

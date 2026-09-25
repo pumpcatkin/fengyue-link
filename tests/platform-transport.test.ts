@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { requestPlatformJson, isTransientPlatformError, platformRateLimitScope, RATE_LIMIT_MESSAGE } = require("../electron/platform-transport.cjs");
+const { requestPlatformJson, isTransientPlatformError, platformRateLimitScope, RATE_LIMIT_MESSAGE, PlatformRequestQueue } = require("../electron/platform-transport.cjs");
 const defaults = { origin: "https://node.test", pathname: "/go/api/account/profile", attempts: 1 };
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(data), { status, headers });
 afterEach(() => vi.useRealTimers());
@@ -141,5 +141,43 @@ describe("account session transport", () => {
     expect(write).toBe(`${origin}:comments:write`);
     expect(remove).toBe(write);
     expect(read).not.toBe(write);
+  });
+
+  it("bounds reads, coalesces duplicate GETs, and serializes writes", async () => {
+    const queue = new PlatformRequestQueue({ readConcurrency: 2, writeConcurrency: 1 });
+    let activeReads = 0;
+    let maxReads = 0;
+    let readRuns = 0;
+    const read = () => new Promise(resolve => {
+      readRuns += 1;
+      activeReads += 1;
+      maxReads = Math.max(maxReads, activeReads);
+      setTimeout(() => { activeReads -= 1; resolve(readRuns); }, 5);
+    });
+    const duplicateA = queue.enqueue(read, { method: "GET", key: "same" });
+    const duplicateB = queue.enqueue(read, { method: "GET", key: "same" });
+    const reads = await Promise.all([
+      duplicateA, duplicateB,
+      queue.enqueue(read, { method: "GET", key: "second" }),
+      queue.enqueue(read, { method: "GET", key: "third" })
+    ]);
+    expect(duplicateA).toBe(duplicateB);
+    expect(readRuns).toBe(3);
+    expect(maxReads).toBeLessThanOrEqual(2);
+    expect(reads[0]).toBe(reads[1]);
+
+    let activeWrites = 0;
+    let maxWrites = 0;
+    const writeOrder: number[] = [];
+    await Promise.all([1, 2, 3].map(value => queue.enqueue(async () => {
+      activeWrites += 1;
+      maxWrites = Math.max(maxWrites, activeWrites);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      writeOrder.push(value);
+      activeWrites -= 1;
+    }, { method: "POST" })));
+    expect(maxWrites).toBe(1);
+    expect(writeOrder).toEqual([1, 2, 3]);
+    queue.close();
   });
 });

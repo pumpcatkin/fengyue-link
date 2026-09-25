@@ -49,7 +49,7 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates, loginError, assertLoginActive, waitForLoginTask, pauseLogin, platformLoginError, runLoginFailover } = require("./login-failover.cjs");
-const { requestPlatformJson, platformRequestError, platformRateLimitScope, RATE_LIMIT_MESSAGE } = require("./platform-transport.cjs");
+const { requestPlatformJson, platformRequestError, platformRateLimitScope, RATE_LIMIT_MESSAGE, PlatformRequestQueue } = require("./platform-transport.cjs");
 const {
   OFFICIAL_DOMAIN_DIRECTORY_URLS,
   FALLBACK_PLATFORM_ORIGINS,
@@ -613,6 +613,16 @@ class AccountBackend {
     fs.writeFileSync(this.sessionLogFile, "", { encoding: "utf8", mode: 0o600 });
     this.partition = `persist:fengyue-link-${profileId}`;
     this.platformSession = session.fromPartition(this.partition);
+    this.platformRequestQueue = new PlatformRequestQueue({
+      readConcurrency: 4,
+      writeConcurrency: 1,
+      maxPending: 256,
+      onEvent: detail => {
+        if (detail?.event === "request-dequeued" || detail?.event === "request-queued" && detail.depth > 8) {
+          this.appendSessionLog("platform-network", { ...detail, profileId });
+        }
+      }
+    });
     this.proxyState = { mode: "system", route: null, error: null };
     this.networkReady = configureSystemProxy(this.platformSession, this.partition)
       .then(result => {
@@ -3695,47 +3705,53 @@ class AccountBackend {
 
   async platformRequest(pathname, options = {}) {
     await this.networkReady;
+    this.platformRequestQueue ||= new PlatformRequestQueue({ readConcurrency: 4, writeConcurrency: 1, maxPending: 256 });
     const origin = this.origin;
     const revision = this.authSessionRevision;
-    const rateLimitScope = platformRateLimitScope(origin, pathname, options.method);
-    const retryAt = this.platformRateLimits?.get(rateLimitScope) || 0;
-    if (retryAt > Date.now()) {
-      throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, { status: 429, retryAfterMs: retryAt - Date.now() });
-    }
-    let token = "";
-    let tokenTimer;
-    try {
-      const contents = this.anchor?.webContents;
-      if (contents && !contents.isDestroyed() && new URL(contents.getURL()).origin === origin) {
-        token = await Promise.race([
-          contents.mainFrame.executeJavaScript("localStorage.getItem('console_token') || ''").catch(() => ""),
-          new Promise(resolve => { tokenTimer = setTimeout(() => resolve(""), 500); })
-        ]);
+    const method = String(options.method || "GET").toUpperCase();
+    const queueKey = `${revision}:${origin}:${method}:${String(pathname).split("?")[0]}${method === "GET" ? `?${String(pathname).split("?")[1] || ""}` : `:${crypto.createHash("sha256").update(JSON.stringify(options.body ?? null)).digest("hex").slice(0, 16)}`}`;
+    const { queuePriority = method === "GET" ? 0 : 10, signal = null, ...requestOptions } = options;
+    return this.platformRequestQueue.enqueue(async () => {
+      const rateLimitScope = platformRateLimitScope(origin, pathname, method);
+      const retryAt = this.platformRateLimits?.get(rateLimitScope) || 0;
+      if (retryAt > Date.now()) {
+        throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, { status: 429, retryAfterMs: retryAt - Date.now() });
       }
-    } catch {} finally { clearTimeout(tokenTimer); }
-    if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
-    const startedAt = Date.now();
-    try {
-      const result = await requestPlatformJson({
-        ...options, origin, pathname, token: typeof token === "string" ? token : "",
-        fetch: (url, request) => this.platformSession.fetch(url, request),
-        onRetry: detail => this.appendSessionLog("platform-network", { event: "read-retry", origin, path: pathname.split("?")[0], ...detail })
-      });
+      let token = "";
+      let tokenTimer;
+      try {
+        const contents = this.anchor?.webContents;
+        if (contents && !contents.isDestroyed() && new URL(contents.getURL()).origin === origin) {
+          token = await Promise.race([
+            contents.mainFrame.executeJavaScript("localStorage.getItem('console_token') || ''").catch(() => ""),
+            new Promise(resolve => { tokenTimer = setTimeout(() => resolve(""), 500); })
+          ]);
+        }
+      } catch {} finally { clearTimeout(tokenTimer); }
       if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
-      this.lastPlatformSuccessAt = Date.now();
-      return result;
-    } catch (error) {
-      if (error?.status === 429) {
-        this.platformRateLimits ||= new Map();
-        this.platformRateLimits.set(rateLimitScope, Date.now() + (Number(error.retryAfterMs) || 30000));
+      const startedAt = Date.now();
+      try {
+        const result = await requestPlatformJson({
+          ...requestOptions, origin, pathname, method, signal, token: typeof token === "string" ? token : "",
+          fetch: (url, request) => this.platformSession.fetch(url, request),
+          onRetry: detail => this.appendSessionLog("platform-network", { event: "read-retry", origin, path: pathname.split("?")[0], ...detail })
+        });
+        if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
+        this.lastPlatformSuccessAt = Date.now();
+        return result;
+      } catch (error) {
+        if (error?.status === 429) {
+          this.platformRateLimits ||= new Map();
+          this.platformRateLimits.set(rateLimitScope, Date.now() + (Number(error.retryAfterMs) || 30000));
+        }
+        this.appendSessionLog("platform-network", {
+          event: "request-failed", origin, path: pathname.split("?")[0], method,
+          code: error?.code || null, status: error?.status || null, elapsedMs: Date.now() - startedAt,
+          error: error?.message || String(error)
+        });
+        throw error;
       }
-      this.appendSessionLog("platform-network", {
-        event: "request-failed", origin, path: pathname.split("?")[0], method: options.method || "GET",
-        code: error?.code || null, status: error?.status || null, elapsedMs: Date.now() - startedAt,
-        error: error?.message || String(error)
-      });
-      throw error;
-    }
+    }, { method, key: method === "GET" ? queueKey : "", signal, priority: queuePriority });
   }
 
   async platformChatApi(pathname, options = {}) {
@@ -9674,6 +9690,7 @@ class AccountBackend {
     if (this.destroying) return;
     this.destroying = true;
     this.cancelLogin();
+    this.platformRequestQueue?.close();
     this.loginPageWarmController?.abort();
     this.unregisterDiagnosticGlobalShortcut();
     this.cancelAutoModels();

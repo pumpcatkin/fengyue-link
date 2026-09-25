@@ -73,6 +73,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   closeOnlineWorld: () => ipcRenderer.invoke("online-world:close"),
   initializeOnlineWorld: () => ipcRenderer.invoke("online-world:initialize"),
   syncOnlineWorld: full => ipcRenderer.invoke("online-world:sync", full),
+  reconnectOnlineWorld: full => ipcRenderer.invoke("online-world:reconnect", full),
   submitOnlineWorldIntent: intent => ipcRenderer.invoke("online-world:submit-intent", intent),
   sendOnlineWorldDirect: message => ipcRenderer.invoke("online-world:send-direct", message),
   migrateOnlineWorld: () => ipcRenderer.invoke("online-world:migrate"),

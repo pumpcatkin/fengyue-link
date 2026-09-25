@@ -71,6 +71,11 @@ const PUBLIC_LEDGER_COMPACTION_DELTAS = 32;
 const COMMENT_POST_ATTEMPTS = 3;
 const PENDING_EFFECT_RETRY_BASE_MS = 30 * 1000;
 const PENDING_EFFECT_RETRY_MAX_MS = 15 * 60 * 1000;
+// A 429 is a server-wide write cooldown, not a normal transient network
+// failure.  Keep one durable cooldown for the FIFO so polling and manual
+// reconnects cannot hammer the same comment endpoint every few seconds.
+const PLATFORM_RATE_LIMIT_MIN_COOLDOWN_MS = 30 * 1000;
+const PLATFORM_RATE_LIMIT_MAX_COOLDOWN_MS = 10 * 60 * 1000;
 const MAX_GENERAL_CORE_SETTING_LENGTH = 12000;
 const DEFAULT_GENERATED_GENERAL_POWER = 150;
 const WORLD_CHAT_LIMIT = 50;
@@ -1155,6 +1160,8 @@ class OnlineWorldService {
     this.cloudUploadQueue = [];
     this.cloudUploadInFlight = null;
     this.cloudUploadWaiters = new Map();
+    this.platformRateLimitUntil = 0;
+    this.platformRateLimitAttempts = 0;
     this.localGeneralArchiveOrders = {};
     this.publicMarketOrders = {};
     this.publicMarketSaleOrders = {};
@@ -1334,7 +1341,7 @@ class OnlineWorldService {
   pendingPublicationState(transaction = this.pendingIntentTransaction) {
     if (!transaction || transaction.phase !== "prepared") return null;
     const lastError = transaction.lastPublishError || {};
-    const retryAt = Math.max(0, Number(lastError.retryAt || 0));
+    const retryAt = Math.max(0, Number(lastError.retryAt || 0), Number(this.platformRateLimitUntil || 0));
     const retryAfterMs = Math.max(0, retryAt - this.now());
     return {
       transactionId: String(transaction.transactionId || ""),
@@ -1345,11 +1352,38 @@ class OnlineWorldService {
       errorCode: String(lastError.code || ""),
       rateLimited: String(lastError.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
         || Number(lastError.status || 0) === 429
+        || this.platformRateLimitRetryAt() > 0
     };
   }
 
   pendingPublicationCoolingDown(transaction = this.pendingIntentTransaction) {
-    return Number(transaction?.lastPublishError?.retryAt || 0) > this.now();
+    return Math.max(Number(transaction?.lastPublishError?.retryAt || 0), Number(this.platformRateLimitUntil || 0)) > this.now();
+  }
+
+  platformRateLimitRetryAt() {
+    const retryAt = Math.max(0, Number(this.platformRateLimitUntil || 0));
+    return retryAt > this.now() ? retryAt : 0;
+  }
+
+  notePlatformRateLimit(error) {
+    const now = this.now();
+    const hinted = Math.max(0, Number(error?.retryAfterMs || 0));
+    const attempt = Math.max(1, Number(this.platformRateLimitAttempts || 0) + 1);
+    const exponential = Math.min(PLATFORM_RATE_LIMIT_MAX_COOLDOWN_MS, 30 * 1000 * (2 ** Math.min(5, attempt - 1)));
+    const cooldown = Math.min(PLATFORM_RATE_LIMIT_MAX_COOLDOWN_MS,
+      Math.max(PLATFORM_RATE_LIMIT_MIN_COOLDOWN_MS, hinted, exponential));
+    this.platformRateLimitAttempts = attempt;
+    this.platformRateLimitUntil = Math.max(Number(this.platformRateLimitUntil || 0), now + cooldown);
+    this.saveCache();
+    return this.platformRateLimitUntil;
+  }
+
+  clearPlatformRateLimit() {
+    if (this.platformRateLimitUntil > 0 && this.platformRateLimitUntil <= this.now()) {
+      this.platformRateLimitUntil = 0;
+      this.platformRateLimitAttempts = 0;
+      this.saveCache();
+    }
   }
 
   updateLoadProgress(patch = {}) {
@@ -1374,7 +1408,7 @@ class OnlineWorldService {
   }
 
   diagnostic(detail) {
-    try { this.onDiagnostic({ ...detail, workId: this.work?.id || null }); } catch {}
+    try { this.onDiagnostic({ workId: this.work?.id || null, ...detail }); } catch {}
   }
 
   recordModelUsage({ request, label, attempt, result = null, error = null, status = "completed" } = {}) {
@@ -1513,6 +1547,11 @@ class OnlineWorldService {
   async retryPendingIntentTransactionPublish({ comments } = {}) {
     const transaction = this.pendingIntentTransaction;
     if (!transaction || transaction.phase !== "prepared" || !hasPublicMapChanges(transaction.changes)) return null;
+    // This method is also the explicit retry entry point.  Once the caller
+    // has chosen to retry, let the fresh request establish a new server
+    // window; passive polling is still gated by pendingPublicationCoolingDown.
+    this.platformRateLimitUntil = 0;
+    this.platformRateLimitAttempts = 0;
     const validSession = String(transaction.workId || "") === String(this.work?.id || "")
       && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
       && String(transaction.accountId || "") === this.account().accountId
@@ -2335,6 +2374,8 @@ class OnlineWorldService {
       publicGeneralRecalls: this.publicGeneralRecalls,
       pendingCommentRetirements: cloneJson(this.pendingCommentRetirements),
       cloudUploadQueue: cloneJson(this.cloudUploadQueue),
+      platformRateLimitUntil: Math.max(0, Number(this.platformRateLimitUntil || 0)),
+      platformRateLimitAttempts: Math.max(0, Number(this.platformRateLimitAttempts || 0)),
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
       marketSettledSales: [...this.marketSettledSales].slice(-1000),
@@ -2394,7 +2435,12 @@ class OnlineWorldService {
           this.pollFailureCount += 1;
         } finally {
           const retryDelay = Math.min(POLL_RETRY_MAX_MS, POLL_INTERVAL_MS * (2 ** Math.min(4, this.pollFailureCount)));
-          const publicationDelay = Math.max(0, Number(this.pendingIntentTransaction?.lastPublishError?.retryAt || 0) - this.now());
+          const publicationRetryAt = Math.max(
+            Number(this.pendingIntentTransaction?.lastPublishError?.retryAt || 0),
+            Number(this.platformRateLimitUntil || 0),
+            Number(this.cloudUploadQueue[0]?.nextAttemptAt || 0)
+          );
+          const publicationDelay = Math.max(0, publicationRetryAt - this.now());
           schedule(publicationDelay > 0
             ? Math.max(POLL_INTERVAL_MS, Math.min(POLL_RETRY_MAX_MS, publicationDelay + 100))
             : retryDelay);
@@ -2643,6 +2689,8 @@ class OnlineWorldService {
       : [];
     this.cloudUploadInFlight = null;
     this.cloudUploadWaiters.clear();
+    this.platformRateLimitUntil = Math.max(0, Number(cached?.platformRateLimitUntil || 0));
+    this.platformRateLimitAttempts = Math.max(0, Math.trunc(Number(cached?.platformRateLimitAttempts || 0)));
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
     this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
@@ -2952,8 +3000,9 @@ class OnlineWorldService {
     const existing = this.cloudUploadQueue.find(candidate => candidate.key === key);
     if (existing) {
       // An explicit retry (for example the pending-action retry path) wakes
-      // this item immediately; automatic polling still honours backoff.
-      existing.nextAttemptAt = 0;
+      // this item immediately, except while the platform has an active 429
+      // cooldown.  A manual reconnect must never bypass that server window.
+      existing.nextAttemptAt = Math.max(0, Number(this.platformRateLimitUntil || 0));
       this.saveCache();
     }
     if (!existing) {
@@ -2967,17 +3016,17 @@ class OnlineWorldService {
     }
     const position = this.cloudUploadQueue.findIndex(candidate => candidate.key === key);
     const head = this.cloudUploadQueue[0];
-    if (position > 0 && Number(head?.nextAttemptAt || 0) > this.now()) {
+    if (position > 0 && Math.max(Number(head?.nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0)) > this.now()) {
       const blocked = new Error("云端写入队列正在等待重试");
       blocked.code = "FYOW_UPLOAD_PENDING";
-      blocked.retryAt = Number(head.nextAttemptAt || 0);
+      blocked.retryAt = Math.max(Number(head.nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0));
       throw blocked;
     }
     const waiting = this.waitForCloudUpload(key);
-    if (position === 0 && Number(this.cloudUploadQueue[0]?.nextAttemptAt || 0) > this.now()) {
+    if (position === 0 && Math.max(Number(this.cloudUploadQueue[0]?.nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0)) > this.now()) {
       const blocked = new Error("云端写入队列正在等待重试");
       blocked.code = "FYOW_UPLOAD_PENDING";
-      blocked.retryAt = Number(this.cloudUploadQueue[0].nextAttemptAt || 0);
+      blocked.retryAt = Math.max(Number(this.cloudUploadQueue[0].nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0));
       this.settleCloudUploadWaiters(key, blocked);
       return waiting;
     }
@@ -2990,7 +3039,8 @@ class OnlineWorldService {
     const running = (async () => {
       while (this.cloudUploadQueue.length) {
         const item = this.cloudUploadQueue[0];
-        const waitUntil = Number(item.nextAttemptAt || 0);
+        this.clearPlatformRateLimit();
+        const waitUntil = Math.max(Number(item.nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0));
         if (waitUntil > this.now()) return;
         try {
           let result;
@@ -3079,7 +3129,13 @@ class OnlineWorldService {
           item.attempts = Math.max(0, Number(item.attempts || 0)) + 1;
           const retryAfter = Math.max(1000, Number(error?.retryAfterMs || 0));
           const backoff = Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(8, item.attempts - 1)));
-          item.nextAttemptAt = this.now() + Math.max(retryAfter, backoff);
+          const rateLimited = String(error?.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+            || Number(error?.status || error?.statusCode || 0) === 429;
+          if (rateLimited) this.notePlatformRateLimit(error);
+          item.nextAttemptAt = Math.max(
+            this.now() + Math.max(retryAfter, backoff),
+            rateLimited ? Number(this.platformRateLimitUntil || 0) : 0
+          );
           item.lastError = { code: String(error?.code || "FYOW_UPLOAD_PENDING"), message: String(error?.message || error).slice(0, 500), at: this.now() };
           this.saveCache();
           const queuedError = this.uploadQueueError(error, item);
@@ -5083,6 +5139,46 @@ class OnlineWorldService {
       .reduce((count, item) => count + Number(item.record.schema === FYOW_SCHEMAS.authority
         ? this.applyAuthorityDirective(item)
         : this.applyMapDelta(item)), 0);
+  }
+
+  async reconnect(fullScan = false) {
+    if (this.syncPaused || !this.work) return this.state();
+    this.clearPlatformRateLimit();
+    const lastPublishError = this.pendingIntentTransaction?.lastPublishError || {};
+    const lastPublishRateLimited = String(lastPublishError.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+      || Number(lastPublishError.status || 0) === 429;
+    const retryAt = Math.max(
+      Number(this.platformRateLimitUntil || 0),
+      lastPublishRateLimited ? Number(lastPublishError.retryAt || 0) : 0
+    );
+    if (retryAt > this.now()) {
+      const error = new Error(`平台正在冷却，请在 ${Math.ceil((retryAt - this.now()) / 1000)} 秒后重试`);
+      error.code = "PLATFORM_RATE_LIMIT";
+      error.status = 429;
+      error.retryAt = retryAt;
+      error.retryAfterMs = retryAt - this.now();
+      this.error = error.message;
+      this.status = this.world ? "pending-sync" : "degraded";
+      this.diagnostic({ event: "connection-retry-deferred", status: this.status, retryAt, code: error.code });
+      this.notify();
+      throw error;
+    }
+    if (this.cloudUploadQueue[0]) this.cloudUploadQueue[0].nextAttemptAt = 0;
+    if (this.pendingIntentTransaction && !lastPublishRateLimited) {
+      this.pendingIntentTransaction.lastPublishError = null;
+    }
+    this.saveCache();
+    this.pollFailureCount = 0;
+    this.diagnostic({ event: "connection-retry-started", fullScan: Boolean(fullScan) });
+    try {
+      const state = await this.sync(Boolean(fullScan));
+      this.startPolling();
+      this.diagnostic({ event: "connection-retry-completed", status: state?.status || this.status });
+      return state;
+    } catch (error) {
+      this.startPolling();
+      throw error;
+    }
   }
 
   async sync(fullScan = false) {

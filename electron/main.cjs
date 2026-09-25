@@ -4001,7 +4001,10 @@ class AccountBackend {
         if (visited.has(targetWorkId)) throw new Error("迁移指针形成循环");
         visited.add(targetWorkId);
         if (migration.sourceWorkId) retiredWorkIds.add(String(migration.sourceWorkId));
-        if (typeof this.onlineWorldService.ensureMigrationTargetAvailable === "function") {
+        // Guests can open a public target directly; probing console
+        // configuration first only creates a predictable 403 on every
+        // reconnect. The repair probe remains for the author account.
+        if (this.onlineWorldService.isAuthority?.() && typeof this.onlineWorldService.ensureMigrationTargetAvailable === "function") {
           try {
             await this.onlineWorldService.ensureMigrationTargetAvailable(targetWorkId);
           } catch (error) {
@@ -9878,6 +9881,7 @@ handleLocalIpc("online-world:follow-migration", (_event, options) => backend.fol
 handleLocalIpc("online-world:close", () => backend.onlineWorldService.pause());
 handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
 handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));
+handleLocalIpc("online-world:reconnect", (_event, full) => backend.onlineWorldService.reconnect(Boolean(full)));
 handleLocalIpc("online-world:submit-intent", (_event, intent) => backend.onlineWorldService.submitIntent(intent || {}));
 handleLocalIpc("online-world:send-direct", (_event, message) => backend.onlineWorldService.sendDirect(message?.toAccountId, message?.type, message?.payload));
 handleLocalIpc("online-world:migrate", () => backend.migrateOnlineWorldCard());

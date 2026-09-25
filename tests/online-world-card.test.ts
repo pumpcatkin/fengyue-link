@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,11 +17,13 @@ const {
   validateGameCard,
   rebindGameCard,
   gameCardLibraryKey,
+  compareGameCardFreshness,
   summarizeGameCard,
   loadGameCardLibrary,
   saveGameCardLibrary,
   readGameCardFile,
   scanGameCardDirectory,
+  mergeBundledGameCardDirectory,
   removeGameCardDirectoryFiles
 } = require("../electron/online-world-card.cjs");
 const { packProgram, parseProgram } = require("../electron/online-world-runtime.cjs");
@@ -45,7 +47,7 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(GRID_COMPANION_INSTANCE_ID).toMatch(/^[0-9a-f]{16}$/);
     expect(card.title).toBe("猎艳疆土");
-    expect(card.version).toBe(39);
+    expect(card.version).toBe(40);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.companion.configuration.app.name).toBe(`猎艳疆土[${GRID_COMPANION_INSTANCE_ID}]`);
     expect(card.companion.configuration.app.id).toBe(GRID_COMPANION_WORK_ID);
@@ -194,6 +196,67 @@ describe("online world game cards", () => {
     expect(removeGameCardDirectoryFiles(directory, scanned.sources.get(libraryId))).toHaveLength(2);
     expect(existsSync(first)).toBe(false);
     expect(existsSync(second)).toBe(false);
+  });
+
+  it("merges bundled cards without overwriting a different card that uses the same file name", () => {
+    const root = mkdtempSync(join(tmpdir(), "fyow-bundled-card-merge-"));
+    temporaryDirectories.push(root);
+    const bundledDirectory = join(root, "resources", "game-library");
+    const installedDirectory = join(root, "user-data", "游戏卡");
+    const bundled = createBundledGridCard();
+    const unrelated = rebindGameCard(createBundledGridCard(), "another-server-12345678");
+    mkdirSync(bundledDirectory, { recursive: true });
+    mkdirSync(installedDirectory, { recursive: true });
+    writeFileSync(join(bundledDirectory, "猎艳疆土.json"), JSON.stringify(bundled), { encoding: "utf8", flag: "wx" });
+    writeFileSync(join(installedDirectory, "猎艳疆土.json"), JSON.stringify(unrelated), { encoding: "utf8", flag: "wx" });
+
+    const result = mergeBundledGameCardDirectory(bundledDirectory, installedDirectory);
+    expect(result.created).toHaveLength(1);
+    expect(result.updated).toHaveLength(0);
+    expect(readGameCardFile(join(installedDirectory, "猎艳疆土.json")).card.companion.workId)
+      .toBe("another-server-12345678");
+    const scanned = scanGameCardDirectory(installedDirectory);
+    expect(scanned.cards.get(gameCardLibraryKey(bundled))?.packageSha256).toBe(bundled.packageSha256);
+    expect(scanned.cards.get(gameCardLibraryKey(unrelated))?.packageSha256).toBe(unrelated.packageSha256);
+    expect([...scanned.sources.get(gameCardLibraryKey(bundled))][0]).not.toBe(join(installedDirectory, "猎艳疆土.json"));
+
+    const repeated = mergeBundledGameCardDirectory(bundledDirectory, installedDirectory);
+    expect(repeated.created).toHaveLength(0);
+    expect(repeated.updated).toHaveLength(0);
+    expect(repeated.skipped).toEqual([gameCardLibraryKey(bundled)]);
+  });
+
+  it("updates only the same libraryId when the bundled card is newer", () => {
+    const root = mkdtempSync(join(tmpdir(), "fyow-bundled-card-update-"));
+    temporaryDirectories.push(root);
+    const bundledDirectory = join(root, "bundled");
+    const installedDirectory = join(root, "installed");
+    const base = createBundledGridCard();
+    const oldProgram = packProgram({ gameId: base.gameId, title: base.title, html: "<!doctype html><html><body>old</body></html>" });
+    const newProgram = packProgram({ gameId: base.gameId, title: base.title, html: "<!doctype html><html><body>new</body></html>" });
+    const oldCard = refreshGameCardProgram(base, oldProgram.envelope, "2026-09-01T00:00:00.000Z");
+    const newCard = refreshGameCardProgram(base, newProgram.envelope, "2026-09-02T00:00:00.000Z");
+    const unrelated = rebindGameCard(base, "unrelated-work-12345678");
+    mkdirSync(bundledDirectory, { recursive: true });
+    mkdirSync(installedDirectory, { recursive: true });
+    writeFileSync(join(bundledDirectory, "new.json"), JSON.stringify(newCard), { encoding: "utf8", flag: "wx" });
+    writeFileSync(join(installedDirectory, "existing.json"), JSON.stringify(oldCard), { encoding: "utf8", flag: "wx" });
+    writeFileSync(join(installedDirectory, "other.json"), JSON.stringify(unrelated), { encoding: "utf8", flag: "wx" });
+    writeFileSync(join(installedDirectory, "notes.json"), "{not-a-card}", { encoding: "utf8", flag: "wx" });
+    const unrelatedBefore = readFileSync(join(installedDirectory, "other.json"), "utf8");
+    const invalidBefore = readFileSync(join(installedDirectory, "notes.json"), "utf8");
+
+    expect(compareGameCardFreshness(newCard, oldCard)).toBe(1);
+    const result = mergeBundledGameCardDirectory(bundledDirectory, installedDirectory);
+    expect(result.updated).toEqual([{ libraryId: gameCardLibraryKey(newCard), file: join(installedDirectory, "existing.json") }]);
+    expect(readGameCardFile(join(installedDirectory, "existing.json")).card.packageSha256).toBe(newCard.packageSha256);
+    expect(readFileSync(join(installedDirectory, "other.json"), "utf8")).toBe(unrelatedBefore);
+    expect(readFileSync(join(installedDirectory, "notes.json"), "utf8")).toBe(invalidBefore);
+
+    writeFileSync(join(bundledDirectory, "new.json"), JSON.stringify(oldCard));
+    const skipped = mergeBundledGameCardDirectory(bundledDirectory, installedDirectory);
+    expect(skipped.updated).toHaveLength(0);
+    expect(readGameCardFile(join(installedDirectory, "existing.json")).card.packageSha256).toBe(newCard.packageSha256);
   });
 
   it("uses one strict validator for dialog, drop, and directory imports", () => {

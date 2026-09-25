@@ -1,6 +1,6 @@
 {
   "name": "fengyue-link",
-  "version": "0.15.33",
+  "version": "0.15.34",
   "description": "风月多人联机桌面工具",
   "author": "八爪毛米",
   "private": true,
@@ -24,6 +24,7 @@
     "game:bundle": "node scripts/build-grid-conquest-program.cjs",
     "shortcut:update": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/update-development-shortcuts.ps1",
     "game:card": "node scripts/export-grid-game-card.cjs",
+    "game:library:refresh": "node scripts/refresh-game-library-cards.cjs",
     "pack:release": "npm run pack:win && npm run release:manifest"
   },
   "dependencies": {
@@ -60,6 +61,13 @@
       {
         "from": "build/app-update.yml",
         "to": "app-update.yml"
+      },
+      {
+        "from": "game-cards",
+        "to": "game-library",
+        "filter": [
+          "**/*.json"
+        ]
       }
     ],
     "win": {

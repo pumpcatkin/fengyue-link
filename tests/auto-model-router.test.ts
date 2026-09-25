@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 const require = createRequire(import.meta.url);
-const { normalizeCatalog, rankModels, runAutoModel, retryable } = require("../electron/auto-model-router.cjs");
+const { normalizeCatalog, rankModels, runAutoModel, retryable, retryDelay } = require("../electron/auto-model-router.cjs");
 const record = (model: string, price = "1", success = 90, extra = {}) => ({ provider_name: "provider", model_id: model, model_price: price, success_rate: success, average_latency: 2000, ...extra });
 const catalog = (...records: any[]) => normalizeCatalog({ data: { models: records } });
 
@@ -54,6 +54,23 @@ describe("automatic model routing", () => {
     const execute = vi.fn(async () => "ok");
     await expect(runAutoModel({ loadModels, execute, wait: async () => {} })).resolves.toBe("ok");
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it("honors a model endpoint Retry-After without sharing the comment FIFO", async () => {
+    expect(retryDelay(1000, { retryAfterMs: 45_000 })).toBe(45_000);
+    expect(retryDelay(2000, { retryAfterMs: 500 })).toBe(2000);
+    expect(retryDelay(1000, { retryAfterMs: 60 * 60 * 1000 })).toBe(10 * 60 * 1000);
+    const waits: number[] = [];
+    let attempts = 0;
+    await expect(runAutoModel({
+      loadModels: async () => catalog(record("deepseek-v4-flash")),
+      execute: async () => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("请求过于频繁，请稍后"), { retryAfterMs: 45_000 });
+        return "ok";
+      },
+      wait: async (ms: number) => { waits.push(ms); }
+    })).resolves.toBe("ok");
+    expect(waits).toContain(45_000);
   });
 });
 

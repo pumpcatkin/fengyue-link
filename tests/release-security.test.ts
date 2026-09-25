@@ -115,6 +115,20 @@ describe("official release security", () => {
     expect(() => validateManifestForRelease({ ...signedManifestShape(), version: "0.12.1" }, release)).toThrow(/版本/);
   });
 
+  it("keeps the mutable game library outside GitHub release integrity checks", () => {
+    const release = validateReleaseMetadata(releaseMetadata());
+    const shape = signedManifestShape() as ReturnType<typeof signedManifestShape> & {
+      files: ReturnType<typeof signedManifestShape>["files"] & { gameLibrary?: unknown };
+    };
+    shape.files.gameLibrary = { path: "resources/game-library", sha256: "d".repeat(64) };
+    const downloadable = validateManifestForRelease(shape, release);
+    const runtime = validateManifestForRuntime(shape);
+    expect(Object.keys(downloadable.files).sort()).toEqual(["appAsar", "executable", "installer"]);
+    expect(Object.keys(runtime.files).sort()).toEqual(["appAsar", "executable"]);
+    expect(JSON.stringify(downloadable)).not.toContain("game-library");
+    expect(JSON.stringify(runtime)).not.toContain("game-library");
+  });
+
   it("calculates installed artifact SHA-256 without blocking the Electron event loop", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "fengyue-release-security-"));
     temporaryDirectories.push(directory);

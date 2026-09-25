@@ -21,6 +21,15 @@ function node(text = "") {
 }
 
 describe("grid world communication UI", () => {
+  it("renders a complete local date and time for world chat timestamps", () => {
+    const context: any = {};
+    const functions = source.slice(source.indexOf("function worldChatTime"), source.indexOf("function renderWorldChat"));
+    runInNewContext(functions, context);
+    const timestamp = new Date(2026, 8, 25, 7, 8, 9).getTime();
+    expect(context.worldChatTime({ createdAt: timestamp })).toBe("2026-09-25 07:08:09");
+    expect(context.worldChatTime({ createdAt: 0 })).toBe("刚刚");
+  });
+
   it("provides unread indicators and separate received/sent letter panes", () => {
     expect(html).toContain('id="social-unread-badge"');
     expect(html).toContain('data-social-badge="world"');

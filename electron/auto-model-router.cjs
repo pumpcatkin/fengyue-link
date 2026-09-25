@@ -65,6 +65,11 @@ function delay(ms, signal) {
   });
 }
 
+function retryDelay(baseMs, error) {
+  const hinted = Math.max(0, Number(error?.retryAfterMs || 0));
+  return Math.min(10 * 60 * 1000, Math.max(baseMs, hinted));
+}
+
 // A round visits every live candidate once. Refreshing between rounds admits new
 // models and avoids retrying a cached, removed model forever. No attempt ceiling.
 async function runAutoModel({ loadModels, execute, signal, onState = () => {}, wait = delay, maxAttempts = null }) {
@@ -83,7 +88,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
       if (!retryable(error)) throw error;
       if (maxAttempts != null && Number.isFinite(Number(maxAttempts)) && cycle >= Math.max(1, Number(maxAttempts))) throw error;
       assertActive(signal);
-      const retryAfterMs = Math.min(30000, 1500 * 2 ** Math.min(cycle - 1, 5));
+      const retryAfterMs = retryDelay(Math.min(30000, 1500 * 2 ** Math.min(cycle - 1, 5)), error);
       onState({ stage: "waiting", attempt, cycle, retryAfterMs, error: error.message });
       await wait(retryAfterMs, signal);
       continue;
@@ -100,7 +105,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
         if (maxAttempts != null && Number.isFinite(Number(maxAttempts)) && attempt >= Math.max(1, Number(maxAttempts))) throw error;
         if (!retryable(error)) throw error;
         assertActive(signal);
-        const retryAfterMs = Math.min(30000, 1000 * 2 ** Math.min(cycle - 1, 5));
+        const retryAfterMs = retryDelay(Math.min(30000, 1000 * 2 ** Math.min(cycle - 1, 5)), error);
         onState({ stage: "waiting", attempt, cycle, model: model.label, provider: model.provider, retryAfterMs, error: error.message });
         await wait(retryAfterMs, signal);
       }
@@ -108,4 +113,4 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
   }
 }
 
-module.exports = { normalizeCatalog, rankModels, priority, runAutoModel, abortError, assertActive, retryable };
+module.exports = { normalizeCatalog, rankModels, priority, runAutoModel, abortError, assertActive, retryable, retryDelay };

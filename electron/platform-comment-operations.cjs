@@ -15,8 +15,8 @@ function commentParentId(value) {
   const id = commentId(value);
   const parentId = String(value?.parent_id || value?.parentId || value?._fyowRootId
     || value?.root_comment_id || value?.rootCommentId || "").trim();
-  // Some platform responses set root_comment_id to the root's own ID. That is
-  // still a root comment and must never become a DELETE target.
+  // Some platform responses set root_comment_id to the root's own ID. It must
+  // still be classified as a root so only the whole-branch flow can delete it.
   return parentId && parentId !== id ? parentId : "";
 }
 
@@ -56,8 +56,8 @@ class PlatformCommentOperations {
     return this.requestConsole(`/comments/${encodeURIComponent(activeWorkId)}/1`, { method: "POST", body, timeout: 20000 });
   }
 
-  async delete({ workId, source }) {
-    const result = await this.deleteMany({ workId, sources: [source] });
+  async delete({ workId, source, deleteRoot = false }) {
+    const result = await this.deleteMany({ workId, sources: [source], deleteRoots: deleteRoot });
     return {
       deleted: result.deletedCommentIds.length === 1 || result.alreadyMissingCommentIds.length === 1,
       alreadyMissing: result.alreadyMissingCommentIds.length === 1,
@@ -66,13 +66,13 @@ class PlatformCommentOperations {
     };
   }
 
-  async freshComments(ids, sources = []) {
+  async freshComments(ids, sources = [], options = {}) {
     if (!this.resolveComments) {
       const error = new Error("删除前的云端校验接口不可用");
       error.code = "PLATFORM_DELETE_VERIFICATION_UNAVAILABLE";
       throw error;
     }
-    const result = await this.resolveComments(ids, sources);
+    const result = await this.resolveComments(ids, sources, options);
     if (!result || result.complete !== true || !Array.isArray(result.items)) {
       const error = new Error("云端评论读取尚未完整，已保留原数据");
       error.code = "PLATFORM_DELETE_VERIFICATION_INCOMPLETE";
@@ -89,7 +89,7 @@ class PlatformCommentOperations {
     }
   }
 
-  async deleteMany({ workId, sources, knownOwnedCommentIds = [] }) {
+  async deleteMany({ workId, sources, knownOwnedCommentIds = [], deleteRoots = false }) {
     const activeWorkId = this.assertActiveWork(workId);
     const requested = [];
     const seen = new Set();
@@ -107,7 +107,9 @@ class PlatformCommentOperations {
     const ids = requested.map(item => item.id);
     const knownOwned = new Set((knownOwnedCommentIds || []).map(String));
     const sourceItems = requested.map(item => item.source);
-    const freshItems = await this.freshComments(ids, sourceItems);
+    const freshItems = await this.freshComments(ids, sourceItems, {
+      requireCompleteBranches: Boolean(deleteRoots)
+    });
     const freshById = new Map(freshItems.map(item => [commentId(item), item]));
     for (const item of requested) {
       const fresh = freshById.get(item.id);
@@ -128,6 +130,11 @@ class PlatformCommentOperations {
 
     // Classify roots and replies only from the fresh cloud response. Persisted
     // source metadata is evidence, not authority over a destructive target.
+    // The platform DELETE endpoint is not atomic: a live probe confirmed that
+    // deleting a root with replies returns 200 and removes the whole branch.
+    // Therefore roots are never sent to DELETE at runtime. Keeping the root is
+    // the only way to guarantee that a concurrent/foreign reply cannot be
+    // destroyed by a cleanup operation.
     const deletionTargets = requested.filter(item => {
       const fresh = freshById.get(item.id);
       return fresh ? Boolean(commentParentId(fresh)) : false;
@@ -137,16 +144,20 @@ class PlatformCommentOperations {
       return fresh ? !commentParentId(fresh) : !commentParentId(item.source);
     }).map(item => item.id);
     const alreadyMissingCommentIds = requested.filter(item => !freshById.has(item.id)).map(item => item.id);
-    const parentIds = new Set(deletionTargets.map(item => commentParentId(freshById.get(item.id))).filter(Boolean));
-    deletionTargets.sort((left, right) => Number(parentIds.has(left.id)) - Number(parentIds.has(right.id)) || left.index - right.index);
+    const replyTargets = deletionTargets.filter(item => commentParentId(freshById.get(item.id)));
     if (!deletionTargets.length && !alreadyMissingCommentIds.length) {
-      const error = new Error("根评论缺少原子条件删除能力，已保留原数据");
-      error.code = "PLATFORM_DELETE_ROOT_UNSAFE";
-      throw error;
+      return {
+        deleted: true,
+        fullyDeleted: false,
+        commentIds: ids,
+        deletedCommentIds: [],
+        alreadyMissingCommentIds: [],
+        preservedRootCommentIds
+      };
     }
 
     const deletedCommentIds = [];
-    for (const item of deletionTargets) {
+    for (const item of replyTargets) {
       this.assertContext(activeWorkId, currentAccountId);
       if (!freshById.has(item.id)) {
         alreadyMissingCommentIds.push(item.id);
@@ -173,7 +184,9 @@ class PlatformCommentOperations {
       for (const delay of [0, 300, 700, 1500]) {
         if (delay) await this.sleep(delay);
         this.assertContext(activeWorkId, currentAccountId);
-        remainingIds = (await this.freshComments(targetIds, sourceItems)).map(commentId).filter(id => targetIds.includes(id));
+        remainingIds = (await this.freshComments(targetIds, sourceItems, {
+          requireCompleteBranches: Boolean(deleteRoots)
+        })).map(commentId).filter(id => targetIds.includes(id));
         if (!remainingIds.length) break;
       }
     }
@@ -184,7 +197,14 @@ class PlatformCommentOperations {
       error.remainingCommentIds = remainingIds;
       throw error;
     }
-    return { deleted: true, commentIds: ids, deletedCommentIds, alreadyMissingCommentIds, preservedRootCommentIds };
+    return {
+      deleted: true,
+      fullyDeleted: preservedRootCommentIds.length === 0,
+      commentIds: ids,
+      deletedCommentIds,
+      alreadyMissingCommentIds,
+      preservedRootCommentIds
+    };
   }
 }
 

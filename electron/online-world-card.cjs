@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
+const { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { canonicalJson } = require("./online-world-protocol.cjs");
 const { packProgram, parseProgram, injectSandboxCsp, composeSingleFileProgram } = require("./online-world-runtime.cjs");
 const { GRID_GAME_ID } = require("./grid-world-game.cjs");
@@ -190,7 +190,7 @@ function createBundledGridCard() {
     cardId: GRID_CARD_ID,
     gameId: GRID_GAME_ID,
     title: GRID_GAME_TITLE,
-    version: 39,
+    version: 40,
     companion: { ...companion, configuration, configurationSha256: configurationDigest(configuration) },
     program: { format: program.manifest.format, apiVersion: 1, digest: program.digest },
     exportedAt: null
@@ -314,6 +314,16 @@ function gameCardLibraryKey(cardOrCardId, workId = null) {
   return `${cardId}::${boundWorkId}`;
 }
 
+function compareGameCardFreshness(candidate, current) {
+  const candidateVersion = Number(candidate?.version || 0);
+  const currentVersion = Number(current?.version || 0);
+  if (candidateVersion !== currentVersion) return candidateVersion > currentVersion ? 1 : -1;
+  const candidateExportedAt = Date.parse(String(candidate?.exportedAt || "")) || 0;
+  const currentExportedAt = Date.parse(String(current?.exportedAt || "")) || 0;
+  if (candidateExportedAt === currentExportedAt) return 0;
+  return candidateExportedAt > currentExportedAt ? 1 : -1;
+}
+
 function summarizeGameCard(card, libraryId = null) {
   return {
     cardId: card.cardId,
@@ -416,10 +426,9 @@ function scanGameCardDirectory(directory, options = {}) {
       if (!sources.has(libraryId)) sources.set(libraryId, new Set());
       sources.get(libraryId).add(loaded.file);
       const current = cards.get(libraryId);
-      const currentVersion = Number(current?.version || 0);
-      const nextVersion = Number(loaded.card.version || 0);
-      if (!current || nextVersion > currentVersion
-        || (nextVersion === currentVersion && loaded.modifiedAt >= Number(selectedModifiedAt.get(libraryId) || 0))) {
+      const freshness = compareGameCardFreshness(loaded.card, current);
+      if (!current || freshness > 0
+        || (freshness === 0 && loaded.modifiedAt >= Number(selectedModifiedAt.get(libraryId) || 0))) {
         cards.set(libraryId, loaded.card);
         selectedModifiedAt.set(libraryId, loaded.modifiedAt);
       }
@@ -428,6 +437,77 @@ function scanGameCardDirectory(directory, options = {}) {
     }
   }
   return { directory: root, cards, sources, errors };
+}
+
+function bundledGameCardTarget(sourceFile, libraryId, destinationRoot, destinationSources) {
+  const existing = [...(destinationSources?.get(libraryId) || [])]
+    .map(file => path.resolve(String(file || "")))
+    .filter(file => path.dirname(file) === destinationRoot && path.extname(file).toLowerCase() === ".json")
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  if (existing.length) return existing[0];
+
+  const sourceBaseName = path.basename(String(sourceFile || ""));
+  const preferredName = path.extname(sourceBaseName).toLowerCase() === ".json"
+    ? sourceBaseName
+    : "游戏卡.json";
+  const preferred = path.join(destinationRoot, preferredName);
+  if (!fs.existsSync(preferred)) return preferred;
+
+  const extension = path.extname(preferredName);
+  const stem = path.basename(preferredName, extension);
+  const suffix = crypto.createHash("sha256").update(libraryId).digest("hex").slice(0, 10);
+  for (let index = 0; index < 1000; index += 1) {
+    const serial = index ? `-${index + 1}` : "";
+    const candidate = path.join(destinationRoot, `${stem}-${suffix}${serial}${extension}`);
+    if (!fs.existsSync(candidate)) return candidate;
+    try {
+      if (gameCardLibraryKey(readGameCardFile(candidate).card) === libraryId) return candidate;
+    } catch {}
+  }
+  throw new Error("游戏卡安装目录中没有可用文件名");
+}
+
+function mergeBundledGameCardDirectory(sourceDirectory, destinationDirectory, options = {}) {
+  const sourceRoot = path.resolve(String(sourceDirectory || ""));
+  const destinationRoot = path.resolve(String(destinationDirectory || ""));
+  if (!String(sourceDirectory || "")) throw new Error("内置游戏库目录无效");
+  if (!String(destinationDirectory || "")) throw new Error("游戏卡安装目录无效");
+  if (sourceRoot === destinationRoot) throw new Error("内置游戏库与游戏卡安装目录不能相同");
+  fs.mkdirSync(destinationRoot, { recursive: true });
+  if (!fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+    return { sourceDirectory: sourceRoot, destinationDirectory: destinationRoot, missing: true, created: [], updated: [], skipped: [], errors: [] };
+  }
+
+  const bundled = scanGameCardDirectory(sourceRoot, options);
+  const installed = scanGameCardDirectory(destinationRoot, options);
+  const result = {
+    sourceDirectory: sourceRoot,
+    destinationDirectory: destinationRoot,
+    missing: false,
+    created: [],
+    updated: [],
+    skipped: [],
+    errors: [
+      ...bundled.errors.map(error => ({ scope: "bundled", ...error })),
+      ...installed.errors.map(error => ({ scope: "installed", ...error }))
+    ]
+  };
+  for (const [libraryId, bundledCard] of bundled.cards) {
+    const installedCard = installed.cards.get(libraryId);
+    if (installedCard && compareGameCardFreshness(bundledCard, installedCard) <= 0) {
+      result.skipped.push(libraryId);
+      continue;
+    }
+    const sourceFile = [...(bundled.sources.get(libraryId) || [])]
+      .sort((left, right) => left.localeCompare(right, "zh-CN"))[0];
+    const target = bundledGameCardTarget(sourceFile, libraryId, destinationRoot, installed.sources);
+    atomicWriteFileSync(fs, target, `${JSON.stringify(bundledCard, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    if (!installed.sources.has(libraryId)) installed.sources.set(libraryId, new Set());
+    installed.sources.get(libraryId).add(target);
+    installed.cards.set(libraryId, bundledCard);
+    (installedCard ? result.updated : result.created).push({ libraryId, file: target });
+  }
+  return result;
 }
 
 function removeGameCardDirectoryFiles(directory, files) {
@@ -469,10 +549,12 @@ module.exports = {
   refreshGameCardProgram,
   rebindGameCard,
   gameCardLibraryKey,
+  compareGameCardFreshness,
   summarizeGameCard,
   loadGameCardLibrary,
   saveGameCardLibrary,
   readGameCardFile,
   scanGameCardDirectory,
+  mergeBundledGameCardDirectory,
   removeGameCardDirectoryFiles
 };

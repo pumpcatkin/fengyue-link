@@ -1998,6 +1998,14 @@ function switchSocialTab(tab) {
   for (const name of ["world", "generals", "letters"]) document.querySelector(`#social-${name}`).classList.toggle("hidden", name !== tab);
   markCommunicationRead(tab);
 }
+function worldChatTime(item) {
+  const timestamp = Number(item?.createdAt || item?.timestamp || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "刚刚";
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "刚刚";
+  const pad = value => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 function renderWorldChat() {
   const messages = (payload?.worldChat || []).slice(-50);
   const fingerprint = JSON.stringify(messages);
@@ -2012,7 +2020,10 @@ function renderWorldChat() {
       article.className = `chat-message${item.accountId === ownAccountId() ? " self" : ""}`;
       const header = document.createElement("header");
       const name = document.createElement("b"); name.textContent = item.displayName || accountLabel(item.accountId);
-      const time = document.createElement("time"); time.textContent = new Date(item.createdAt || item.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+      const time = document.createElement("time"); time.textContent = worldChatTime(item);
+      const timestamp = Number(item?.createdAt || item?.timestamp || 0);
+      const date = new Date(timestamp);
+      if (Number.isFinite(timestamp) && timestamp > 0 && Number.isFinite(date.getTime())) time.dateTime = date.toISOString();
       const text = document.createElement("p"); text.textContent = item.text;
       header.append(name, time); article.append(header, text); target.append(article);
     }

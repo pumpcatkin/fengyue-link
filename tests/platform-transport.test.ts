@@ -144,7 +144,9 @@ describe("account session transport", () => {
   });
 
   it("bounds reads, coalesces duplicate GETs, and serializes writes", async () => {
-    const queue = new PlatformRequestQueue({ readConcurrency: 2, writeConcurrency: 1 });
+    const queue = new PlatformRequestQueue({
+      readConcurrency: 2, writeConcurrency: 1, writeMinIntervalMs: 0, writeJitterMs: 0
+    });
     let activeReads = 0;
     let maxReads = 0;
     let readRuns = 0;
@@ -179,5 +181,39 @@ describe("account session transport", () => {
     expect(maxWrites).toBe(1);
     expect(writeOrder).toEqual([1, 2, 3]);
     queue.close();
+  });
+
+  it("paces consecutive writes and carries Retry-After across queued mutations", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T00:00:00.000Z"));
+    try {
+      const events: string[] = [];
+      const queue = new PlatformRequestQueue({
+        writeMinIntervalMs: 500,
+        writeJitterMs: 0,
+        onEvent: (detail: any) => events.push(String(detail.event))
+      });
+      const first = queue.enqueue(async () => {
+        events.push("first");
+        throw Object.assign(new Error("throttled"), {
+          code: "PLATFORM_RATE_LIMIT", status: 429, retryAfterMs: 2_000
+        });
+      }, { method: "POST" });
+      const second = queue.enqueue(async () => {
+        events.push("second");
+        return "ok";
+      }, { method: "DELETE" });
+
+      await expect(first).rejects.toMatchObject({ code: "PLATFORM_RATE_LIMIT" });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(events).not.toContain("second");
+      expect(queue.snapshot().write.retryAfterMs).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(second).resolves.toBe("ok");
+      expect(events.filter(item => item === "request-rate-limited")).toHaveLength(1);
+      queue.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

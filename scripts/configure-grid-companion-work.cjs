@@ -5,12 +5,12 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJsonWithBackupSync } = require("../electron/runtime-utils.cjs");
-const { createBundledGridCard, configurationDigest, normalizeConfiguration, rebindGameCard } = require("../electron/online-world-card.cjs");
+const { createBundledGridCard, createExportedGameCard, configurationDigest, normalizeConfiguration, rebindGameCard, validateGameCard } = require("../electron/online-world-card.cjs");
 const { FYOW_SCHEMAS, canonicalJson, encodeCommentRecord, decodeCommentChunk, extractCommentItems, assembleCommentRecords, signRecord, verifySignedRecord } = require("../electron/online-world-protocol.cjs");
 const { parseProgram } = require("../electron/online-world-runtime.cjs");
 const { consumeModelEventStream, createModelRequestPayload } = require("../electron/model-stream.cjs");
 const { createWorld, createFallbackGeneral, ensureGeneralProfile, publicGeneralState, buildPlayerProfileContextRequest, buildGeneralGenerationRequest, buildGeneralDialogueRequest, buildGeneralMemoryUpdateRequest } = require("../electron/grid-world-game.cjs");
-const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder, recordPlatformOrder } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, parseJsonAnswer, playerContextQualityIssue, generalGenerationQualityIssue, dialogueQualityIssue, generalMemoryQualityIssue, comparePlatformOrder, recordPlatformOrder, exportedConfig, modelConfigSavePayload, coreConfigMatches } = require("../electron/online-world-service.cjs");
 
 const ORIGIN = "https://staging.aiero.cc";
 const PROFILE_ID = String(process.env.FYOW_PROFILE_ID || "default").replace(/[^0-9a-z._-]/gi, "-").slice(0, 80) || "default";
@@ -565,6 +565,45 @@ async function verifySegmentedComments(window, workId) {
   }
 }
 
+async function verifyRootDeleteGuard(window, workId) {
+  const profile = unwrap(await requiredApi(window, "/go/api/account/profile"));
+  const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+  if (!accountId) throw new Error("缺少删除保护探针账号");
+  const marker = crypto.randomUUID();
+  const service = platformCommentService(window, workId, accountId);
+  const rootResponse = await service.postComment(`§FYOW-DELETE-GUARD§${marker}§ROOT`);
+  const root = findObject(rootResponse, item => Boolean(item.id || item.comment_id));
+  const rootId = String(root?.id || root?.comment_id || "");
+  if (!rootId) throw new Error("删除保护探针没有返回根评论编号");
+  const replyResponse = await service.postComment(`§FYOW-DELETE-GUARD§${marker}§REPLY`, {
+    parentId: rootId,
+    toAccountId: accountId
+  });
+  const reply = findObject(replyResponse, item => Boolean(item.id || item.comment_id));
+  const replyId = String(reply?.id || reply?.comment_id || "");
+  if (!replyId) throw new Error("删除保护探针没有返回回复编号");
+  let rootDeleteResponse = null;
+  try {
+    rootDeleteResponse = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1/${encodeURIComponent(rootId)}`, { method: "DELETE" });
+    await sleep(1000);
+    const remaining = (await readAllComments(window, workId))
+      .filter(item => [rootId, replyId].includes(String(item?.id || item?.comment_id || "")));
+    return {
+      rootId,
+      replyId,
+      rootDeleteAccepted: Boolean(rootDeleteResponse.ok),
+      rootDeleteStatus: Number(rootDeleteResponse.status || 0),
+      platformRejectsNonEmptyRoot: !rootDeleteResponse.ok,
+      remainingIds: remaining.map(item => String(item?.id || item?.comment_id || ""))
+    };
+  } finally {
+    for (const id of [replyId, rootId]) {
+      if (!id) continue;
+      await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+    }
+  }
+}
+
 async function activateSavedProgram(window, card, workId) {
   const [installedResponse, profileResponse, comments] = await Promise.all([
     api(window, `/console/api/installed-apps/${encodeURIComponent(workId)}`),
@@ -586,31 +625,11 @@ async function activateSavedProgram(window, card, workId) {
   const hasOccupationCountingCutover = Number(current.occupationCountingProtocol || 0) >= 1;
   if (current.programHash === card.program.digest && hasOccupationCountingCutover) {
     const matching = controls.filter(item => item.record.programHash === card.program.digest);
-    let removedCommentIds = [];
-    if (process.env.FYOW_CLEAN_DUPLICATE_CONTROLS === "1" && matching.length > 1) {
-      const duplicateRecords = matching.filter(item => item.record.id !== current.id);
-      for (const duplicate of duplicateRecords) {
-        for (const source of duplicate.sources || []) {
-          const commentId = String(source?.id || source?.comment_id || "");
-          if (!commentId) continue;
-          const response = await api(window, `/console/api/comments/${encodeURIComponent(workId)}/1/${encodeURIComponent(commentId)}`, { method: "DELETE" });
-          if (!response.ok) throw new Error(`清理重复程序控制评论失败：${commentId} HTTP ${response.status}`);
-          removedCommentIds.push(commentId);
-        }
-      }
-      await sleep(700);
-      const remaining = assembleCommentRecords(await readAllComments(window, workId)).records
-        .filter(item => item.record?.schema === FYOW_SCHEMAS.control && item.record.workId === workId
-          && item.record.programHash === card.program.digest && verifySignedRecord(item.record, current.authoritySigningPublicKey));
-      if (remaining.length !== 1 || remaining[0].record.id !== current.id) {
-        throw new Error(`重复程序控制评论清理后数量异常：${JSON.stringify(remaining.map(item => item.record.id))}`);
-      }
-    }
     return {
       activated: false,
       alreadyCurrent: true,
       matchingControlIds: matching.map(item => item.record.id),
-      removedCommentIds
+      duplicateControlsPreserved: Math.max(0, matching.length - 1)
     };
   }
   const identity = loadOnlineWorldIdentity(signedInAccountId);
@@ -641,6 +660,132 @@ async function activateSavedProgram(window, card, workId) {
   return { activated: true, alreadyCurrent: false, controlId: updated.id };
 }
 
+function findObject(root, predicate) {
+  const queue = [root];
+  const seen = new Set();
+  while (queue.length && seen.size < 2000) {
+    const value = queue.shift();
+    if (!value || typeof value !== "object" || seen.has(value)) continue;
+    seen.add(value);
+    if (!Array.isArray(value) && predicate(value)) return value;
+    queue.push(...(Array.isArray(value) ? value : Object.values(value)));
+  }
+  return null;
+}
+
+async function requiredApi(window, pathname, options = {}, attempts = 12) {
+  let last;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await api(window, pathname, options);
+    if (response.ok) return response;
+    last = response;
+    const message = String(response.payload?.message || response.payload?.msg || response.payload?.raw || "");
+    const rateLimited = response.status === 429 || /频繁|too many|rate.?limit|429/i.test(message);
+    if (!rateLimited && response.status < 500) break;
+    await sleep(Math.min(5 * 60_000, 15_000 * (2 ** Math.min(4, attempt))));
+  }
+  throw new Error(`平台接口失败：${pathname} HTTP ${last?.status || 0} ${last?.payload?.message || last?.payload?.msg || ""}`.trim());
+}
+
+function persistProvisionState(file, state) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  fs.renameSync(temporary, file);
+}
+
+async function assertUnopenedWork(window, workId) {
+  const response = await requiredApi(window, `/console/api/comments/${encodeURIComponent(workId)}/1?page=1&limit=50&order=created_at_desc&filter_type=all`);
+  const comments = extractCommentItems(unwrap(response));
+  if (comments.length) throw new Error(`新伴生作品 ${workId} 已存在 ${comments.length} 条评论，未保持未开服状态`);
+}
+
+async function provisionServerCards(window, requestedCount) {
+  const additionalCount = Math.max(1, Math.min(20, Number.parseInt(requestedCount, 10) || 4));
+  const cardsDirectory = path.resolve(__dirname, "../game-cards");
+  const baseCardFile = path.join(cardsDirectory, "猎艳疆土.json");
+  const baseCard = validateGameCard(JSON.parse(fs.readFileSync(baseCardFile, "utf8")));
+  const resumeFile = path.resolve(__dirname, "../tmp/grid-companion-server-provision.json");
+  let resume = { schema: "fyow.grid-server-provision/1", basePackageSha256: baseCard.packageSha256, servers: [] };
+  if (fs.existsSync(resumeFile)) {
+    const parsed = JSON.parse(fs.readFileSync(resumeFile, "utf8"));
+    if (parsed?.schema === resume.schema && parsed?.basePackageSha256 === baseCard.packageSha256) resume = parsed;
+  }
+  const profile = unwrap(await requiredApi(window, "/go/api/account/profile"));
+  const accountId = String(profile?.id || profile?.account_id || profile?.accountId || "");
+  if (!accountId || accountId !== baseCard.companion.authorAccountId) throw new Error("当前账号不是游戏卡登记的作品作者");
+
+  const completed = [];
+  for (let offset = 0; offset < additionalCount; offset += 1) {
+    const slot = offset + 2;
+    let entry = resume.servers.find(item => Number(item.slot) === slot) || null;
+    if (!entry) {
+      const createdResponse = await requiredApi(window, "/console/api/apps", {
+        method: "POST",
+        body: {
+          name: `猎艳疆土·${slot}服（未开服）`,
+          description: baseCard.companion.configuration.app.description,
+          icon: "",
+          icon_background: "",
+          mode: "chat",
+          type: 1
+        }
+      });
+      const created = unwrap(createdResponse);
+      const createdApp = findObject(created, item => /^[0-9a-z-]{8,80}$/i.test(String(item.id || item.app_id || item.appId || "")));
+      const workId = String(created?.app?.id || created?.data?.app?.id || created?.id || created?.app_id
+        || createdApp?.id || createdApp?.app_id || createdApp?.appId || "");
+      if (!workId) throw new Error(`创建第 ${slot} 服后平台没有返回作品编号`);
+      entry = { slot, workId, createdAt: new Date().toISOString(), configured: false, verified: false };
+      resume.servers.push(entry);
+      persistProvisionState(resumeFile, resume);
+      await sleep(3000);
+    }
+
+    const workId = String(entry.workId);
+    const targetName = `猎艳疆土·${slot}服[${workId.replace(/[^0-9a-z]/gi, "").slice(0, 16)}]`;
+    const desired = JSON.parse(JSON.stringify(baseCard.companion.configuration));
+    desired.app.id = workId;
+    desired.app.name = targetName;
+    if (!entry.configured) {
+      const modelResponse = await requiredApi(window, `/go/api/apps/config?app_id=${encodeURIComponent(workId)}`);
+      const model = findObject(unwrap(modelResponse), item => typeof item.provider === "string" && typeof (item.name || item.model) === "string");
+      if (!model) throw new Error(`第 ${slot} 服没有返回模型配置`);
+      const payload = modelConfigSavePayload(desired, workId, targetName, desired.app.description, model);
+      payload.app.is_available_not_public = true;
+      payload.app.schedule_publish_or_not = false;
+      await requiredApi(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config`, { method: "POST", body: payload });
+      entry.configured = true;
+      persistProvisionState(resumeFile, resume);
+      await sleep(3000);
+    }
+
+    const exportedResponse = await requiredApi(window, `/console/api/apps/${encodeURIComponent(workId)}/model-config/export`);
+    const verifiedConfig = exportedConfig(unwrap(exportedResponse));
+    const expectedPayload = modelConfigSavePayload(desired, workId, targetName, desired.app.description,
+      findObject(verifiedConfig, item => typeof item.provider === "string" && typeof (item.name || item.model) === "string") || {});
+    if (!coreConfigMatches(verifiedConfig, expectedPayload)) throw new Error(`第 ${slot} 服创作配置或世界书回读不一致`);
+    await assertUnopenedWork(window, workId);
+
+    const rebound = rebindGameCard(baseCard, workId, ORIGIN);
+    const card = createExportedGameCard(rebound, verifiedConfig);
+    const cardFile = path.join(cardsDirectory, `猎艳疆土-${slot}服.json`);
+    const temporaryCardFile = `${cardFile}.${process.pid}.tmp`;
+    fs.writeFileSync(temporaryCardFile, `${JSON.stringify(card, null, 2)}\n`, "utf8");
+    fs.renameSync(temporaryCardFile, cardFile);
+    entry.configured = true;
+    entry.verified = true;
+    entry.name = targetName;
+    entry.cardFile = path.relative(path.resolve(__dirname, ".."), cardFile).replace(/\\/g, "/");
+    entry.packageSha256 = card.packageSha256;
+    entry.verifiedAt = new Date().toISOString();
+    persistProvisionState(resumeFile, resume);
+    completed.push({ slot, workId, name: targetName, cardFile: entry.cardFile, packageSha256: card.packageSha256, unopened: true });
+    await sleep(2000);
+  }
+  return { accountId, baseCard: path.relative(path.resolve(__dirname, ".."), baseCardFile).replace(/\\/g, "/"), servers: completed };
+}
+
 async function main() {
   const bundledCard = createBundledGridCard();
   const requestedWorkId = String(process.env.FYOW_COMPANION_WORK_ID || "").trim();
@@ -655,6 +800,16 @@ async function main() {
   });
   try {
     await login(window, loadCredentials());
+    if (process.env.FYOW_PROBE_ROOT_DELETE_GUARD === "1") {
+      const result = await verifyRootDeleteGuard(window, workId);
+      process.stdout.write(`${JSON.stringify({ ok: true, workId, result }, null, 2)}\n`);
+      return;
+    }
+    if (process.env.FYOW_PROVISION_SERVER_CARDS) {
+      const result = await provisionServerCards(window, process.env.FYOW_PROVISION_SERVER_CARDS);
+      process.stdout.write(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`);
+      return;
+    }
     if (process.env.FYOW_DIAGNOSE_DEPLOYMENTS === "1") {
       const service = new OnlineWorldService({
         requestConsole: async (endpoint, options = {}) => {

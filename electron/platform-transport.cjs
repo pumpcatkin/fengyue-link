@@ -3,16 +3,31 @@
 const RATE_LIMIT_MESSAGE = "请求过于频繁，请稍后";
 
 class PlatformRequestQueue {
-  constructor({ readConcurrency = 4, writeConcurrency = 1, maxPending = 256, onEvent = () => {} } = {}) {
+  constructor({
+    readConcurrency = 4,
+    writeConcurrency = 1,
+    writeMinIntervalMs = 650,
+    writeJitterMs = 150,
+    maxPending = 256,
+    onEvent = () => {},
+    now = () => Date.now(),
+    random = () => Math.random()
+  } = {}) {
     this.lanes = {
-      read: { limit: Math.max(1, Math.trunc(readConcurrency)), running: 0, queue: [] },
-      write: { limit: Math.max(1, Math.trunc(writeConcurrency)), running: 0, queue: [] }
+      read: { limit: Math.max(1, Math.trunc(readConcurrency)), running: 0, queue: [], nextStartAt: 0, timer: null },
+      // Platform mutations share one account-wide throttle. Keep this lane
+      // strictly serial even if an older caller still passes a larger value.
+      write: { limit: 1, running: 0, queue: [], nextStartAt: 0, timer: null }
     };
+    this.writeMinIntervalMs = Math.max(0, Math.trunc(Number(writeMinIntervalMs) || 0));
+    this.writeJitterMs = Math.max(0, Math.trunc(Number(writeJitterMs) || 0));
     this.maxPending = Math.max(8, Math.trunc(maxPending));
     this.sequence = 0;
     this.closed = false;
     this.readInFlight = new Map();
     this.onEvent = typeof onEvent === "function" ? onEvent : () => {};
+    this.now = typeof now === "function" ? now : () => Date.now();
+    this.random = typeof random === "function" ? random : () => Math.random();
   }
 
   laneFor(method) {
@@ -51,6 +66,19 @@ class PlatformRequestQueue {
 
   pump(laneName) {
     const lane = this.lanes[laneName];
+    if (this.closed) return;
+    if (laneName === "write" && lane.running < lane.limit && lane.queue.length) {
+      const delay = Math.max(0, Number(lane.nextStartAt || 0) - this.now());
+      if (delay > 0) {
+        if (!lane.timer) {
+          lane.timer = setTimeout(() => {
+            lane.timer = null;
+            this.pump(laneName);
+          }, delay);
+        }
+        return;
+      }
+    }
     while (!this.closed && lane.running < lane.limit && lane.queue.length) {
       const job = lane.queue.shift();
       if (job.signal?.aborted) {
@@ -58,28 +86,60 @@ class PlatformRequestQueue {
         continue;
       }
       lane.running += 1;
-      const waitMs = Math.max(0, Date.now() - job.enqueuedAt);
+      const startedAt = this.now();
+      const waitMs = Math.max(0, startedAt - job.enqueuedAt);
       if (waitMs >= 250) this.onEvent({ event: "request-dequeued", lane: laneName, waitMs, method: laneName === "read" ? "GET" : "WRITE" });
-      Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+      if (laneName === "write") {
+        const jitter = this.writeJitterMs > 0 ? Math.floor(this.random() * (this.writeJitterMs + 1)) : 0;
+        lane.nextStartAt = Math.max(Number(lane.nextStartAt || 0), startedAt + this.writeMinIntervalMs + jitter);
+      }
+      Promise.resolve().then(job.task).then(job.resolve, error => {
+        if (laneName === "write" && (String(error?.code || "").toUpperCase().startsWith("PLATFORM_RATE_LIMIT") || Number(error?.status || 0) === 429)) {
+          const cooldown = Math.max(1000, Number(error?.retryAfterMs || 0) || 30000);
+          lane.nextStartAt = Math.max(Number(lane.nextStartAt || 0), this.now() + cooldown);
+          this.onEvent({ event: "request-rate-limited", lane: laneName, retryAfterMs: cooldown, method: "WRITE" });
+        }
+        job.reject(error);
+      }).finally(() => {
         lane.running -= 1;
         this.pump(laneName);
       });
+      // The write lane intentionally starts one mutation at a time. Even if a
+      // caller configures a larger concurrency, spacing each start prevents a
+      // burst of comment chunks from tripping the platform-wide throttle.
+      if (laneName === "write") break;
     }
   }
 
   close() {
     this.closed = true;
     for (const lane of Object.values(this.lanes)) {
+      if (lane.timer) clearTimeout(lane.timer);
+      lane.timer = null;
       for (const job of lane.queue.splice(0)) job.reject(platformRequestError("PLATFORM_CANCELLED", "平台请求已取消"));
     }
     this.readInFlight.clear();
+  }
+
+  deferWrites(delayMs) {
+    const lane = this.lanes.write;
+    const delay = Math.max(0, Number(delayMs) || 0);
+    lane.nextStartAt = Math.max(Number(lane.nextStartAt || 0), this.now() + delay);
+    if (lane.timer) clearTimeout(lane.timer);
+    lane.timer = null;
+    this.pump("write");
+    return lane.nextStartAt;
   }
 
   snapshot() {
     return {
       closed: this.closed,
       read: { running: this.lanes.read.running, queued: this.lanes.read.queue.length },
-      write: { running: this.lanes.write.running, queued: this.lanes.write.queue.length }
+      write: {
+        running: this.lanes.write.running,
+        queued: this.lanes.write.queue.length,
+        retryAfterMs: Math.max(0, Number(this.lanes.write.nextStartAt || 0) - this.now())
+      }
     };
   }
 }
@@ -232,6 +292,6 @@ async function requestPlatformJson({ fetch, origin, pathname, token = "", method
 
 module.exports = {
   requestPlatformJson, platformRequestError, isTransientPlatformError,
-  platformMessage, isRateLimitMessage, platformRateLimitScope, RATE_LIMIT_MESSAGE,
+  platformMessage, isRateLimitMessage, retryAfterMs, platformRateLimitScope, RATE_LIMIT_MESSAGE,
   PlatformRequestQueue
 };

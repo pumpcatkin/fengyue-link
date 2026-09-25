@@ -288,6 +288,7 @@ describe("Electron platform API regressions", () => {
     const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const runtime = readFileSync(new URL("../electron/online-world-runtime.cjs", import.meta.url), "utf8");
+    const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     expect(html.indexOf('id="enter-multiplayer"')).toBeLessThan(html.indexOf('id="enter-online-world"'));
     expect(html.indexOf('id="enter-online-world"')).toBeLessThan(html.indexOf('id="edit-profiles"'));
     expect(html).toContain('sandbox="allow-scripts"');
@@ -320,16 +321,27 @@ describe("Electron platform API regressions", () => {
     expect(preload).toContain('webUtils.getPathForFile(file)');
     expect(preload).toContain('ipcRenderer.invoke("online-world:import-card-files", paths)');
     expect(preload).toContain('removeOnlineWorldCard: libraryId => ipcRenderer.invoke("online-world:remove-card", libraryId)');
+    expect(preload).toContain('updateOnlineWorldCardCloud: libraryId => ipcRenderer.invoke("online-world:update-cloud-card", libraryId)');
     expect(main).toContain('handleLocalIpc("online-world:list-cards"');
     expect(main).toContain("loadGameCardLibrary(this.onlineWorldCardFile, null)");
     expect(main).not.toContain("onlineWorldCardExternalizationPath");
     expect(main).toContain('handleLocalIpc("online-world:import-card"');
     expect(main).toContain('handleLocalIpc("online-world:import-card-files"');
     expect(main).toContain('path.join(app.getPath("userData"), "游戏卡")');
+    expect(main).toContain('path.join(resourcesPath, "game-library")');
+    expect(main).toContain("mergeBundledGameCardDirectory(");
     expect(main).toContain('scanGameCardDirectory(this.onlineWorldCardInstallDirectory)');
+    expect(packageJson.build.extraResources).toContainEqual({
+      from: "game-cards",
+      to: "game-library",
+      filter: ["**/*.json"]
+    });
     expect(main).toContain('handleLocalIpc("online-world:remove-card"');
     expect(main).toContain('handleLocalIpc("online-world:export-card"');
+    expect(main).toContain('handleLocalIpc("online-world:update-cloud-card"');
     expect(renderer).toContain('className="online-world-card-remove"');
+    expect(renderer).toContain('updateCloudButton.textContent="更新云端储存"');
+    expect(renderer).toContain("这会将本地目前的json上传至风月，所有玩家的版本都会更新，是否进行？");
     expect(renderer).toContain('onlineWorldSetup.addEventListener("drop"');
     expect(renderer).toContain('api.importOnlineWorldCardFiles(files)');
     expect(main).toContain("scheduleOnlineWorldMigrationResume");

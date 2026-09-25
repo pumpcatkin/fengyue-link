@@ -43,9 +43,41 @@ describe("platform comment operations", () => {
       sources: [{ id: "root" }, { id: "reply", parent_id: "root" }]
     });
     expect(result).toMatchObject({
-      deletedCommentIds: ["reply"], alreadyMissingCommentIds: [], preservedRootCommentIds: ["root"]
+      deletedCommentIds: ["reply"], alreadyMissingCommentIds: [], preservedRootCommentIds: ["root"], fullyDeleted: false
     });
     expect(requestConsole.mock.calls.map(call => call[0])).toEqual(["/comments/work/1/reply"]);
+    expect(resolveComments).toHaveBeenCalledTimes(2);
+  });
+
+  it("deletes owned replies but preserves the root even when root deletion is requested", async () => {
+    const stored = new Map([
+      ["reply", { id: "reply", account_id: "self", parent_id: "root" }],
+      ["root", { id: "root", account_id: "self" }]
+    ]);
+    const requestConsole = vi.fn(async (endpoint: string, options: any) => {
+      if (options.method === "DELETE") stored.delete(endpoint.split("/").at(-1) || "");
+      return {};
+    });
+    const resolveComments = vi.fn(async (ids: string[], _sources: any[], options: any = {}) => {
+      if (options.requireEmptyBranches && stored.has("reply")) {
+        const error = new Error("评论分支在删除前发生变化，已保留原数据");
+        (error as Error & { code?: string }).code = "PLATFORM_DELETE_BRANCH_CHANGED";
+        throw error;
+      }
+      return { items: ids.map(id => stored.get(id)).filter(Boolean), complete: true };
+    });
+    const adapter = operations({ requestConsole, resolveComments });
+    const result = await adapter.deleteMany({
+      workId: "work",
+      sources: [{ id: "root" }, { id: "reply", parent_id: "root" }],
+      deleteRoots: true
+    });
+    expect(result).toMatchObject({
+      deletedCommentIds: ["reply"], preservedRootCommentIds: ["root"], fullyDeleted: false
+    });
+    expect(requestConsole.mock.calls.map(call => call[0])).toEqual([
+      "/comments/work/1/reply"
+    ]);
     expect(resolveComments).toHaveBeenCalledTimes(2);
   });
 
@@ -108,14 +140,14 @@ describe("platform comment operations", () => {
     expect(stored.has("root")).toBe(true);
   });
 
-  it("rejects standalone root deletion until the platform supports an atomic condition", async () => {
+  it("preserves standalone roots because the platform lacks an atomic condition", async () => {
     const requestConsole = vi.fn(async () => ({}));
     const adapter = operations({
       requestConsole,
       resolveComments: async () => ({ items: [{ id: "root", account_id: "self" }], complete: true })
     });
-    await expect(adapter.delete({ workId: "work", source: { id: "root" } })).rejects.toMatchObject({
-      code: "PLATFORM_DELETE_ROOT_UNSAFE"
+    await expect(adapter.delete({ workId: "work", source: { id: "root" }, deleteRoot: true })).resolves.toMatchObject({
+      deleted: false, preservedRoot: true
     });
     expect(requestConsole).not.toHaveBeenCalled();
   });

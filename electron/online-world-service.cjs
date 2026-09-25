@@ -311,12 +311,23 @@ function deferablePublicationError(error) {
 // different because the server explicitly rejected the write.
 function ambiguousPublicationError(error) {
   const code = String(error?.code || "").toUpperCase();
-  if (code === "PLATFORM_RATE_LIMIT" || code === "PLATFORM_AUTH" || code === "PLATFORM_HTTP" || code === "PLATFORM_API") return false;
+  if (code.startsWith("PLATFORM_RATE_LIMIT") || code === "PLATFORM_AUTH" || code === "PLATFORM_HTTP" || code === "PLATFORM_API") return false;
   if (/^PLATFORM_(?:NETWORK|TIMEOUT|SERVER|INVALID_JSON)/.test(code)) return true;
   if (/^FYOW_COMMENT_ACK_(?:MISSING|MISMATCH)/.test(code)) return true;
   return Number(error?.status || error?.statusCode || 0) >= 500
     || /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断/i
       .test(String(error?.message || error || ""));
+}
+
+function terminalCloudUploadError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const status = Number(error?.status || error?.statusCode || 0);
+  if (["FYOW_COMMENT_ACK_MISSING", "FYOW_COMMENT_ACK_MISMATCH"].includes(code)) return true;
+  if (/^PLATFORM_DELETE_(?:BRANCH_CHANGED|CONTEXT_CHANGED|RELATION_CHANGED|ROOT_UNSAFE|OWNERSHIP|RESOLUTION|SCOPE|LIMIT)$/.test(code)) return true;
+  if (["PLATFORM_URL", "PLATFORM_HTTP", "PLATFORM_API", "PLATFORM_AUTH"].includes(code)) {
+    return status !== 408 && status !== 429 && status < 500;
+  }
+  return false;
 }
 
 const AMBIGUOUS_PUBLICATION_GRACE_MS = 1500;
@@ -1092,7 +1103,7 @@ class OnlineWorldService {
       },
       getAccount: () => this.account(),
       getActiveWorkId: () => this.work?.id || "",
-      resolveComments: (ids, sources) => this.resolveCommentDeletionSources(ids, sources)
+      resolveComments: (ids, sources, resolveOptions) => this.resolveCommentDeletionSources(ids, sources, resolveOptions)
     });
     this.runModelTask = options.runModelTask;
     this.onClose = options.onClose;
@@ -1158,6 +1169,9 @@ class OnlineWorldService {
     // the per-account/per-work cache makes an interrupted write resumable on
     // the next launch without exposing transport details in the UI.
     this.cloudUploadQueue = [];
+    // Safety-rejected deletions are kept separately from the live FIFO. They
+    // remain durable and retryable, but never block unrelated gameplay writes.
+    this.cloudUploadDeferred = [];
     this.cloudUploadInFlight = null;
     this.cloudUploadWaiters = new Map();
     this.platformRateLimitUntil = 0;
@@ -1225,6 +1239,69 @@ class OnlineWorldService {
       controlId,
       startedAt: Math.max(0, Number(control.startedAt || 0))
     };
+  }
+
+  worldChatSession(control = this.control, world = this.world, work = this.work) {
+    if (!control || !world || !work?.id) return null;
+    const seasonId = String(control.seasonId || world.seasonId || "");
+    const serverStartedAt = Math.max(0, Number(control.startedAt || world.startedAt || 0));
+    if (!seasonId) return null;
+    return {
+      gameId: GRID_GAME_ID,
+      workId: String(work.id),
+      seasonId,
+      serverStartedAt
+    };
+  }
+
+  sameWorldChatSession(left, right) {
+    return Boolean(left && right
+      && String(left.gameId || GRID_GAME_ID) === String(right.gameId || GRID_GAME_ID)
+      && String(left.workId || "") === String(right.workId || "")
+      && String(left.seasonId || "") === String(right.seasonId || "")
+      && Number(left.serverStartedAt || 0) === Number(right.serverStartedAt || 0));
+  }
+
+  clearWorldChatSession() {
+    this.worldChat = [];
+    this.worldChatCursor = null;
+    this.worldChatSendTimes = [];
+  }
+
+  restoreWorldChatCache(cached) {
+    const session = this.worldChatSession();
+    if (!session) {
+      this.clearWorldChatSession();
+      return;
+    }
+    this.worldChat = (Array.isArray(cached?.worldChat) ? cached.worldChat : [])
+      .filter(item => item && (!item.workId || String(item.workId) === session.workId)
+        && (!item.seasonId || String(item.seasonId) === session.seasonId)
+        && (!item.serverStartedAt || Number(item.serverStartedAt) === session.serverStartedAt)
+        && (item.workId || !session.serverStartedAt
+          || Number(item.platformTimestamp || item.createdAt || 0) >= session.serverStartedAt))
+      .map(item => ({
+        ...item,
+        workId: session.workId,
+        seasonId: session.seasonId,
+        serverStartedAt: session.serverStartedAt
+      }))
+      .slice(-WORLD_CHAT_LIMIT);
+    const cursor = cached?.worldChatCursor && typeof cached.worldChatCursor === "object"
+      ? cached.worldChatCursor : null;
+    const legacyCursorPredatesServer = Boolean(cursor && !cursor.workId && session.serverStartedAt
+      && Number(cursor.order?.timestamp || 0) > 0
+      && Number(cursor.order.timestamp) < session.serverStartedAt);
+    const cursorSession = cursor ? {
+      gameId: cursor.gameId || GRID_GAME_ID,
+      workId: cursor.workId || session.workId,
+      seasonId: cursor.seasonId,
+      serverStartedAt: cursor.serverStartedAt == null ? session.serverStartedAt : cursor.serverStartedAt
+    } : null;
+    this.worldChatCursor = cursor?.initialized && !legacyCursorPredatesServer && this.sameWorldChatSession(cursorSession, session)
+      ? { ...cloneJson(cursor), ...session }
+      : null;
+    this.worldChatSendTimes = [];
   }
 
   sameDirectSession(left, right) {
@@ -1350,7 +1427,7 @@ class OnlineWorldService {
       retryAt,
       retryAfterMs,
       errorCode: String(lastError.code || ""),
-      rateLimited: String(lastError.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+      rateLimited: String(lastError.code || "").toUpperCase().startsWith("PLATFORM_RATE_LIMIT")
         || Number(lastError.status || 0) === 429
         || this.platformRateLimitRetryAt() > 0
     };
@@ -1547,11 +1624,33 @@ class OnlineWorldService {
   async retryPendingIntentTransactionPublish({ comments } = {}) {
     const transaction = this.pendingIntentTransaction;
     if (!transaction || transaction.phase !== "prepared" || !hasPublicMapChanges(transaction.changes)) return null;
-    // This method is also the explicit retry entry point.  Once the caller
-    // has chosen to retry, let the fresh request establish a new server
-    // window; passive polling is still gated by pendingPublicationCoolingDown.
-    this.platformRateLimitUntil = 0;
-    this.platformRateLimitAttempts = 0;
+    const savedRecord = transaction.publication?.record;
+    if (savedRecord && (savedRecord.mapDeltaId !== transaction.mapDeltaId || savedRecord.workId !== this.work?.id
+      || savedRecord.seasonId !== this.control?.seasonId || savedRecord.actorAccountId !== this.account().accountId
+      || canonicalJson(savedRecord.changes) !== canonicalJson(transaction.changes)
+      || !verifySignedRecord(savedRecord, savedRecord.deviceSigningPublicKey))) {
+      const error = new Error("待同步行动的签名记录校验未通过");
+      error.code = "FYOW_OUTBOX_INVALID";
+      throw error;
+    }
+    // A manual retry must respect the same server cooldown as background
+    // polling. Repeated clicks used to clear this gate and immediately create
+    // another 429, extending the outage for the whole account.
+    const lastFailure = transaction.lastPublishError || {};
+    const lastFailureWasRateLimited = String(lastFailure.code || "").toUpperCase().startsWith("PLATFORM_RATE_LIMIT")
+      || Number(lastFailure.status || 0) === 429;
+    const cooldownUntil = Math.max(
+      lastFailureWasRateLimited ? Number(lastFailure.retryAt || 0) : 0,
+      Number(this.platformRateLimitUntil || 0)
+    );
+    if (cooldownUntil > this.now()) {
+      const error = new Error("请求过于频繁，请稍后");
+      error.code = "FYOW_PUBLICATION_COOLDOWN";
+      error.status = 429;
+      error.retryAt = cooldownUntil;
+      error.retryAfterMs = cooldownUntil - this.now();
+      throw error;
+    }
     const validSession = String(transaction.workId || "") === String(this.work?.id || "")
       && String(transaction.seasonId || "") === String(this.control?.seasonId || "")
       && String(transaction.accountId || "") === this.account().accountId
@@ -1868,7 +1967,7 @@ class OnlineWorldService {
     }
     const code = String(error?.code || "FYOW_PUBLICATION_FAILED");
     const status = Number(error?.status || error?.statusCode || 0) || null;
-    const rateLimited = code.toUpperCase() === "PLATFORM_RATE_LIMIT" || status === 429;
+    const rateLimited = code.toUpperCase().startsWith("PLATFORM_RATE_LIMIT") || status === 429;
     const explicitRetryAt = Math.max(0, Number(error?.retryAt || 0));
     const retryAfterMs = Math.max(0, Number(error?.retryAfterMs || 0));
     const retryAt = explicitRetryAt || (rateLimited ? failedAt + Math.max(1000, retryAfterMs || 30000) : 0);
@@ -2374,6 +2473,7 @@ class OnlineWorldService {
       publicGeneralRecalls: this.publicGeneralRecalls,
       pendingCommentRetirements: cloneJson(this.pendingCommentRetirements),
       cloudUploadQueue: cloneJson(this.cloudUploadQueue),
+      cloudUploadDeferred: cloneJson(this.cloudUploadDeferred),
       platformRateLimitUntil: Math.max(0, Number(this.platformRateLimitUntil || 0)),
       platformRateLimitAttempts: Math.max(0, Number(this.platformRateLimitAttempts || 0)),
       publicMarketOrders: this.publicMarketOrders,
@@ -2493,7 +2593,7 @@ class OnlineWorldService {
     this.directInbox = [];
     this.directHistory = [];
     this.seenDirectMessageIds.clear();
-    this.worldChat = [];
+    this.clearWorldChatSession();
     this.mapFactsCache = null;
     this.notify();
     return this.state();
@@ -2640,10 +2740,7 @@ class OnlineWorldService {
       .filter(entry => Array.isArray(entry) && typeof entry[0] === "string" && Number.isSafeInteger(entry[1]) && entry[1] > 0 && entry[1] <= MAX_HISTORY_PAGES)
       .slice(-2000));
     this.localEvents = Array.isArray(cached?.localEvents) ? cached.localEvents.slice(-2000) : [];
-    this.worldChat = Array.isArray(cached?.worldChat) ? cached.worldChat.slice(-WORLD_CHAT_LIMIT) : [];
-    this.worldChatSendTimes = [];
-    this.worldChatCursor = cached?.worldChatCursor && typeof cached.worldChatCursor === "object"
-      ? cloneJson(cached.worldChatCursor) : null;
+    this.clearWorldChatSession();
     this.pendingModelEffects = Array.isArray(cached?.pendingModelEffects) ? cached.pendingModelEffects.slice(-50) : [];
     this.pendingIntentTransaction = cached?.pendingIntentTransaction && typeof cached.pendingIntentTransaction === "object"
       ? cloneJson(cached.pendingIntentTransaction)
@@ -2686,6 +2783,9 @@ class OnlineWorldService {
     this.pendingCommentRetirements = Array.isArray(cached?.pendingCommentRetirements) ? cached.pendingCommentRetirements.slice(-100) : [];
     this.cloudUploadQueue = Array.isArray(cached?.cloudUploadQueue)
       ? cached.cloudUploadQueue.filter(item => item && typeof item === "object" && item.key && item.kind).map(item => cloneJson(item))
+      : [];
+    this.cloudUploadDeferred = Array.isArray(cached?.cloudUploadDeferred)
+      ? cached.cloudUploadDeferred.filter(item => item && typeof item === "object" && item.key && item.kind).map(item => cloneJson(item)).slice(-500)
       : [];
     this.cloudUploadInFlight = null;
     this.cloudUploadWaiters.clear();
@@ -2737,6 +2837,7 @@ class OnlineWorldService {
       bindWorldAuthority(this.world, this.control);
       this.restoreLocalOverlay(cached.localOverlay || null);
       this.restoreDirectCache(cached);
+      this.restoreWorldChatCache(cached);
     } else {
       this.control = null;
       this.world = null;
@@ -2788,12 +2889,18 @@ class OnlineWorldService {
     return this.state();
   }
 
+  async verifyGameCardAuthor(card) {
+    const accountId = this.account().accountId;
+    if (!accountId || card?.companion?.authorAccountId !== accountId) return false;
+    const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(card.companion.workId)}`, { timeout: 8000 });
+    return this.account().accountId === accountId && normalizeWorkDetail(payload, card.companion.workId).authorAccountId === accountId;
+  }
+
   async isGameCardAuthor(card) {
     const accountId = this.account().accountId;
     if (!accountId || card?.companion?.authorAccountId !== accountId) return false;
     try {
-      const payload = await this.requestConsole(`/installed-apps/${encodeURIComponent(card.companion.workId)}`, { timeout: 8000 });
-      return this.account().accountId === accountId && normalizeWorkDetail(payload, card.companion.workId).authorAccountId === accountId;
+      return await this.verifyGameCardAuthor(card);
     } catch (error) {
       const cached = this.verifiedCachedServer(card);
       if (!cached || this.account().accountId !== accountId) return false;
@@ -2814,6 +2921,38 @@ class OnlineWorldService {
     const payload = await this.requestConsole(`/apps/${encodeURIComponent(card.companion.workId)}/model-config/export`, { timeout: 30000 });
     const exported = exportedConfig(payload);
     return createExportedGameCard(card, exported);
+  }
+
+  async updateGameCardCloud(selectedCard = this.card) {
+    if (!selectedCard) throw new Error("请先选择一张游戏卡");
+    const card = validateGameCard(selectedCard);
+    if (!await this.verifyGameCardAuthor(card)) throw new Error("只有伴生作品作者可以更新云端储存");
+    const workId = card.companion.workId;
+    const modelPayload = await this.requestGo(
+      `/apps/config?app_id=${encodeURIComponent(workId)}`,
+      { timeout: 15000 }
+    );
+    const model = firstObject(modelPayload, item => typeof item.provider === "string"
+      && typeof (item.name || item.model) === "string");
+    if (!model) throw new Error("伴生作品没有可用模型配置");
+    const configuration = cloneJson(card.companion.configuration);
+    const payload = modelConfigSavePayload(
+      configuration,
+      workId,
+      configuration.app?.name || card.companion.name || card.title,
+      configuration.app?.description || "",
+      model
+    );
+    await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(workId)}/model-config`,
+      { method: "POST", body: payload, timeout: 30000 }
+    ));
+    const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(workId)}/model-config/export`,
+      { timeout: 30000 }
+    )));
+    if (!coreConfigMatches(verified, payload)) throw new Error("云端配置保存后回读不一致");
+    return createExportedGameCard(card, verified);
   }
 
   async ensureMigrationTargetAvailable(workId) {
@@ -2865,7 +3004,7 @@ class OnlineWorldService {
 
   loadWorkProgram(card = this.card, pageDescription = null) {
     const description = String(pageDescription || "");
-    const liveProgram = parseProgram(description, GRID_GAME_ID);
+    const liveProgram = parseProgram(description, String(card?.gameId || GRID_GAME_ID));
     if (liveProgram) {
       this.program = { ...liveProgram, source: "work-description" };
       if (this.work) this.work.description = description;
@@ -2916,6 +3055,7 @@ class OnlineWorldService {
     }, identity.signingPrivateKey);
     this.world = world;
     this.clearDirectSession();
+    this.clearWorldChatSession();
     this.publicMapOrder = { timestamp: 0, commentId: "" };
     this.publicMapBaselineOrder = { timestamp: 0, commentId: "" };
     this.publicHistoryOrder = { timestamp: 0, commentId: "" };
@@ -2925,6 +3065,7 @@ class OnlineWorldService {
     this.publicGeneralRecalls = {};
     this.pendingCommentRetirements = [];
     this.cloudUploadQueue = [];
+    this.cloudUploadDeferred = [];
     this.cloudUploadInFlight = null;
     this.cloudUploadWaiters.clear();
     this.localGeneralArchiveOrders = {};
@@ -2954,7 +3095,7 @@ class OnlineWorldService {
   cloudUploadKey(kind, value = {}) {
     if (kind === "delete") {
       const ids = (value.sources || []).map(source => commentId(source)).filter(Boolean).sort();
-      return `delete:${String(value.workId || this.work?.id || "")}:${ids.join(",")}`;
+      return `delete:${String(value.workId || this.work?.id || "")}:${value.deleteRoots ? "roots" : "replies"}:${ids.join(",")}`;
     }
     if (kind === "chat-messages") {
       return `chat:${String(value.chatId || "")}:${String(value.messageId || "")}`;
@@ -2994,15 +3135,52 @@ class OnlineWorldService {
     for (const item of this.cloudUploadQueue) this.settleCloudUploadWaiters(item.key, error);
   }
 
+  deferSafetyRejectedCloudUpload(item, error) {
+    if (!item?.key) return;
+    const deferred = {
+      ...cloneJson(item),
+      inFlightAt: "",
+      nextAttemptAt: this.now() + 60 * 1000,
+      deferredAt: this.now(),
+      lastError: {
+        code: String(error?.code || "PLATFORM_DELETE_REJECTED"),
+        message: String(error?.message || error).slice(0, 500),
+        at: this.now()
+      }
+    };
+    const existing = this.cloudUploadDeferred.findIndex(candidate => candidate.key === item.key);
+    if (existing >= 0) this.cloudUploadDeferred[existing] = deferred;
+    else this.cloudUploadDeferred.push(deferred);
+    this.cloudUploadDeferred = this.cloudUploadDeferred.slice(-500);
+  }
+
+  promoteDeferredCloudUploads() {
+    if (this.cloudUploadQueue.length || !this.cloudUploadDeferred.length) return false;
+    const now = this.now();
+    const due = this.cloudUploadDeferred.filter(item => Number(item.nextAttemptAt || 0) <= now);
+    if (!due.length) return false;
+    this.cloudUploadDeferred = this.cloudUploadDeferred.filter(item => Number(item.nextAttemptAt || 0) > now);
+    this.cloudUploadQueue.push(...due);
+    this.saveCache();
+    return true;
+  }
+
   async enqueueCloudUpload(item) {
     const key = String(item.key || "");
     if (!key) throw new Error("云端写入缺少幂等编号");
+    // An explicit retry promotes a previously safety-deferred item. This is
+    // intentionally opt-in; background retry waits for its own due time.
+    this.cloudUploadDeferred = this.cloudUploadDeferred.filter(candidate => candidate.key !== key);
     const existing = this.cloudUploadQueue.find(candidate => candidate.key === key);
     if (existing) {
-      // An explicit retry (for example the pending-action retry path) wakes
-      // this item immediately, except while the platform has an active 429
-      // cooldown.  A manual reconnect must never bypass that server window.
-      existing.nextAttemptAt = Math.max(0, Number(this.platformRateLimitUntil || 0));
+      // Reusing an idempotency key attaches to the durable item. Never reset
+      // its per-item backoff: rapid reconnect/retry clicks must not turn one
+      // queued write into a burst of platform requests.
+      existing.nextAttemptAt = Math.max(
+        0,
+        Number(existing.nextAttemptAt || 0),
+        Number(this.platformRateLimitUntil || 0)
+      );
       this.saveCache();
     }
     if (!existing) {
@@ -3037,7 +3215,7 @@ class OnlineWorldService {
   async processCloudUploadQueue() {
     if (this.cloudUploadInFlight) return this.cloudUploadInFlight;
     const running = (async () => {
-      while (this.cloudUploadQueue.length) {
+      while (this.cloudUploadQueue.length || this.promoteDeferredCloudUploads()) {
         const item = this.cloudUploadQueue[0];
         this.clearPlatformRateLimit();
         const waitUntil = Math.max(Number(item.nextAttemptAt || 0), Number(this.platformRateLimitUntil || 0));
@@ -3047,16 +3225,18 @@ class OnlineWorldService {
           if (item.kind === "balance-retire") {
             result = await this.deleteSupersededBalanceDirectives(item.record, item.snapshot);
           } else if (item.kind === "self-reset-cleanup") {
-            result = await this.commentOperations.deleteMany({
+            result = await this.deleteCommentSources({
               workId: item.workId,
               sources: item.sources || [],
-              knownOwnedCommentIds: item.knownOwnedCommentIds || []
+              knownOwnedCommentIds: item.knownOwnedCommentIds || [],
+              deleteRoots: true
             });
           } else if (item.kind === "delete") {
-            result = await this.commentOperations.deleteMany({
+            result = await this.deleteCommentSources({
               workId: item.workId,
               sources: item.sources || [],
-              knownOwnedCommentIds: item.knownOwnedCommentIds || []
+              knownOwnedCommentIds: item.knownOwnedCommentIds || [],
+              deleteRoots: Boolean(item.deleteRoots)
             });
           } else if (item.kind === "chat-messages") {
             const contents = Array.isArray(item.contents) ? item.contents : [];
@@ -3110,30 +3290,38 @@ class OnlineWorldService {
           if (item.kind === "self-reset-cleanup") this.clearCacheForWork(item.workId);
           this.settleCloudUploadWaiters(item.key, null, result);
         } catch (error) {
-          const terminalAckError = ["FYOW_COMMENT_ACK_MISMATCH", "FYOW_COMMENT_ACK_MISSING"].includes(String(error?.code || ""));
-          if (terminalAckError) {
-            // The platform answered with an invalid acknowledgement. Retrying
-            // that POST could duplicate an already accepted comment, so keep
-            // the diagnostic in the caller's transaction but do not block all
-            // later FIFO entries behind an unsafe duplicate.
+          const terminalError = terminalCloudUploadError(error);
+          if (terminalError) {
+            // Explicit rejections and deletion safety guards are not repaired
+            // by repeating the same payload. Preserve cloud/local data, reject
+            // this caller, and let unrelated queued gameplay continue.
             this.cloudUploadQueue.shift();
+            const deletionSafetyError = String(error?.code || "").toUpperCase().startsWith("PLATFORM_DELETE_")
+              && ["delete", "self-reset-cleanup", "balance-retire"].includes(String(item.kind || ""));
+            if (deletionSafetyError) this.deferSafetyRejectedCloudUpload(item, error);
             this.saveCache();
             this.settleCloudUploadWaiters(item.key, error);
+            this.diagnostic({
+              event: "cloud-upload-rejected", kind: item.kind, key: item.key,
+              code: String(error?.code || "FYOW_UPLOAD_REJECTED"), status: Number(error?.status || 0) || null
+            });
             continue;
           }
           // A returned error is a known failed attempt rather than an
           // interrupted process. Keep the payload queued, but let the next
           // retry issue a fresh request; an in-flight marker is reserved for
           // crash recovery between two cache writes.
-          item.inFlightAt = "";
+          if (!ambiguousPublicationError(error)) item.inFlightAt = "";
           item.attempts = Math.max(0, Number(item.attempts || 0)) + 1;
           const retryAfter = Math.max(1000, Number(error?.retryAfterMs || 0));
           const backoff = Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(8, item.attempts - 1)));
-          const rateLimited = String(error?.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+          const rateLimited = String(error?.code || "").toUpperCase().startsWith("PLATFORM_RATE_LIMIT")
             || Number(error?.status || error?.statusCode || 0) === 429;
           if (rateLimited) this.notePlatformRateLimit(error);
+          const retryDelay = Math.max(retryAfter, backoff);
+          const jitter = crypto.randomInt(0, Math.max(2, Math.min(15001, Math.floor(retryDelay * 0.2) + 1)));
           item.nextAttemptAt = Math.max(
-            this.now() + Math.max(retryAfter, backoff),
+            this.now() + retryDelay + jitter,
             rateLimited ? Number(this.platformRateLimitUntil || 0) : 0
           );
           item.lastError = { code: String(error?.code || "FYOW_UPLOAD_PENDING"), message: String(error?.message || error).slice(0, 500), at: this.now() };
@@ -3218,13 +3406,16 @@ class OnlineWorldService {
     return { archives, protectedRoots, sources: archives.flatMap(archive => archive.sources) };
   }
 
-  async resolveCommentDeletionSources(ids, sources = []) {
+  async resolveCommentDeletionSources(ids, sources = [], options = {}) {
     if (!this.work?.id) return { items: [], complete: false };
     const wanted = new Set((ids || []).map(String));
     const comments = await this.readAllCommentSources({ requireStable: true });
     const byId = new Map(comments.map(item => [commentId(item), item]));
     const parentIds = new Set((sources || []).map(commentParentId).filter(Boolean));
-    for (const parentId of parentIds) {
+    const targetedRootIds = new Set((sources || [])
+      .filter(source => wanted.has(commentId(source)) && !commentParentId(source))
+      .map(commentId).filter(Boolean));
+    for (const parentId of [...new Set([...parentIds, ...targetedRootIds])]) {
       const root = byId.get(parentId);
       if (!root) continue;
       const expectedReplyIds = new Set((sources || []).filter(source => commentParentId(source) === parentId).map(commentId));
@@ -3235,8 +3426,10 @@ class OnlineWorldService {
       const confirmedReplies = await this.readCommentBranches(parentId, REPLY_PAGE_LIMIT, { rootComment: root, strict: true, fresh: true });
       const replyIds = replies.map(commentId).sort();
       const confirmedIds = confirmedReplies.map(commentId).sort();
+      const requiresWholeBranch = targetedRootIds.has(parentId) && Boolean(options.requireCompleteBranches);
       if (canonicalJson(replyIds) !== canonicalJson(confirmedIds)
-        || replyIds.some(id => !expectedReplyIds.has(id))) {
+        || (requiresWholeBranch && replyIds.some(id => !expectedReplyIds.has(id)))
+        || (targetedRootIds.has(parentId) && options.requireEmptyBranches && replyIds.length)) {
         const error = new Error("评论分支在删除前发生变化，已保留原数据");
         error.code = "PLATFORM_DELETE_BRANCH_CHANGED";
         throw error;
@@ -3244,6 +3437,75 @@ class OnlineWorldService {
       for (const reply of replies) byId.set(commentId(reply), reply);
     }
     return { items: [...wanted].map(id => byId.get(id)).filter(Boolean), complete: true };
+  }
+
+  async deleteCommentSources({ workId, sources = [], knownOwnedCommentIds = [], deleteRoots = false }) {
+    const unique = [];
+    const seen = new Set();
+    for (const source of sources) {
+      const id = commentId(source);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      unique.push(source);
+    }
+    if (!unique.length) return {
+      deleted: true, fullyDeleted: true, commentIds: [], deletedCommentIds: [],
+      alreadyMissingCommentIds: [], preservedRootCommentIds: []
+    };
+
+    const roots = new Set(unique.filter(source => !commentParentId(source)).map(commentId));
+    const groups = new Map();
+    for (const source of unique) {
+      const key = commentParentId(source) || commentId(source);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(source);
+    }
+    const batches = [];
+    let current = [];
+    for (const [rootId, group] of groups) {
+      if (group.length > 1000) {
+        if (current.length) batches.push({ sources: current, deleteRoots });
+        current = [];
+        const replies = group.filter(source => commentParentId(source));
+        for (let index = 0; index < replies.length; index += 1000) {
+          batches.push({ sources: replies.slice(index, index + 1000), deleteRoots: false });
+        }
+        const root = group.find(source => commentId(source) === rootId && !commentParentId(source));
+        if (root) batches.push({ sources: [root], deleteRoots });
+        continue;
+      }
+      if (current.length && current.length + group.length > 1000) {
+        batches.push({ sources: current, deleteRoots });
+        current = [];
+      }
+      current.push(...group);
+    }
+    if (current.length) batches.push({ sources: current, deleteRoots });
+
+    const knownOwned = new Set((knownOwnedCommentIds || []).map(String));
+    const aggregate = {
+      deleted: true,
+      fullyDeleted: true,
+      commentIds: [],
+      deletedCommentIds: [],
+      alreadyMissingCommentIds: [],
+      preservedRootCommentIds: []
+    };
+    for (const batch of batches) {
+      const batchIds = batch.sources.map(commentId).filter(Boolean);
+      const result = await this.commentOperations.deleteMany({
+        workId,
+        sources: batch.sources,
+        knownOwnedCommentIds: batchIds.filter(id => knownOwned.has(id)),
+        deleteRoots: Boolean(batch.deleteRoots && batch.sources.some(source => roots.has(commentId(source))))
+      });
+      aggregate.commentIds.push(...(result.commentIds || batchIds));
+      aggregate.deletedCommentIds.push(...(result.deletedCommentIds || []));
+      aggregate.alreadyMissingCommentIds.push(...(result.alreadyMissingCommentIds || []));
+      aggregate.preservedRootCommentIds.push(...(result.preservedRootCommentIds || []));
+      aggregate.fullyDeleted &&= result.fullyDeleted !== false;
+    }
+    return aggregate;
   }
 
   async verifyPublishedRecall(mapDelta, generalId) {
@@ -3395,10 +3657,11 @@ class OnlineWorldService {
     try {
       const result = await this.enqueueCloudUpload({
         kind: "delete",
-        key: this.cloudUploadKey("delete", { workId: this.work.id, sources: pending.sources }),
+        key: this.cloudUploadKey("delete", { workId: this.work.id, sources: pending.sources, deleteRoots: true }),
         workId: this.work.id,
         sources: cloneJson(pending.sources),
-        knownOwnedCommentIds: pending.sources.map(commentId)
+        knownOwnedCommentIds: pending.sources.map(commentId),
+        deleteRoots: true
       });
       const deleted = result.deletedCommentIds.length + result.alreadyMissingCommentIds.length;
       this.pendingCommentRetirements = this.pendingCommentRetirements.filter(item => !matchesPending(item));
@@ -4501,9 +4764,11 @@ class OnlineWorldService {
     const sources = await this.postRecord(record);
     if (!this.applyAuthorityDirective({ record, sources })) throw new Error("账号重置记录发布后未通过云端验证");
     const resetSourceIds = new Set((sources || []).map(commentId).filter(Boolean));
-    const comments = await this.readAllCommentSources({ requireStable: true, fresh: true });
+    const comments = await this.readAllCommentSources({
+      includeAllBranches: true, strictBranches: true, requireStable: true, fresh: true
+    });
     const deletable = comments.filter(comment => commentAccountId(comment) === accountId
-      && commentParentId(comment) && !resetSourceIds.has(commentId(comment)));
+      && !resetSourceIds.has(commentId(comment)));
     if (deletable.length) {
       await this.enqueueCloudUpload({
         kind: "self-reset-cleanup",
@@ -4924,11 +5189,16 @@ class OnlineWorldService {
   }
 
   currentWorldChat() {
+    const session = this.worldChatSession();
+    if (!session) return [];
     const entries = (this.worldChat || [])
       .filter(item => item && String(item.messageId || "") && String(item.text || ""))
       .filter(item => {
         const actor = String(item.accountId || "");
-        if (!actor || item.seasonId !== this.control?.seasonId || this.world?.bans?.[actor]?.banned) return false;
+        if (!actor || String(item.workId || "") !== session.workId
+          || String(item.seasonId || "") !== session.seasonId
+          || Number(item.serverStartedAt || 0) !== session.serverStartedAt
+          || this.world?.bans?.[actor]?.banned) return false;
         const epoch = Math.max(0, Math.trunc(Number(this.world?.playerEpochs?.[actor] || 0)));
         return Math.max(0, Math.trunc(Number(item.playerEpoch || 0))) === epoch;
       })
@@ -4941,6 +5211,8 @@ class OnlineWorldService {
     const record = item?.record;
     if (!record || record.schema !== FYOW_SCHEMAS.worldChat || record.gameId !== GRID_GAME_ID
       || record.workId !== this.work?.id || record.seasonId !== this.control?.seasonId) return false;
+    const serverStartedAt = Math.max(0, Number(this.control?.startedAt || this.world?.startedAt || 0));
+    if (record.serverStartedAt != null && Number(record.serverStartedAt) !== serverStartedAt) return false;
     const actorAccountId = String(record.accountId || "");
     const player = this.world?.players?.[actorAccountId];
     if (!actorAccountId || !player || this.world?.bans?.[actorAccountId]?.banned) return false;
@@ -4979,7 +5251,9 @@ class OnlineWorldService {
       platformTimestamp: Number(order.timestamp),
       commentId: String(order.commentId || ""),
       accountId: String(record.accountId),
+      workId: String(record.workId),
       seasonId: String(record.seasonId),
+      serverStartedAt: Math.max(0, Number(record.serverStartedAt || this.control?.startedAt || this.world?.startedAt || 0)),
       playerEpoch: Math.max(0, Math.trunc(Number(record.playerEpoch || 0)))
     });
     this.worldChat = this.worldChat
@@ -5017,8 +5291,10 @@ class OnlineWorldService {
     if (!actor) throw new Error("请先加入在线游戏世界");
     const text = normalizeWorldChatText(intent.text);
     const playerEpoch = Math.max(0, Math.trunc(Number(this.world.playerEpochs?.[account.accountId] || 0)));
+    const serverStartedAt = Math.max(0, Number(this.control?.startedAt || this.world?.startedAt || 0));
     const messageId = sha256(Buffer.from(canonicalJson({
-      workId: this.work.id, seasonId: this.control.seasonId, accountId: account.accountId, playerEpoch, idempotencyKey: intent.idempotencyKey
+      workId: this.work.id, seasonId: this.control.seasonId, serverStartedAt,
+      accountId: account.accountId, playerEpoch, idempotencyKey: intent.idempotencyKey
     }))).slice(0, 48);
     if (this.currentWorldChat().some(message => message.messageId === messageId && message.accountId === account.accountId)) return { duplicate: true, state: this.state() };
     this.consumeWorldChatBudget();
@@ -5029,6 +5305,7 @@ class OnlineWorldService {
       gameId: GRID_GAME_ID,
       workId: this.work.id,
       seasonId: this.control.seasonId,
+      serverStartedAt,
       accountId: account.accountId,
       displayName: String(actor.displayName || account.username || "玩家").trim().slice(0, 40),
       text,
@@ -5056,8 +5333,9 @@ class OnlineWorldService {
 
   async readWorldChatHistory(history = null) {
     if (!this.work) return { comments: [], assembled: { records: [], incomplete: [], invalid: [] } };
-    const seasonId = String(this.control?.seasonId || "");
-    const cursor = this.worldChatCursor?.seasonId === seasonId && this.worldChatCursor?.initialized
+    const session = this.worldChatSession();
+    if (!session) return { comments: [], assembled: { records: [], incomplete: [], invalid: [] } };
+    const cursor = this.sameWorldChatSession(this.worldChatCursor, session) && this.worldChatCursor?.initialized
       ? this.worldChatCursor : null;
     let comments = Array.isArray(cursor?.pendingChunks) ? cloneJson(cursor.pendingChunks).slice(-512) : [];
     const seen = new Set(comments.map(commentId).filter(Boolean));
@@ -5115,7 +5393,7 @@ class OnlineWorldService {
       comments = assembled.incomplete.slice(-512).flatMap(item => item.sources || []);
     }
     this.worldChatCursor = {
-      seasonId,
+      ...session,
       initialized: true,
       order: newestOrder,
       tailPage,
@@ -5145,7 +5423,7 @@ class OnlineWorldService {
     if (this.syncPaused || !this.work) return this.state();
     this.clearPlatformRateLimit();
     const lastPublishError = this.pendingIntentTransaction?.lastPublishError || {};
-    const lastPublishRateLimited = String(lastPublishError.code || "").toUpperCase() === "PLATFORM_RATE_LIMIT"
+    const lastPublishRateLimited = String(lastPublishError.code || "").toUpperCase().startsWith("PLATFORM_RATE_LIMIT")
       || Number(lastPublishError.status || 0) === 429;
     const retryAt = Math.max(
       Number(this.platformRateLimitUntil || 0),
@@ -6255,12 +6533,14 @@ class OnlineWorldService {
       && comparePlatformOrder(item, confirmed) < 0
       && compareOrderValue(recordPlatformOrder(item), snapshot.ledgerCoverage.through) <= 0);
     const sources = old.flatMap(item => item.sources || [])
-      .filter(source => commentAccountId(source) === this.account().accountId && commentParentId(source));
-    for (let index = 0; index < sources.length; index += 100) {
-      const batch = sources.slice(index, index + 100);
-      await this.commentOperations.deleteMany({ workId: record.workId, sources: batch, knownOwnedCommentIds: batch.map(commentId) });
-    }
-    return { deleted: sources.length };
+      .filter(source => commentAccountId(source) === this.account().accountId);
+    const result = await this.deleteCommentSources({
+      workId: record.workId,
+      sources,
+      knownOwnedCommentIds: sources.map(commentId),
+      deleteRoots: true
+    });
+    return { deleted: result.deletedCommentIds.length + result.alreadyMissingCommentIds.length };
   }
 
   async publishDailyRedTreasures() {
@@ -7208,6 +7488,7 @@ class OnlineWorldService {
     this.control = newControl;
     this.world = normalizeWorldState(cloneJson(draft.targetWorld));
     bindWorldAuthority(this.world, this.control);
+    this.clearWorldChatSession();
     this.restoreLedgerRuntimeState(draft.targetLedgerRuntime);
     this.mapFactsCache = null;
     this.pendingMigration = {
@@ -7314,4 +7595,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, publicAccountName, isEmailLikeAccountName, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, publicAccountName, isEmailLikeAccountName, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, exportedConfig, modelConfigSavePayload, coreConfigMatches, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

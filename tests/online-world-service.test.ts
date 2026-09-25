@@ -11,7 +11,7 @@ const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto
 const { assembleCommentRecords, encodeCommentRecord, extractCommentItems, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral, applyIntent, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
 const { packProgram } = require("../electron/online-world-runtime.cjs");
-const { createBundledGridCard, rebindGameCard } = require("../electron/online-world-card.cjs");
+const { createBundledGridCard, rebindGameCard, configurationDigest, cardDigest } = require("../electron/online-world-card.cjs");
 const { normalizeBalance } = require("../electron/grid-balance.cjs");
 const { dailyRedTreasureBatch } = require("../electron/grid-world-game.cjs");
 
@@ -148,10 +148,40 @@ describe("online world platform service", () => {
     expect(deletedSources.length).toBeGreaterThan(0);
     expect(deletedSources.every((source: any) => old.sources.some((s: any) => s.id === source.id)
       || ban.sources.some((s: any) => s.id === source.id))).toBe(true);
-    expect(deletedSources.map((source: any) => source.id)).not.toContain(old.root.id);
+    expect(deletedSources.map((source: any) => source.id)).toContain(old.root.id);
+    expect(fixture.author.commentOperations.deleteMany.mock.calls.every((call: any) => call[0].deleteRoots === true)).toBe(true);
     expect(deletedSources.some((source: any) => uncovered.sources.some((s: any) => s.id === source.id))).toBe(false);
     fixture.author.readAllCommentSources = vi.fn(async () => old.sources);
     await expect(fixture.author.deleteSupersededBalanceDirectives(latest.record, snapshot.record)).rejects.toThrow("旧指令已保留");
+  });
+
+  it("splits oversized comment cleanup by complete branches and deletes the root last", async () => {
+    const deleteMany = vi.fn(async ({ sources, deleteRoots }: any) => ({
+      commentIds: sources.map((source: any) => source.id),
+      deletedCommentIds: sources.map((source: any) => source.id),
+      alreadyMissingCommentIds: [],
+      preservedRootCommentIds: [],
+      fullyDeleted: true,
+      deleteRoots
+    }));
+    const instance = service({
+      getAccount: () => ({ accountId: "player" }),
+      commentOperations: { publish: vi.fn(), deleteMany }
+    });
+    const root = { id: "root", account_id: "player" };
+    const replies = Array.from({ length: 1002 }, (_, index) => ({
+      id: `reply-${index}`, account_id: "player", parent_id: root.id
+    }));
+    const result = await instance.deleteCommentSources({
+      workId: "work",
+      sources: [root, ...replies],
+      knownOwnedCommentIds: [root, ...replies].map(source => source.id),
+      deleteRoots: true
+    });
+    expect(deleteMany).toHaveBeenCalledTimes(3);
+    expect(deleteMany.mock.calls.map((call: any) => call[0].deleteRoots)).toEqual([false, false, true]);
+    expect(deleteMany.mock.calls.at(-1)?.[0].sources).toEqual([root]);
+    expect(result.deletedCommentIds).toHaveLength(1003);
   });
 
   it("accepts one signed additive daily red batch and persists its date through snapshots", async () => {
@@ -648,6 +678,59 @@ describe("online world platform service", () => {
     await expect(instance.exportGameCard(selectedCard)).rejects.toThrow(/只有伴生作品作者/);
   });
 
+  it("uploads the local game-card configuration and world books after rechecking the platform author", async () => {
+    const card = createBundledGridCard();
+    const endpoints: string[] = [];
+    let saved: any = null;
+    const instance = service({
+      getAccount: () => ({ accountId: card.companion.authorAccountId }),
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        endpoints.push(`${options.method || "GET"} ${endpoint}`);
+        if (endpoint.startsWith("/installed-apps/")) {
+          return { id: card.companion.workId, created_by_account_id: card.companion.authorAccountId };
+        }
+        if (endpoint.endsWith("/model-config") && options.method === "POST") {
+          saved = options.body;
+          return { ok: true };
+        }
+        if (endpoint.endsWith("/model-config/export")) return { data: saved };
+        throw new Error(`unexpected ${endpoint}`);
+      }
+    });
+    const updated = await instance.updateGameCardCloud(card);
+    expect(saved).toMatchObject({
+      pre_prompt: card.companion.configuration.pre_prompt,
+      pre_text: card.companion.configuration.pre_text,
+      post_text: card.companion.configuration.post_text,
+      app: {
+        name: card.companion.configuration.app.name,
+        description: card.companion.configuration.app.description
+      }
+    });
+    expect(saved.world_book).toEqual(card.companion.configuration.world_book);
+    expect(updated.companion.configuration.world_book).toEqual(card.companion.configuration.world_book);
+    expect(updated.program.digest).toBe(card.program.digest);
+    expect(endpoints).toEqual([
+      `GET /installed-apps/${card.companion.workId}`,
+      `POST /apps/${card.companion.workId}/model-config`,
+      `GET /apps/${card.companion.workId}/model-config/export`
+    ]);
+  });
+
+  it("rejects a cloud configuration update when the platform author does not match the card", async () => {
+    const card = createBundledGridCard();
+    let writes = 0;
+    const instance = service({
+      getAccount: () => ({ accountId: card.companion.authorAccountId }),
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        if (options.method === "POST") writes += 1;
+        return { id: card.companion.workId, created_by_account_id: "different-author" };
+      }
+    });
+    await expect(instance.updateGameCardCloud(card)).rejects.toThrow(/只有伴生作品作者/);
+    expect(writes).toBe(0);
+  });
+
   it("repairs legacy snapshots that omitted the season authority binding for guests", () => {
     const legacy = createWorld({ authorityAccountId: "author" });
     delete legacy.authorityAccountId;
@@ -1088,6 +1171,48 @@ describe("online world platform service", () => {
     expect(instance.state().worldChat).toEqual([]);
     expect(instance.applyWorldChatRecord(message(82))).toBe(false);
     expect(instance.applyWorldChatRecord(message(83, { playerEpoch: 1 }))).toBe(true);
+  });
+
+  it("isolates cached world chat when migration reuses the season id on a new work", () => {
+    const identity = generateOnlineWorldIdentity();
+    const instance = service({ getAccount: () => ({ accountId: "player" }) });
+    instance.work = { id: "source-work", authorAccountId: "author" };
+    instance.control = { seasonId: "shared-season", authorityAccountId: "author", startedAt: 1_000 };
+    instance.world = createWorld({ seasonId: "shared-season", authorityAccountId: "author", startedAt: 1_000 });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    const record = signRecord({
+      schema: "fyow.world-chat/1", messageId: "source-chat", gameId: "cc.aiero.fyow.grid-conquest",
+      workId: "source-work", seasonId: "shared-season", serverStartedAt: 1_000,
+      accountId: "player", displayName: "晴岚", text: "旧服消息", playerEpoch: 0,
+      deviceSigningPublicKey: identity.signingPublicKey
+    }, identity.signingPrivateKey);
+    expect(instance.applyWorldChatRecord({ record, sources: [{ id: "source-comment", account_id: "player", created_at: 2 }] })).toBe(true);
+    expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["旧服消息"]);
+
+    instance.work = { id: "target-work", authorAccountId: "author" };
+    instance.control = { seasonId: "shared-season", authorityAccountId: "author", startedAt: 3_000 };
+    instance.world = createWorld({ seasonId: "shared-season", authorityAccountId: "author", startedAt: 3_000 });
+    instance.world.players.player = { accountId: "player", displayName: "晴岚" };
+    expect(instance.state().worldChat).toEqual([]);
+    const staleEpochRecord = signRecord({
+      ...record,
+      messageId: "stale-epoch-chat",
+      workId: "target-work"
+    }, identity.signingPrivateKey);
+    expect(instance.applyWorldChatRecord({
+      record: staleEpochRecord,
+      sources: [{ id: "stale-epoch-comment", account_id: "player", created_at: 4 }]
+    })).toBe(false);
+
+    instance.restoreWorldChatCache({
+      worldChat: [
+        { messageId: "legacy-source", accountId: "player", displayName: "晴岚", text: "旧版误带入", createdAt: 2_000, seasonId: "shared-season" },
+        { messageId: "legacy-target", accountId: "player", displayName: "晴岚", text: "目标服消息", createdAt: 4_000, seasonId: "shared-season" }
+      ],
+      worldChatCursor: { initialized: true, seasonId: "shared-season", order: { timestamp: 2_000, commentId: "old" } }
+    });
+    expect(instance.state().worldChat.map((item: any) => item.text)).toEqual(["目标服消息"]);
+    expect(instance.worldChatCursor).toBeNull();
   });
 
   it("deduplicates chat per author and retains the earliest platform root when a retry arrives first", () => {
@@ -2151,6 +2276,29 @@ describe("online world platform service", () => {
     }
   });
 
+  it("loads a live companion program using each card's own game id", () => {
+    const original = createBundledGridCard();
+    const gameId = "community.example.other-game";
+    const localProgram = packProgram({ gameId, title: "其他游戏", html: "<!doctype html><html><body>local</body></html>" });
+    const card: any = JSON.parse(JSON.stringify(original));
+    card.cardId = "community.example.other-game.official";
+    card.gameId = gameId;
+    card.title = "其他游戏";
+    card.companion.configuration.app.description = localProgram.envelope;
+    card.program = { format: "fyow.program/1", apiVersion: 1, digest: localProgram.digest };
+    card.companion.configurationSha256 = configurationDigest(card.companion.configuration);
+    card.packageSha256 = cardDigest(card);
+    const latest = packProgram({ gameId, title: "其他游戏新版", html: "<!doctype html><html><body>latest</body></html>" });
+    const instance = service({});
+    const loaded = instance.loadWorkProgram(card, latest.envelope);
+    expect(loaded).toMatchObject({
+      source: "work-description",
+      digest: latest.digest,
+      manifest: { title: "其他游戏新版", gameId }
+    });
+    expect(instance.card.program.digest).toBe(latest.digest);
+  });
+
   it("keeps the signed card program when the current companion page has no valid program", async () => {
     const card = createBundledGridCard();
     const instance = service({
@@ -2652,6 +2800,43 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.carriedGeneralIds).toEqual(["g1"]);
     expect(instance.world.cells["1,1"].generalIds).toEqual([]);
     expect(instance.localEvents).toHaveLength(0);
+    expect(instance.cloudUploadQueue).toHaveLength(0);
+  });
+
+  it("does not let a deletion safety rejection block the next durable cloud write", async () => {
+    const deletionError = Object.assign(new Error("评论上下文已变化，保留原数据"), {
+      code: "PLATFORM_DELETE_CONTEXT_CHANGED"
+    });
+    const deleteMany = vi.fn(async () => { throw deletionError; });
+    const sent: string[] = [];
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "玩家" }),
+      commentOperations: { publish: vi.fn(), deleteMany },
+      requestConsole: async (_endpoint: string, options: any = {}) => {
+        sent.push(String(options.body?.content || ""));
+        return { id: `chat-${sent.length}` };
+      }
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    instance.control = { seasonId: "season", authorityAccountId: "author" };
+    instance.world = createWorld({ authorityAccountId: "author", seasonId: "season" });
+
+    const deletion = instance.enqueueCloudUpload({
+      kind: "delete", key: "delete:changed", workId: "work",
+      sources: [{ id: "obsolete", account_id: "player", parent_id: "root" }],
+      knownOwnedCommentIds: ["obsolete"]
+    });
+    const message = instance.enqueueCloudUpload({
+      kind: "chat-messages", key: "chat:after-delete", chatId: "chat", contents: ["still-sent"]
+    });
+    await expect(deletion).rejects.toBe(deletionError);
+    await expect(message).resolves.toMatchObject({ sent: true });
+    expect(sent).toEqual(["still-sent"]);
+    expect(instance.cloudUploadQueue).toHaveLength(0);
+    expect(instance.cloudUploadDeferred).toEqual([expect.objectContaining({
+      key: "delete:changed",
+      lastError: expect.objectContaining({ code: "PLATFORM_DELETE_CONTEXT_CHANGED" })
+    })]);
   });
 
   it.each([
@@ -2671,6 +2856,7 @@ describe("online world platform service", () => {
     world.generals.g1.location = initialStatus === "deployed" ? { x: 1, y: 1 } : null;
     let throttled = true;
     let posted = 0;
+    let now = 2_000_000;
     const instance = service({
       getAccount: () => ({ accountId: "player", username: "玩家" }),
       getIdentity: async () => identity,
@@ -2681,7 +2867,7 @@ describe("online world platform service", () => {
         posted += 1;
         return { id: `published-${posted}`, account_id: "player", created_at: 2_000_000 + posted, ...options.body };
       },
-      now: () => 2_000_000
+      now: () => now
     });
     instance.work = { id: "work", authorAccountId: "authority" };
     instance.control = { seasonId: "season", authorityAccountId: "authority" };
@@ -2697,6 +2883,15 @@ describe("online world platform service", () => {
     const mapDeltaId = instance.pendingIntentTransaction.mapDeltaId;
 
     throttled = false;
+    await expect(instance.retryPendingIntentTransactionPublish()).rejects.toMatchObject({
+      code: "FYOW_PUBLICATION_COOLDOWN", status: 429
+    });
+    expect(posted).toBe(0);
+    now = Math.max(
+      now + 30_001,
+      Number(instance.pendingIntentTransaction.lastPublishError?.retryAt || 0) + 1,
+      Number(instance.cloudUploadQueue[0]?.nextAttemptAt || 0) + 1
+    );
     await instance.retryPendingIntentTransactionPublish();
     expect(instance.pendingIntentTransaction).toMatchObject({ transactionId, mapDeltaId, phase: "published" });
     expect(posted).toBeGreaterThan(0);
@@ -2956,12 +3151,14 @@ describe("online world platform service", () => {
   });
 
   it("persists precise legacy archive retirement before deletion and resumes a partial failure", async () => {
+    let now = 2_000_000;
     const deleteMany = vi.fn().mockRejectedValueOnce(new Error("temporary delete failure")).mockResolvedValueOnce({
       deletedCommentIds: ["legacy-reply"], alreadyMissingCommentIds: [], preservedRootCommentIds: ["legacy-root"]
     });
     const instance = service({
       getAccount: () => ({ accountId: "player", username: "player@example" }),
-      commentOperations: { publish: vi.fn(), delete: vi.fn(), deleteMany }
+      commentOperations: { publish: vi.fn(), delete: vi.fn(), deleteMany },
+      now: () => now
     });
     instance.work = { id: "work", authorAccountId: "author" };
     instance.control = { seasonId: "season", authorityAccountId: "author" };
@@ -2983,6 +3180,7 @@ describe("online world platform service", () => {
     expect(instance.pendingCommentRetirements[0].sources.map((source: any) => source.id)).toEqual(["legacy-reply", "legacy-root"]);
 
     instance.verifyPublishedRecall = vi.fn(async () => ({ verified: true, archive: { protectedRoots: 0, sources: [] } }));
+    now = Number(instance.cloudUploadQueue[0]?.nextAttemptAt || now) + 1;
     expect(await instance.retryPendingCommentRetirements()).toBe(1);
     expect(instance.pendingCommentRetirements).toHaveLength(0);
     expect(deleteMany).toHaveBeenCalledTimes(2);
@@ -3070,6 +3268,27 @@ describe("online world platform service", () => {
     });
     expect(instance.readCommentBranches).toHaveBeenNthCalledWith(1, root.id, expect.any(Number), expect.objectContaining({ strict: true, fresh: true }));
     expect(instance.readCommentBranches).toHaveBeenNthCalledWith(2, root.id, expect.any(Number), expect.objectContaining({ strict: true, fresh: true }));
+  });
+
+  it("does not delete a root whose stable branch contains an unowned source", async () => {
+    const requestConsole = vi.fn(async () => ({}));
+    const instance = service({
+      getAccount: () => ({ accountId: "player", username: "player@example" }),
+      requestConsole
+    });
+    instance.work = { id: "work", authorAccountId: "author" };
+    const root = { id: "legacy-root", account_id: "player", content: "archive" };
+    const expected = { id: "legacy-reply", account_id: "player", parent_id: root.id, content: "expected" };
+    const foreign = { id: "foreign-reply", account_id: "other", parent_id: root.id, content: "keep" };
+    instance.readAllCommentSources = vi.fn(async () => [root, expected, foreign]);
+    instance.readCommentBranches = vi.fn(async () => [expected, foreign]);
+    await expect(instance.commentOperations.deleteMany({
+      workId: "work",
+      sources: [root, expected],
+      knownOwnedCommentIds: [root.id, expected.id],
+      deleteRoots: true
+    })).rejects.toMatchObject({ code: "PLATFORM_DELETE_BRANCH_CHANGED" });
+    expect(requestConsole).not.toHaveBeenCalled();
   });
 
   it("retires a recalled general archive only after the local action is committed", async () => {
@@ -3379,7 +3598,7 @@ describe("online world platform service", () => {
     expect(instance.world.jobs.march).toBeUndefined();
     expect(instance.pendingIntentTransaction.transactionId).toBe(transactionId);
     online = true;
-    now += 2_000;
+    now = Math.max(now + 2_000, Number(instance.cloudUploadQueue[0]?.nextAttemptAt || 0) + 1);
     instance.readAllCommentSources = vi.fn(async () => []);
     await instance.retryPendingIntentTransactionPublish();
     expect(instance.pendingIntentTransaction.phase).toBe("published");
@@ -3609,7 +3828,7 @@ describe("online world platform service", () => {
     expect(roots).toHaveLength(1);
     expect(instance.world.generals.g1.status).toBe("deployed");
 
-    now += 2_000;
+    now = Math.max(now + 2_000, Number(instance.cloudUploadQueue[0]?.nextAttemptAt || 0) + 1);
     const fullRead = vi.fn(async () => extractCommentItems({ data: roots }));
     instance.readAllCommentSources = fullRead;
     await instance.retryPendingIntentTransactionPublish();
@@ -3639,6 +3858,8 @@ describe("online world platform service", () => {
     expect(writer.pendingIntentTransaction.publication.sources).toHaveLength(1);
     if (mode === "legacy") delete writer.pendingIntentTransaction.publication;
     fail = false;
+    const retryAt = Number(writer.cloudUploadQueue[0]?.nextAttemptAt || 0);
+    writer.now = () => retryAt + 1;
     await writer.retryPendingIntentTransactionPublish(mode === "legacy" ? { comments: extractCommentItems({ data: posted }) } : {});
     expect(posted.filter(item => !item.parent_id)).toHaveLength(1);
     expect(posted.slice(1).every(item => item.parent_id === "saved-0")).toBe(true);
@@ -3834,7 +4055,17 @@ describe("online world platform service", () => {
     world.players.legacy = { accountId: "legacy", displayName: "旧玩家", gold: 999, fieldArmySoldiers: 88 };
     world.playerEpochs.legacy = 0;
     world.cells["1,1"] = { ownerAccountId: "legacy", soldiers: 50, generalIds: [] };
-    const exportData = { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: [] };
+    const worldBook = [{
+      group: "系统任务",
+      match_type: 2,
+      key: "_or_[[TASK:test:v1]]",
+      key_region: 2,
+      value_type: 0,
+      value: "返回结构化结果",
+      probability: 100,
+      enable: true
+    }];
+    const exportData = { name: "艳猎征途", desc: "program", prpt: "world", pretxt: "prefix", posttxt: "post", world_book: worldBook };
     const comments: Array<{ endpoint: string; content: string }> = [];
     let oldSavedName = "";
     let createBody: any = null;
@@ -3866,7 +4097,7 @@ describe("online world platform service", () => {
       pre_prompt: "world",
       pre_text: "prefix",
       post_text: "post",
-      world_book: [],
+      world_book: worldBook,
       app: { name: "猎艳疆土[new]", gender: 1, mod_permission: 4, is_available_not_public: true }
     });
     expect(targetConfigBody).not.toHaveProperty("prpt");

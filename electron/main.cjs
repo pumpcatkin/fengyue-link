@@ -49,7 +49,10 @@ const {
 const { OfficialUpdateService } = require("./update-service.cjs");
 const { configuredAuthorUrl, publicAuthorInfo } = require("./author-info.cjs");
 const { orderLoginCandidates, loginError, assertLoginActive, waitForLoginTask, pauseLogin, platformLoginError, runLoginFailover } = require("./login-failover.cjs");
-const { requestPlatformJson, platformRequestError, platformRateLimitScope, RATE_LIMIT_MESSAGE, PlatformRequestQueue } = require("./platform-transport.cjs");
+const {
+  requestPlatformJson, platformRequestError, platformRateLimitScope,
+  isRateLimitMessage, retryAfterMs, RATE_LIMIT_MESSAGE, PlatformRequestQueue
+} = require("./platform-transport.cjs");
 const {
   OFFICIAL_DOMAIN_DIRECTORY_URLS,
   FALLBACK_PLATFORM_ORIGINS,
@@ -66,6 +69,7 @@ const {
   saveGameCardLibrary,
   readGameCardFile,
   scanGameCardDirectory,
+  mergeBundledGameCardDirectory,
   removeGameCardDirectoryFiles,
   rebindGameCard
 } = require("./online-world-card.cjs");
@@ -242,6 +246,10 @@ function onlineWorldCardLibraryPath(profileId) {
 
 function onlineWorldCardInstallDirectory() {
   return path.join(app.getPath("userData"), "游戏卡");
+}
+
+function bundledGameCardDirectory(packaged = app.isPackaged, resourcesPath = process.resourcesPath, projectRoot = PROJECT_ROOT) {
+  return packaged ? path.join(resourcesPath, "game-library") : path.join(projectRoot, "game-cards");
 }
 
 function loadOrCreateOnlineWorldIdentity(profileId, accountId) {
@@ -679,6 +687,14 @@ class AccountBackend {
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
     this.onlineWorldCardInstallDirectory = onlineWorldCardInstallDirectory();
+    try {
+      this.bundledGameCardMerge = mergeBundledGameCardDirectory(
+        bundledGameCardDirectory(),
+        this.onlineWorldCardInstallDirectory
+      );
+    } catch (error) {
+      this.bundledGameCardMerge = { errors: [{ scope: "merge", message: error?.message || String(error) }] };
+    }
     const installedCards = scanGameCardDirectory(this.onlineWorldCardInstallDirectory);
     this.onlineWorldCardSources = installedCards.sources;
     this.onlineWorldCardScanErrors = installedCards.errors;
@@ -3994,6 +4010,18 @@ class AccountBackend {
     return { canceled: false, filePath: selected.filePath, card: summarizeGameCard(card) };
   }
 
+  async updateOnlineWorldCardCloud(libraryId) {
+    if (!libraryId) throw new Error("请从作者标识中选择要更新的游戏卡");
+    const current = this.onlineWorldCard(libraryId);
+    const card = await this.onlineWorldService.updateGameCardCloud(current);
+    this.persistRefreshedOnlineWorldCard(current, card);
+    if (this.onlineWorldService?.card
+      && gameCardLibraryKey(this.onlineWorldService.card) === gameCardLibraryKey(current)) {
+      this.onlineWorldService.card = card;
+    }
+    return { updated: summarizeGameCard(card), ...await this.listOnlineWorldCards() };
+  }
+
   async followOnlineWorldMigration(options = {}) {
     const current = this.onlineWorldService?.card;
     const migration = this.onlineWorldService?.pendingMigration;
@@ -4256,13 +4284,29 @@ class AccountBackend {
       });
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}));
-        const error = new Error(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+        const message = String(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+        const rateLimited = response.status === 429 || isRateLimitMessage(`${message} ${failure?.code || ""}`);
+        const error = rateLimited
+          ? platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
+            status: 429,
+            httpStatus: response.status,
+            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
+          })
+          : new Error(message);
         if ([401, 402, 403].includes(response.status)) error.retryable = false;
         throw error;
       }
       if (/json/i.test(String(response.headers.get("content-type") || ""))) {
         const failure = await response.json().catch(() => ({}));
-        throw new Error(failure?.message || failure?.msg || "模型接口返回了业务错误");
+        const message = String(failure?.message || failure?.msg || "模型接口返回了业务错误");
+        if (isRateLimitMessage(`${message} ${failure?.code || ""}`)) {
+          throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
+            status: 429,
+            httpStatus: response.status,
+            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
+          });
+        }
+        throw new Error(message);
       }
       const result = await consumeModelEventStream(response.body);
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
@@ -9893,6 +9937,7 @@ handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard()
 handleLocalIpc("online-world:import-card-files", (_event, files) => backend.importOnlineWorldCardFiles(files));
 handleLocalIpc("online-world:remove-card", (_event, libraryId) => backend.removeOnlineWorldCard(libraryId));
 handleLocalIpc("online-world:export-card", (_event, cardId) => backend.exportOnlineWorldCard(cardId));
+handleLocalIpc("online-world:update-cloud-card", (_event, libraryId) => backend.updateOnlineWorldCardCloud(libraryId));
 handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorldCard(options || {}));
 handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));
 handleLocalIpc("online-world:close", () => backend.onlineWorldService.pause());

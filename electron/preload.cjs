@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   },
   removeOnlineWorldCard: libraryId => ipcRenderer.invoke("online-world:remove-card", libraryId),
   exportOnlineWorldCard: cardId => ipcRenderer.invoke("online-world:export-card", cardId),
+  updateOnlineWorldCardCloud: libraryId => ipcRenderer.invoke("online-world:update-cloud-card", libraryId),
   openOnlineWorld: options => ipcRenderer.invoke("online-world:open", options),
   followOnlineWorldMigration: options => ipcRenderer.invoke("online-world:follow-migration", options),
   closeOnlineWorld: () => ipcRenderer.invoke("online-world:close"),

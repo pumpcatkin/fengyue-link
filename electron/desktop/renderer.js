@@ -843,6 +843,19 @@ function renderOnlineWorldCards(library={}){
         }).catch(()=>{});
       });
       menu.append(removeButton);firstAction||=removeButton;
+      if(card.isCurrentUserAuthor){
+        const updateCloudButton=document.createElement("button");updateCloudButton.type="button";updateCloudButton.textContent="更新云端储存";updateCloudButton.setAttribute("role","menuitem");
+        updateCloudButton.addEventListener("click",async()=>{
+          closeCardAuthorMenus();
+          if(!await confirmAction("这会将本地目前的json上传至风月，所有玩家的版本都会更新，是否进行？",{title:"更新云端储存",acceptText:"上传并更新"})){badge.focus();return}
+          invoke(async()=>{
+            updateCloudButton.disabled=true;
+            try{const result=await api.updateOnlineWorldCardCloud(libraryId);renderOnlineWorldCards(result);toast(`《${card.title}》的云端储存已更新`)}
+            finally{updateCloudButton.disabled=false}
+          }).catch(()=>{});
+        });
+        menu.append(updateCloudButton);
+      }
       badge.addEventListener("click",()=>{
         const open=menu.classList.contains("hidden");closeCardAuthorMenus(open?menu:null);
         menu.classList.toggle("hidden",!open);badge.setAttribute("aria-expanded",String(open));if(open)firstAction.focus();

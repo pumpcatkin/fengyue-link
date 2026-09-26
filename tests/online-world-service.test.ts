@@ -477,6 +477,28 @@ describe("online world platform service", () => {
     expect(instance.world.players.player.gold).toBe(777);
   });
 
+  it("relocates a player after loading a cloud snapshot with a captured login position", async () => {
+    const { author, create, snapshot } = coverageHarness();
+    author.world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 777, basePower: 100, power: 100,
+      trainingLevel: 0, position: { x: 10, y: 10 },
+      retreatPath: [{ x: 10, y: 10 }, { x: 9, y: 10 }],
+      fieldArmySoldiers: 0, carriedGeneralIds: []
+    };
+    author.world.cells["10,10"] = { ownerAccountId: "author", soldiers: 1, generalIds: [] };
+    author.world.cells["9,10"] = { ownerAccountId: "player", soldiers: 1, generalIds: [] };
+    author.world.cells["20,20"] = { ownerAccountId: "player", soldiers: 1, generalIds: [] };
+    snapshot(author.world, 20);
+    const player = create("player");
+
+    await player.sync(true);
+
+    expect(player.status).toBe("ready");
+    expect(player.world.players.player.position).toEqual({ x: 9, y: 10 });
+    expect(player.world.players.player.retreatPath).toBeUndefined();
+    expect(player.world.players.player.gold).toBe(777);
+  });
+
   it("publishes one atomic recovery record when the current player has lost every territory", async () => {
     const { author: instance, create, base } = coverageHarness();
     instance.world.players.author = {

@@ -65,6 +65,9 @@ const HISTORY_PAGE_SIZE = 50;
 const MAX_HISTORY_PAGES = 10000;
 const POLL_INTERVAL_MS = 5000;
 const POLL_RETRY_MAX_MS = 60 * 1000;
+const POLL_JITTER_MAX_MS = 1200;
+const SYNC_RETRY_BASE_MS = 1000;
+const SYNC_RETRY_MAX_MS = 60 * 1000;
 const DIRECT_RATE_WINDOW_MS = 60 * 1000;
 const DIRECT_SEND_LIMIT = 12;
 const DIRECT_RECEIVE_LIMIT_PER_SENDER = 20;
@@ -304,6 +307,19 @@ function deferablePublicationError(error) {
   if (["PLATFORM_INVALID_JSON", "FYOW_COMMENT_ACK_MISSING", "FYOW_COMMENT_ACK_MISMATCH", "FYOW_PUBLICATION_RECHECK_PENDING", "FYOW_PUBLICATION_COOLDOWN", "FYOW_UPLOAD_PENDING"].includes(code)) return true;
   if (status === 408 || status === 429 || status >= 500) return true;
   return /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断/i
+    .test(String(error?.message || error || ""));
+}
+
+// A failed read must not be treated as a corrupt world. Keep the last
+// verified projection available, but hold mutations until a later read has
+// completed.  HTTP 429 is included here because some platform nodes report
+// comment throttling as a business 400/429 response during a read burst.
+function retryableSyncError(error) {
+  const code = String(error?.code || "").toUpperCase();
+  const status = Number(error?.status || error?.statusCode || error?.httpStatus || 0);
+  if (/^PLATFORM_(?:NETWORK|TIMEOUT|SERVER|RATE_LIMIT)/.test(code)) return true;
+  if (status === 408 || status === 429 || status >= 500) return true;
+  return /Failed to fetch|fetch failed|NetworkError|connection (?:interrupted|reset|closed)|socket hang up|ECONN|ETIMEDOUT|ERR_(?:NETWORK|CONNECTION|HTTP2|QUIC)|平台请求超时|网络连接|连接中断|请求过于频繁/i
     .test(String(error?.message || error || ""));
 }
 
@@ -1197,6 +1213,9 @@ class OnlineWorldService {
     this.pendingModelEffects = [];
     this.pollTimer = null;
     this.pollFailureCount = 0;
+    this.syncFailureCount = 0;
+    this.syncRetryAt = 0;
+    this.syncFailureKey = "";
     this.syncPaused = false;
     this.mapFactsCache = null;
     this.experienceSessionStartedAt = null;
@@ -1373,6 +1392,11 @@ class OnlineWorldService {
       pendingModelEffectCount: this.pendingModelEffects.length,
       publicDeltaCountSinceSnapshot: this.publicDeltaCountSinceSnapshot,
       pendingSync,
+      connection: {
+        retryAt: Math.max(0, Number(this.syncRetryAt || 0)),
+        retryAfterMs: Math.max(0, Number(this.syncRetryAt || 0) - this.now()),
+        failureCount: Math.max(0, Number(this.syncFailureCount || 0))
+      },
       clock: { source: this.lastClockCalibrationAt ? "platform-date" : "host", calibratedAt: this.lastClockCalibrationAt, offsetMs: Math.round(this.now() - this.rawNow()) },
       program: { source: this.program.source, digest: this.program.digest, title: this.program.manifest?.title || "猎艳疆土", apiVersion: this.program.manifest?.apiVersion || 1 }
     };
@@ -2482,6 +2506,8 @@ class OnlineWorldService {
       cloudUploadDeferred: cloneJson(this.cloudUploadDeferred),
       platformRateLimitUntil: Math.max(0, Number(this.platformRateLimitUntil || 0)),
       platformRateLimitAttempts: Math.max(0, Number(this.platformRateLimitAttempts || 0)),
+      syncFailureCount: Math.max(0, Math.trunc(Number(this.syncFailureCount || 0))),
+      syncRetryAt: Math.max(0, Number(this.syncRetryAt || 0)),
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
       marketSettledSales: [...this.marketSettledSales].slice(-1000),
@@ -2527,15 +2553,55 @@ class OnlineWorldService {
     }
   }
 
+  pollJitterMs() {
+    // Use a stable per-account offset so clients do not all hit the first
+    // comment page on the same five-second boundary. Tests and pre-login
+    // states retain a zero offset for deterministic behavior.
+    const accountId = String(this.account().accountId || "");
+    if (!accountId || !this.work?.id) return 0;
+    const digest = crypto.createHash("sha256").update(accountId).digest();
+    return digest.readUInt16BE(0) % (POLL_JITTER_MAX_MS + 1);
+  }
+
+  noteSyncFailure(error) {
+    const now = this.now();
+    const code = String(error?.code || error?.status || error?.message || "sync").slice(0, 160);
+    this.syncFailureCount = Math.max(0, Math.trunc(Number(this.syncFailureCount || 0))) + 1;
+    const backoff = Math.min(SYNC_RETRY_MAX_MS, SYNC_RETRY_BASE_MS * (2 ** Math.min(6, this.syncFailureCount - 1)));
+    const jitter = this.pollJitterMs();
+    this.syncRetryAt = Math.max(Number(this.syncRetryAt || 0), now + backoff + jitter);
+    const changed = this.syncFailureKey !== code;
+    this.syncFailureKey = code;
+    this.diagnostic({
+      event: "sync-retry-scheduled",
+      code,
+      retryAt: this.syncRetryAt,
+      failureCount: this.syncFailureCount,
+      ...(changed ? {} : { repeated: true })
+    });
+    return this.syncRetryAt;
+  }
+
+  clearSyncFailure() {
+    if (!this.syncFailureCount && !this.syncRetryAt && !this.syncFailureKey) return;
+    this.syncFailureCount = 0;
+    this.syncRetryAt = 0;
+    this.syncFailureKey = "";
+  }
+
   startPolling() {
     this.syncPaused = false;
     if (this.pollTimer) clearTimeout(this.pollTimer);
     const schedule = delay => {
       if (this.syncPaused) return;
+      const retryGate = Math.max(0, Number(this.syncRetryAt || 0) - this.now());
+      const jitter = this.pollJitterMs();
       this.pollTimer = setTimeout(async () => {
         if (this.syncPaused) return;
         try {
-          await this.sync(false);
+          // Automatic polling honors the persisted retry gate. Manual actions
+          // and the retry button still call sync directly and may retry now.
+          await this.sync(false, { respectRetryGate: true });
           this.pollFailureCount = 0;
         } catch {
           this.pollFailureCount += 1;
@@ -2547,11 +2613,12 @@ class OnlineWorldService {
             Number(this.cloudUploadQueue[0]?.nextAttemptAt || 0)
           );
           const publicationDelay = Math.max(0, publicationRetryAt - this.now());
+          const syncDelay = Math.max(0, Number(this.syncRetryAt || 0) - this.now());
           schedule(publicationDelay > 0
             ? Math.max(POLL_INTERVAL_MS, Math.min(POLL_RETRY_MAX_MS, publicationDelay + 100))
-            : retryDelay);
+            : Math.max(retryDelay, syncDelay));
         }
-      }, delay);
+      }, Math.max(0, Number(delay || 0), retryGate) + jitter);
     };
     schedule(POLL_INTERVAL_MS);
   }
@@ -2797,6 +2864,9 @@ class OnlineWorldService {
     this.cloudUploadWaiters.clear();
     this.platformRateLimitUntil = Math.max(0, Number(cached?.platformRateLimitUntil || 0));
     this.platformRateLimitAttempts = Math.max(0, Math.trunc(Number(cached?.platformRateLimitAttempts || 0)));
+    this.syncFailureCount = Math.max(0, Math.trunc(Number(cached?.syncFailureCount || 0)));
+    this.syncRetryAt = Math.max(0, Number(cached?.syncRetryAt || 0));
+    this.syncFailureKey = "";
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
     this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
@@ -2860,15 +2930,19 @@ class OnlineWorldService {
     }
     let syncError = workDetailError;
     try {
-      await this.sync(true);
+      await this.sync(true, { force: true });
     } catch (error) {
-      if (error?.code !== "FYOW_PUBLICATION_PENDING" || !this.control || !this.world
-        || this.pendingIntentTransaction?.phase !== "prepared") {
+      const pendingPublication = error?.code === "FYOW_PUBLICATION_PENDING" && this.control && this.world
+        && this.pendingIntentTransaction?.phase === "prepared";
+      const cachedReadFallback = retryableSyncError(error) && verifiedCachedServer && !this.migrationProof
+        && this.control && this.world;
+      if (!pendingPublication && !cachedReadFallback) {
         this.updateLoadProgress({ phase: "error", error: error?.message || String(error) });
         throw error;
       }
-      // Cloud entry verification succeeded. Keep the verified map open so the
-      // durable outbox can retry, without enabling further actions meanwhile.
+      // Cloud entry verification succeeded. Keep the verified cached map open
+      // while the transport recovers; mutations remain blocked by the
+      // degraded/pending-sync status until a fresh cloud read completes.
       syncError = error;
       this.updateLoadProgress({ phase: "complete", active: false, error: null, totalComments: this.loadProgress?.readComments || 0 });
     }
@@ -3830,7 +3904,11 @@ class OnlineWorldService {
   }
 
   async readCommentData(endpoint, context, timeout = 15000) {
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    // A node can close a keep-alive socket while the account session remains
+    // valid. Give that transport a couple of spaced retries before exposing a
+    // degraded world; immediate back-to-back retries were the source of many
+    // false "connection interrupted" states.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const payload = await this.requestConsole(endpoint, { timeout, attempts: 1 });
         const keys = ["data", "items", "list", "rows", "comment", "comments", "results", "records", "result", "payload", "response", "children", "replies", "branches", "child_comments", "sub_comments"];
@@ -3845,9 +3923,11 @@ class OnlineWorldService {
         return payload;
       } catch (error) {
         this.assertSyncActive();
-        if (!isTransientPlatformError(error) || attempt === 2) throw error;
+        if (!isTransientPlatformError(error) || attempt === 3) throw error;
         this.diagnostic({ event: context.rootCommentId ? "comment-branch-read-retry" : "comment-page-read-retry", ...context, attempt, code: error?.code || null, error: error?.message || String(error) });
-        await new Promise(resolve => setTimeout(resolve, 300));
+        const retryAfter = Math.max(0, Number(error?.retryAfterMs || 0));
+        const backoff = Math.min(5000, 300 * (2 ** (attempt - 1)));
+        await new Promise(resolve => setTimeout(resolve, Math.max(backoff, retryAfter)));
         this.assertSyncActive();
       }
     }
@@ -5472,15 +5552,22 @@ class OnlineWorldService {
       this.notify();
       throw error;
     }
-    if (this.cloudUploadQueue[0]) this.cloudUploadQueue[0].nextAttemptAt = 0;
+    // A manual retry may wake a transiently failed queue item, but it must
+    // still respect the account-wide platform cooldown. A short grace keeps
+    // repeated button clicks from producing an immediate burst.
+    if (this.cloudUploadQueue[0] && Number(this.platformRateLimitUntil || 0) <= this.now()) {
+      const nextAttemptAt = Number(this.cloudUploadQueue[0].nextAttemptAt || 0);
+      if (nextAttemptAt > this.now()) this.cloudUploadQueue[0].nextAttemptAt = this.now() + 250;
+    }
     if (this.pendingIntentTransaction && !lastPublishRateLimited) {
       this.pendingIntentTransaction.lastPublishError = null;
     }
     this.saveCache();
     this.pollFailureCount = 0;
+    this.syncRetryAt = 0;
     this.diagnostic({ event: "connection-retry-started", fullScan: Boolean(fullScan) });
     try {
-      const state = await this.sync(Boolean(fullScan));
+      const state = await this.sync(Boolean(fullScan), { force: true });
       this.startPolling();
       this.diagnostic({ event: "connection-retry-completed", status: state?.status || this.status });
       return state;
@@ -5490,13 +5577,15 @@ class OnlineWorldService {
     }
   }
 
-  async sync(fullScan = false) {
+  async sync(fullScan = false, { force = false, respectRetryGate = false } = {}) {
     if (this.syncPaused || !this.work || this.intentInFlight || this.migrationActive) return this.state();
+    if (respectRetryGate && !force && Number(this.syncRetryAt || 0) > this.now()) return this.state();
     if (this.syncInFlight) return this.syncInFlight;
     const running = this.syncNow(fullScan);
     this.syncInFlight = running;
     try {
       await running;
+      this.clearSyncFailure();
       const recoveringDailySpawn = this.cloudUploadQueue.some(item => item.record?.type === "daily-red-spawn");
       // Drain durable platform writes only after the cloud read has completed;
       // this preserves FIFO ordering while still allowing startup recovery.
@@ -5848,6 +5937,8 @@ class OnlineWorldService {
       }
       this.error = error?.message || String(error);
       this.updateLoadProgress({ phase: "error", error: this.error });
+      if (retryableSyncError(error)) this.noteSyncFailure(error);
+      else this.clearSyncFailure();
       this.status = this.world ? "degraded" : "error";
       this.diagnostic({ event: "sync-failed", fullScan: Boolean(fullScan), status: this.status, error: this.error, history: { ...this.history } });
       this.notify();

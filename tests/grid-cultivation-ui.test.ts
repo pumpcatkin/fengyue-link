@@ -109,4 +109,13 @@ describe("cultivation controls", () => {
     expect(context.host).not.toHaveBeenCalled();
     expect(context.showToast).toHaveBeenCalledWith("平台正在冷却，30 秒后将自动重试");
   });
+
+  it("renders a transport cooldown even when no action is waiting to publish", () => {
+    const { context, labels } = harness();
+    context.payload = { status: "degraded", connection: { retryAt: 31_000 } };
+    context.renderConnectionNotice();
+    expect(labels["#connection-message"].textContent).toContain("连接暂时不稳定");
+    expect(labels["#connection-retry"].textContent).toBe("30秒");
+    expect(labels["#connection-retry"].dataset.retryAt).toBe("31000");
+  });
 });

@@ -631,6 +631,11 @@ class AccountBackend {
         }
       }
     });
+    // Short circuit for a node whose transport is currently failing. This is
+    // deliberately separate from comment-write rate limits: reads should keep
+    // working when a write is throttled, while a broken socket should not be
+    // hit by every background task at once.
+    this.platformTransientFailures = new Map();
     this.proxyState = { mode: "system", route: null, error: null };
     this.networkReady = configureSystemProxy(this.platformSession, this.partition)
       .then(result => {
@@ -3719,12 +3724,62 @@ class AccountBackend {
     return { appId, suffix };
   }
 
+  platformTransportKey(origin, revision = this.authSessionRevision) {
+    return `${Number(revision || 0)}:${String(origin || "")}`;
+  }
+
+  platformTransportRetryAt(origin, revision = this.authSessionRevision) {
+    const key = this.platformTransportKey(origin, revision);
+    const item = this.platformTransientFailures?.get(key);
+    const retryAt = Number(item?.retryAt || 0);
+    if (!retryAt || retryAt <= Date.now()) {
+      if (item) this.platformTransientFailures.delete(key);
+      return 0;
+    }
+    return retryAt;
+  }
+
+  notePlatformTransportFailure(origin, error, revision = this.authSessionRevision) {
+    const key = this.platformTransportKey(origin, revision);
+    const previous = this.platformTransientFailures?.get(key) || {};
+    const failures = Math.max(1, Number(previous.failures || 0) + 1);
+    const delay = Math.min(30_000, 1_500 * (2 ** Math.min(4, failures - 1)));
+    const retryAt = Date.now() + delay;
+    this.platformTransientFailures ||= new Map();
+    // Session-scoped keys prevent an old account's outage from delaying a
+    // newly authenticated account. Keep the map bounded during long-running
+    // desktop sessions where many login revisions may be created.
+    if (this.platformTransientFailures.size >= 32) {
+      for (const [entryKey, entry] of this.platformTransientFailures) {
+        if (Number(entry?.retryAt || 0) <= Date.now()) this.platformTransientFailures.delete(entryKey);
+      }
+      while (this.platformTransientFailures.size >= 32) {
+        const oldest = this.platformTransientFailures.keys().next().value;
+        if (oldest == null) break;
+        this.platformTransientFailures.delete(oldest);
+      }
+    }
+    this.platformTransientFailures.set(key, { failures, retryAt });
+    return retryAt;
+  }
+
+  clearPlatformTransportFailure(origin, revision = this.authSessionRevision) {
+    if (origin) this.platformTransientFailures?.delete(this.platformTransportKey(origin, revision));
+  }
+
   async platformRequest(pathname, options = {}) {
     await this.networkReady;
     this.platformRequestQueue ||= new PlatformRequestQueue({ readConcurrency: 4, writeConcurrency: 1, maxPending: 256 });
     const origin = this.origin;
     const revision = this.authSessionRevision;
     const method = String(options.method || "GET").toUpperCase();
+    const transportRetryAt = this.platformTransportRetryAt(origin, revision);
+    if (transportRetryAt > Date.now()) {
+      throw platformRequestError("PLATFORM_NETWORK", "平台连接暂时冷却", {
+        retryAfterMs: transportRetryAt - Date.now(),
+        retryAt: transportRetryAt
+      });
+    }
     const queueKey = `${revision}:${origin}:${method}:${String(pathname).split("?")[0]}${method === "GET" ? `?${String(pathname).split("?")[1] || ""}` : `:${crypto.createHash("sha256").update(JSON.stringify(options.body ?? null)).digest("hex").slice(0, 16)}`}`;
     const { queuePriority = method === "GET" ? 0 : 10, signal = null, ...requestOptions } = options;
     return this.platformRequestQueue.enqueue(async () => {
@@ -3754,8 +3809,14 @@ class AccountBackend {
         });
         if (origin !== this.origin || revision !== this.authSessionRevision) throw platformRequestError("PLATFORM_CANCELLED", "账号会话已切换");
         this.lastPlatformSuccessAt = Date.now();
+        this.clearPlatformTransportFailure(origin, revision);
         return result;
       } catch (error) {
+        if (["PLATFORM_NETWORK", "PLATFORM_TIMEOUT", "PLATFORM_SERVER"].includes(String(error?.code || ""))) {
+          const retryAt = this.notePlatformTransportFailure(origin, error, revision);
+          error.retryAt = Math.max(Number(error.retryAt || 0), retryAt);
+          error.retryAfterMs = Math.max(Number(error.retryAfterMs || 0), retryAt - Date.now());
+        }
         if (error?.status === 429) {
           this.platformRateLimits ||= new Map();
           this.platformRateLimits.set(rateLimitScope, Date.now() + (Number(error.retryAfterMs) || 30000));

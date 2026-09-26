@@ -2549,18 +2549,23 @@ function renderConnectionNotice() {
   const button = document.querySelector("#connection-retry");
   const retrying = pendingHostKeys.has("sync");
   const pendingSync = payload?.pendingSync;
-  const retryAfterMs = Math.max(0, Number(pendingSync?.retryAt || 0) - hostTime());
-  const coolingDown = Boolean(pendingSync?.rateLimited && retryAfterMs > 0);
+  const now = hostTime();
+  const pendingRetryAt = Number(pendingSync?.retryAt || 0);
+  const connectionRetryAt = Number(payload?.connection?.retryAt || 0);
+  const retryAfterMs = Math.max(0, Math.max(pendingRetryAt, connectionRetryAt) - now);
+  const coolingDown = retryAfterMs > 0 && (Boolean(pendingSync?.rateLimited) || connectionRetryAt > now);
   notice.classList.toggle("hidden", !["pending-sync", "degraded", "error"].includes(payload?.status) && !retrying);
   message.textContent = pendingSync
-    ? coolingDown
+    ? pendingSync?.rateLimited && retryAfterMs > 0
       ? `请求过于频繁，行动已保存在本机，${Math.ceil(retryAfterMs / 1000)} 秒后自动重试。`
       : "行动已保存在本机，正在自动同步。"
-    : "连接中断，暂时无法操作。恢复后即可继续。";
+    : coolingDown
+      ? `连接暂时不稳定，${Math.ceil(retryAfterMs / 1000)} 秒后自动重试。`
+      : "连接中断，暂时无法操作。恢复后即可继续。";
   button.disabled = retrying;
   button.textContent = retrying ? "重试中" : coolingDown ? `${Math.ceil(retryAfterMs / 1000)}秒` : "重试";
   button.setAttribute("aria-busy", String(retrying));
-  button.dataset.retryAt = coolingDown ? String(pendingSync.retryAt) : "";
+  button.dataset.retryAt = coolingDown ? String(Math.max(pendingRetryAt, connectionRetryAt)) : "";
 }
 function renderAll() {
   renderClock(); renderPlayer(); renderModelUsage(); renderPowerTraining(); renderCell(); renderJobs(); renderGenerals(); renderInbox(); renderWorldChat(); renderConversations(); renderOwnerCommands(); renderMarket(); renderBattleReports(); draw();
@@ -3134,8 +3139,9 @@ document.querySelector("#start-power-training").addEventListener("click", () => 
 document.querySelector("#connection-retry").addEventListener("click", () => {
   if (pendingHostKeys.has("sync")) return;
   const retryAt = Number(payload?.pendingSync?.retryAt || 0);
-  const retryAfterMs = Math.max(0, retryAt - hostTime());
-  if (payload?.pendingSync?.rateLimited && retryAfterMs > 0) {
+  const connectionRetryAt = Number(payload?.connection?.retryAt || 0);
+  const retryAfterMs = Math.max(0, Math.max(retryAt, connectionRetryAt) - hostTime());
+  if ((payload?.pendingSync?.rateLimited || connectionRetryAt > hostTime()) && retryAfterMs > 0) {
     showToast(`平台正在冷却，${Math.ceil(retryAfterMs / 1000)} 秒后将自动重试`);
     playSound("notice");
     return;

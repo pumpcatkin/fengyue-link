@@ -1604,7 +1604,12 @@ function openMarketManage(listing) {
   marketManageListingId = String(listing.listingId || "");
   document.querySelector("#market-sell-sheet")?.classList.add("hidden");
   document.querySelector("#market-manage-title").textContent = listing.general?.name || "名将";
-  document.querySelector("#market-manage-text").textContent = "确认下架后，这名将领会回到你的随行列表；再次上架需要等待 6 小时。";
+  const forced = Boolean(listing.forcedSale);
+  document.querySelector("#market-manage-text").textContent = forced
+    ? "这名将领因失去全部领地被强制寄售，售出前不能下架。"
+    : "确认下架后，这名将领会回到你的随行列表；再次上架需要等待 6 小时。";
+  const confirm = document.querySelector("#market-manage-confirm");
+  if (confirm) { confirm.disabled = forced; confirm.classList.toggle("hidden", forced); }
   document.querySelector("#market-manage-sheet")?.classList.remove("hidden");
 }
 
@@ -1667,10 +1672,10 @@ function renderMarket() {
     if (sellerIntro) { const note = document.createElement("div"); note.className = "market-seller-note"; note.textContent = `卖家介绍：${sellerIntro}`; card.append(note); }
     const history = document.createElement("div"); history.className = "market-history"; history.textContent = `经历：\n${marketHistoryText(general)}`; card.append(history);
     const footer = document.createElement("footer");
-    const status = document.createElement("small"); status.textContent = owned ? "我的在售 · 点击卡片管理" : marketListedText(listing.listedAt);
+    const status = document.createElement("small"); status.textContent = listing.forcedSale ? "战败强制寄售" : owned ? "我的在售 · 点击卡片管理" : marketListedText(listing.listedAt);
     footer.append(status);
-    if (owned) footer.append(makeButton("下架", event => { event?.stopPropagation?.(); openMarketManage(listing); }));
-    else footer.append(makeButton("购买", () => sendIntent({ type: "buy-market-general", listingId: listing.listingId }), "primary"));
+    if (owned && !listing.forcedSale) footer.append(makeButton("下架", event => { event?.stopPropagation?.(); openMarketManage(listing); }));
+    else if (!owned) footer.append(makeButton("购买", () => sendIntent({ type: "buy-market-general", listingId: listing.listingId }), "primary"));
     card.append(footer); target.append(card);
   }
 }

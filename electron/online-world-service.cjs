@@ -34,6 +34,7 @@ const {
   GRID_SIZE,
   staticCell,
   createWorld,
+  closestOwnedTerritory,
   resetPlayerState,
   settleWorld,
   applyIntent,
@@ -2299,24 +2300,29 @@ class OnlineWorldService {
     if (!accountId || !player) return false;
     const ownEvents = (this.localEvents || []).filter(event => String(event?.actorAccountId || event?.intent?.actorAccountId || "") === accountId);
     const joinEvent = [...ownEvents].reverse().find(event => event?.type === "join" && validPosition(event?.result?.capital));
-    const coreStateWasIncomplete = !validPosition(player.position);
+    const positionWasMissing = !validPosition(player.position);
+    const positionNeedsRelocation = positionWasMissing
+      || String(this.world.cells?.[`${player.position.x},${player.position.y}`]?.ownerAccountId || "") !== accountId;
     let changed = false;
-    if (!validPosition(player.position)) {
-      let recovered = null;
-      for (const event of [...ownEvents].reverse()) {
-        const effects = event?.type === "time-settle" && Array.isArray(event?.result?.effects) ? [...event.result.effects].reverse() : [];
-        const movement = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.at) && ["march-arrived", "battle-won"].includes(effect.type));
-        const returned = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.returnedTo));
-        if (movement || returned) { recovered = movement?.at || returned.returnedTo; break; }
+    if (positionNeedsRelocation) {
+      let anchor = validPosition(player.position) ? { x: Number(player.position.x), y: Number(player.position.y) } : null;
+      if (!anchor) {
+        for (const event of [...ownEvents].reverse()) {
+          const effects = event?.type === "time-settle" && Array.isArray(event?.result?.effects) ? [...event.result.effects].reverse() : [];
+          const movement = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.at) && ["march-arrived", "battle-won"].includes(effect.type));
+          const returned = effects.find(effect => String(effect?.accountId || "") === accountId && validPosition(effect?.returnedTo));
+          if (movement || returned) { anchor = movement?.at || returned.returnedTo; break; }
+        }
       }
-      if (!recovered) recovered = joinEvent?.result?.capital || null;
-      if (!recovered) {
-        const ownedKey = Object.entries(this.world.cells || {}).find(([, cell]) => String(cell?.ownerAccountId || "") === accountId)?.[0];
-        if (ownedKey) { const [x, y] = ownedKey.split(",").map(Number); recovered = { x, y }; }
+      if (!anchor) anchor = joinEvent?.result?.capital || null;
+      const recovered = closestOwnedTerritory(this.world, accountId, anchor);
+      if (validPosition(recovered)) {
+        player.position = { x: Number(recovered.x), y: Number(recovered.y) };
+        delete player.retreatPath;
+        changed = true;
       }
-      if (validPosition(recovered)) { player.position = { x: Number(recovered.x), y: Number(recovered.y) }; changed = true; }
     }
-    if (!finiteStoredNumber(player.gold) || coreStateWasIncomplete) {
+    if (!finiteStoredNumber(player.gold) || positionWasMissing) {
       let gold = Number(joinEvent?.result?.gold);
       if (!Number.isFinite(gold)) gold = 0;
       const start = joinEvent ? ownEvents.indexOf(joinEvent) + 1 : 0;
@@ -4399,7 +4405,7 @@ class OnlineWorldService {
     }
     if (!generalTransitions || typeof generalTransitions !== "object" || Array.isArray(generalTransitions) || Object.keys(generalTransitions).length > 100) return false;
     if (!treasureClaims || typeof treasureClaims !== "object" || Array.isArray(treasureClaims) || Object.keys(treasureClaims).length > 24) return false;
-    if (!marketListings || typeof marketListings !== "object" || Array.isArray(marketListings) || Object.keys(marketListings).length > 100) return false;
+    if (!marketListings || typeof marketListings !== "object" || Array.isArray(marketListings) || Object.keys(marketListings).length > 1000) return false;
     if (!marketSales || typeof marketSales !== "object" || Array.isArray(marketSales) || Object.keys(marketSales).length > 100) return false;
     if (!battles || typeof battles !== "object" || Array.isArray(battles) || Object.keys(battles).length > 24) return false;
     if (!conquests || typeof conquests !== "object" || Array.isArray(conquests) || Object.keys(conquests).length > 24) return false;
@@ -4583,6 +4589,8 @@ class OnlineWorldService {
       const price = Number(listing.price);
       if (!Number.isSafeInteger(price) || price < 1 || price > 1000000000) return false;
       if (Object.hasOwn(listing, "sellerIntro") && (typeof listing.sellerIntro !== "string" || listing.sellerIntro.length > 240)) return false;
+      if (Object.hasOwn(listing, "forcedSale") && listing.forcedSale !== true) return false;
+      if (listing.forcedSale && listing.forcedSaleReason !== "territory-defeat") return false;
       const general = listing.general;
       if (!general || typeof general !== "object" || Array.isArray(general) || String(general.id || "") !== String(listing.generalId || "")) return false;
       if (JSON.stringify(listing).length > 80000 || String(general.coreSetting || general.setting || "").length > MAX_GENERAL_CORE_SETTING_LENGTH) return false;
@@ -5505,10 +5513,37 @@ class OnlineWorldService {
           this.diagnostic({ event: "daily-red-spawn-deferred", error: error?.message || String(error) });
         });
       }
+      await this.ensureOwnPlayerAccessAfterSync();
       return this.state();
     } finally {
       if (this.syncInFlight === running) this.syncInFlight = null;
     }
+  }
+
+  async ensureOwnPlayerAccessAfterSync() {
+    if (this.syncPaused || !this.world || !this.control || this.pendingIntentTransaction || this.intentInFlight) return false;
+    const accountId = this.account().accountId;
+    const player = this.world.players?.[accountId];
+    if (!accountId || !player) return false;
+    const owned = closestOwnedTerritory(this.world, accountId, player.position);
+    if (owned) {
+      const currentOwner = validPosition(player.position)
+        ? String(this.world.cells?.[`${player.position.x},${player.position.y}`]?.ownerAccountId || "")
+        : "";
+      if (currentOwner === accountId) return false;
+      player.position = { x: owned.x, y: owned.y };
+      delete player.retreatPath;
+      this.saveCache();
+      this.notify();
+      this.diagnostic({ event: "player-position-relocated", reason: "territory-lost", position: cloneJson(player.position) });
+      return true;
+    }
+    const privatePlayer = this.world.privatePlayers?.[accountId] || {};
+    const recoveryIndex = Math.max(0, Math.trunc(Number(privatePlayer.defeatRecoveryCount || 0))) + 1;
+    const idempotencyKey = `defeat-recovery:${this.control.seasonId}:${accountId}:${recoveryIndex}`;
+    await this.applyLocalIntent({ type: "recover-defeated-player", idempotencyKey }, accountId);
+    this.diagnostic({ event: "defeated-player-recovered", accountId, recoveryIndex });
+    return true;
   }
 
   async syncNow(fullScan = false, { ignoreMigrationReset = false } = {}) {

@@ -612,6 +612,55 @@ describe("grid conquest rules", () => {
     expect(() => game.applyIntent(state, { type: "list-general", generalId: "g2", price: 100, idempotencyKey: "list-two" }, { actorAccountId: "a", now: now + 1 })).toThrow(/同时只能挂卖一名将领/);
   });
 
+  it("recovers a fully defeated player and force-lists every carried general", () => {
+    const now = 2_000_000;
+    let state = joined(now);
+    const formerCapital = { ...state.players.a.position };
+    state.players.a.fieldArmySoldiers = 12;
+    state.cells[`${formerCapital.x},${formerCapital.y}`] = { ownerAccountId: "enemy", soldiers: 1, generalIds: [], occupationCount: 2 };
+    state.generals.g1 = game.createFallbackGeneral({ id: "g1", name: "甲一", gender: "female", power: 200, holderAccountId: "a" });
+    state.generals.g2 = game.createFallbackGeneral({ id: "g2", name: "甲二", gender: "female", power: 350, holderAccountId: "a" });
+    state.players.a.carriedGeneralIds = ["g1", "g2"];
+    state.jobs.march = {
+      id: "march", type: "march", accountId: "a", from: formerCapital, to: { x: 1, y: 1 },
+      soldiers: 9, generalIds: ["g1", "g2"], activeGeneralIds: ["g1", "g2"], path: [], attack: false,
+      startedAt: now, finishAt: now + 60_000
+    };
+
+    const recovered = game.applyIntent(state, { type: "recover-defeated-player", idempotencyKey: "defeat-1" }, { actorAccountId: "a", now: now + 1 });
+    state = recovered.state;
+    const player = state.players.a;
+    const ownCells = Object.entries(state.cells).filter(([, cell]: any) => cell.ownerAccountId === "a");
+    expect(ownCells).toHaveLength(1);
+    expect(player.position).toEqual(recovered.result.capital);
+    expect(state.cells[`${player.position.x},${player.position.y}`].soldiers).toBeGreaterThan(0);
+    expect(player.fieldArmySoldiers).toBe(21);
+    expect(player.carriedGeneralIds).toEqual([]);
+    expect(state.jobs).toEqual({});
+    expect(recovered.result.forcedListings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ generalId: "g1", price: 600 }),
+      expect.objectContaining({ generalId: "g2", price: 1050 })
+    ]));
+    expect(Object.values(state.marketListings)).toHaveLength(2);
+    expect(Object.values(state.marketListings)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ generalId: "g1", price: 600, forcedSale: true, forcedSaleReason: "territory-defeat" }),
+      expect.objectContaining({ generalId: "g2", price: 1050, forcedSale: true, forcedSaleReason: "territory-defeat" })
+    ]));
+    expect(state.generals.g1).toMatchObject({ status: "market", marketListingId: expect.stringMatching(/^defeat-/) });
+    const forcedListingId = (Object.values(state.marketListings) as any[])[0]!.listingId;
+    expect(() => game.applyIntent(state, { type: "cancel-market-listing", listingId: forcedListingId, idempotencyKey: "delist-forced" }, { actorAccountId: "a", now: now + 2 })).toThrow(/强制寄售不能下架/);
+    expect(() => game.applyIntent(state, { type: "recover-defeated-player", idempotencyKey: "defeat-2" }, { actorAccountId: "a", now: now + 3 })).toThrow(/仍有可以返回的领地/);
+  });
+
+  it("finds the nearest owned territory with deterministic tie breaking", () => {
+    const state = game.createWorld({ seed: "nearest-owned", seasonId: "season" });
+    state.cells["9,10"] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    state.cells["10,9"] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    state.cells["20,20"] = { ownerAccountId: "a", soldiers: 0, generalIds: [] };
+    expect(game.closestOwnedTerritory(state, "a", { x: 10, y: 10 })).toEqual({ x: 10, y: 9, distance: 1 });
+    expect(game.closestOwnedTerritory(state, "missing", { x: 10, y: 10 })).toBeNull();
+  });
+
   it("blocks banned accounts and removes reset players into a new epoch", () => {
     const state = joined(1_000_000);
     state.players.b = { accountId: "b", accountName: "b@example", displayName: "乙", gold: 500, position: { x: 2, y: 2 }, fieldArmySoldiers: 3, carriedGeneralIds: [], joinedAt: 1_000_000 };

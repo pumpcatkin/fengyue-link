@@ -398,6 +398,8 @@ describe("grid world map task overlays", () => {
     expect(html).toContain('id="market-sell-open"');
     expect(html).toContain('id="market-sell-form"');
     expect(html).toContain('id="market-sell-general"');
+    expect(source).toContain("战败强制寄售");
+    expect(source).toContain("listing.forcedSale");
     expect(html).toContain('id="market-sell-note"');
     expect(html).toContain('id="market-manage-sheet"');
     expect(css).toMatch(/\.market-listings\s*\{[\s\S]*?columns:/);

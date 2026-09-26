@@ -316,6 +316,20 @@ function chooseCapital(state, accountId) {
   throw new Error("地图已经没有完整的五乘五出生区");
 }
 
+function closestOwnedTerritory(state, accountId, origin = null) {
+  const owner = String(accountId || "");
+  const anchor = origin && Number.isInteger(Number(origin.x)) && Number.isInteger(Number(origin.y))
+    ? { x: Number(origin.x), y: Number(origin.y) }
+    : null;
+  return Object.entries(state?.cells || {})
+    .filter(([, cell]) => String(cell?.ownerAccountId || "") === owner)
+    .map(([key]) => {
+      const [x, y] = key.split(",").map(Number);
+      return { x, y, distance: anchor ? Math.abs(x - anchor.x) + Math.abs(y - anchor.y) : 0 };
+    })
+    .sort((left, right) => left.distance - right.distance || left.y - right.y || left.x - right.x)[0] || null;
+}
+
 function allowedGeneralGender(orientation, seed, ...parts) {
   if (orientation === "men") return "male";
   if (orientation === "women") return "female";
@@ -1456,6 +1470,10 @@ function publicMarketListingState(state, listing) {
   // Keep old market records readable while adding the optional seller note to
   // newly-created listings.
   if (Object.hasOwn(source, "sellerIntro")) result.sellerIntro = String(source.sellerIntro || "").replace(/\s+/g, " ").trim().slice(0, 240);
+  if (source.forcedSale) {
+    result.forcedSale = true;
+    result.forcedSaleReason = "territory-defeat";
+  }
   return result;
 }
 
@@ -2048,7 +2066,60 @@ function applyIntent(inputState, rawIntent, context = {}) {
     result = { capital, gold: balanceValue(state, "startingGold"), power: initialPower, soldiers: cell.soldiers };
   } else {
     const player = ensurePlayer(state, actorAccountId);
-    if (type === "dismiss-battle-report") {
+    if (type === "recover-defeated-player") {
+      if (closestOwnedTerritory(state, actorAccountId, player.position)) throw new Error("玩家仍有可以返回的领地");
+      const capital = chooseCapital(state, actorAccountId);
+      const cell = dynamicCell(state, capital.x, capital.y);
+      occupyCell(cell, actorAccountId);
+      const garrisonCap = cellGarrisonCap(state, capital.x, capital.y, cell);
+      cell.soldiers = Math.floor(garrisonCap * balanceValue(state, "initialGarrisonRatio"));
+      player.position = { ...capital };
+      delete player.retreatPath;
+      for (const [jobId, job] of Object.entries(state.jobs || {})) {
+        if (String(job?.accountId || "") !== actorAccountId) continue;
+        if (job.type === "march") {
+          player.fieldArmySoldiers = Math.max(0, Math.trunc(Number(player.fieldArmySoldiers) || 0))
+            + Math.max(0, Math.trunc(Number(job.soldiers) || 0));
+        } else if (job.type === "general-cultivation") {
+          player.gold += Math.max(0, Number(job.cost || 0));
+          const materials = ensureMaterialInventory(state.privatePlayers[actorAccountId] ||= {});
+          materials[job.materialId] = Number(materials[job.materialId] || 0) + 1;
+        } else if (job.type === "power-training") {
+          player.gold += Math.max(0, Number(job.cost || 0));
+        }
+        delete state.jobs[jobId];
+      }
+      const forcedListings = [];
+      for (const [generalId, general] of Object.entries(state.generals || {})) {
+        if (String(general?.holderAccountId || "") !== actorAccountId || general.status !== "carried") continue;
+        const digest = crypto.createHash("sha256")
+          .update(`${state.seasonId}:${actorAccountId}:${idempotencyKey}:${generalId}`).digest("hex").slice(0, 40);
+        const listingId = `defeat-${digest}`;
+        const price = Math.min(1000000000, Math.max(1, generalPower(general) * 3));
+        general.status = "market";
+        general.location = null;
+        general.marketListingId = listingId;
+        general.marketRelistAvailableAt = 0;
+        state.marketListings[listingId] = {
+          listingId,
+          sellerAccountId: actorAccountId,
+          sellerDisplayName: String(player.displayName || actorAccountId).slice(0, 40),
+          generalId,
+          sourceStatus: "carried",
+          price,
+          listedAt: now,
+          sellerIntro: "失去全部领地后由名将市场代为处置。",
+          forcedSale: true,
+          forcedSaleReason: "territory-defeat",
+          general: publicMarketGeneralState(general)
+        };
+        forcedListings.push({ listingId, generalId, price });
+      }
+      player.carriedGeneralIds = [];
+      const privatePlayer = state.privatePlayers[actorAccountId] ||= {};
+      privatePlayer.defeatRecoveryCount = Math.max(0, Math.trunc(Number(privatePlayer.defeatRecoveryCount || 0))) + 1;
+      result = { capital, soldiers: cell.soldiers, forcedListings, defeatRecoveryCount: privatePlayer.defeatRecoveryCount };
+    } else if (type === "dismiss-battle-report") {
       const reportId = String(intent.reportId || "").trim();
       if (!reportId) throw new Error("缺少战报编号");
       const reports = battleReportsFor(state, actorAccountId);
@@ -2245,6 +2316,7 @@ function applyIntent(inputState, rawIntent, context = {}) {
       const listing = state.marketListings[listingId];
       const general = listing ? state.generals[listing.generalId] : null;
       if (!listing || String(listing.sellerAccountId) !== actorAccountId || !general || String(general.holderAccountId) !== actorAccountId) throw new Error("找不到可撤下的名将市场商品");
+      if (listing.forcedSale) throw new Error("失去全部领地后的强制寄售不能下架");
       delete state.marketListings[listingId];
       general.marketListingId = null;
       general.status = "carried";
@@ -2949,6 +3021,7 @@ module.exports = {
   staticCell,
   createWorld,
   chooseCapital,
+  closestOwnedTerritory,
   resetPlayerState,
   dynamicCell,
   publicGeneralState,

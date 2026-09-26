@@ -460,6 +460,56 @@ describe("online world platform service", () => {
     expect(Object.keys(instance.world.generals)).toHaveLength(4);
   });
 
+  it("relocates a player from a lost position to the nearest owned territory without rebuilding gold", () => {
+    const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }) });
+    instance.world = createWorld({ seed: "relocation", seasonId: "season", authorityAccountId: "authority" });
+    instance.world.players.player = {
+      accountId: "player", displayName: "玩家", gold: 777, basePower: 100, power: 100, trainingLevel: 0,
+      position: { x: 10, y: 10 }, retreatPath: [{ x: 10, y: 10 }, { x: 9, y: 10 }], fieldArmySoldiers: 0, carriedGeneralIds: []
+    };
+    instance.world.cells["10,10"] = { ownerAccountId: "enemy", soldiers: 1, generalIds: [] };
+    instance.world.cells["9,10"] = { ownerAccountId: "player", soldiers: 1, generalIds: [] };
+    instance.world.cells["20,20"] = { ownerAccountId: "player", soldiers: 1, generalIds: [] };
+
+    expect(instance.recoverOwnLocalPlayerState()).toBe(true);
+    expect(instance.world.players.player.position).toEqual({ x: 9, y: 10 });
+    expect(instance.world.players.player.retreatPath).toBeUndefined();
+    expect(instance.world.players.player.gold).toBe(777);
+  });
+
+  it("publishes one atomic recovery record when the current player has lost every territory", async () => {
+    const { author: instance, create, base } = coverageHarness();
+    instance.world.players.author = {
+      accountId: "author", displayName: "服主", accountName: "author", gold: 500, basePower: 100, power: 100,
+      trainingLevel: 0, position: { x: 10, y: 10 }, fieldArmySoldiers: 0, carriedGeneralIds: ["g1", "g2"]
+    };
+    instance.world.privatePlayers.author = { defeatRecoveryCount: 0 };
+    instance.world.cells["10,10"] = { ownerAccountId: "player", soldiers: 1, generalIds: [], occupationCount: 1 };
+    instance.world.generals.g1 = createFallbackGeneral({ id: "g1", name: "甲一", holderAccountId: "author", power: 200 });
+    instance.world.generals.g2 = createFallbackGeneral({ id: "g2", name: "甲二", holderAccountId: "author", power: 300 });
+    const beforeRecovery = structuredClone(instance.world);
+    let published: any = null;
+    const publish = instance.publishMapChanges.bind(instance);
+    instance.publishMapChanges = async (...args: any[]) => { published = await publish(...args); return published; };
+
+    expect(await instance.ensureOwnPlayerAccessAfterSync()).toBe(true);
+    expect(published).toBeTruthy();
+    expect(Object.keys(published.changes.cells)).toHaveLength(1);
+    expect(Object.keys(published.changes.marketListings)).toHaveLength(2);
+    expect(instance.world.players.author.carriedGeneralIds).toEqual([]);
+    expect(Object.values(instance.world.marketListings)).toHaveLength(2);
+    expect(instance.pendingIntentTransaction).toBeNull();
+    const observer = create("player");
+    observer.control = instance.control;
+    observer.world = beforeRecovery;
+    const recoveryItem = { record: published, sources: [{ id: "recovery-comment", account_id: "author", created_at: base + 20_000 }] };
+    expect(observer.validMapDelta(recoveryItem)).toBe(true);
+    expect(observer.applyMapDelta(recoveryItem)).toBe(true);
+    expect(Object.values(observer.world.marketListings)).toHaveLength(2);
+    expect(Object.values(observer.world.cells).filter((cell: any) => cell.ownerAccountId === "author")).toHaveLength(1);
+    expect(await instance.ensureOwnPlayerAccessAfterSync()).toBe(false);
+  });
+
   it("does not delete a recalled private general when an old capture tombstone arrives", () => {
     const { author: instance, map, base } = coverageHarness();
     instance.world.players.author = { accountId: "author", position: { x: 16, y: 0 }, carriedGeneralIds: ["first"] };

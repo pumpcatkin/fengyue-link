@@ -23,11 +23,16 @@ function node(text = "") {
 describe("grid world communication UI", () => {
   it("renders a complete local date and time for world chat timestamps", () => {
     const context: any = {};
-    const functions = source.slice(source.indexOf("function worldChatTime"), source.indexOf("function renderWorldChat"));
+    const functions = source.slice(source.indexOf("function worldChatTimestamp"), source.indexOf("function renderWorldChat"));
     runInNewContext(functions, context);
     const timestamp = new Date(2026, 8, 25, 7, 8, 9).getTime();
     expect(context.worldChatTime({ createdAt: timestamp })).toBe("2026-09-25 07:08:09");
+    expect(context.worldChatTime({ createdAt: Math.floor(timestamp / 1000) })).toBe("2026-09-25 07:08:09");
+    expect(context.worldChatTime({ createdAt: new Date(timestamp).toISOString() })).toBe("2026-09-25 07:08:09");
     expect(context.worldChatTime({ createdAt: 0 })).toBe("刚刚");
+    expect(css).toMatch(/\.chat-message time\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.chat-message time\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
+    expect(source).toContain("time.title = `本地时间：${time.textContent}");
   });
 
   it("provides unread indicators and separate received/sent letter panes", () => {

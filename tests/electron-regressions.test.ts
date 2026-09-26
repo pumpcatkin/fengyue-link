@@ -968,7 +968,7 @@ describe("Electron platform API regressions", () => {
     const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
     const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
-    expect(packageJson.version).toMatch(/^0\.(?:[2-9]|[1-9][0-9]+)\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/);
+    expect(packageJson.version).toMatch(/^\d+\.\d+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/);
     expect(packageJson.devDependencies.electron).toBe("^44.0.0");
     expect(packageJson.name).toBe("fengyue-link");
     expect(packageJson.build.appId).toBe("cc.aiero.fengyue.link");

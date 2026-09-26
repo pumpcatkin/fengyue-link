@@ -6,6 +6,7 @@ const {
   builtInGridProgram,
   createBundledGridCard,
   createExportedGameCard,
+  cardDigest,
   rebindGameCard,
   validateGameCard
 } = require("../electron/online-world-card.cjs");
@@ -29,7 +30,9 @@ for (const name of files) {
     name: current.companion.name,
     description: program.envelope
   };
-  const refreshed = createExportedGameCard(rebound, configuration);
+  const namedCard = { ...rebound, title: current.title };
+  namedCard.packageSha256 = cardDigest(namedCard);
+  const refreshed = createExportedGameCard(namedCard, configuration);
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(refreshed, null, 2)}\n`, "utf8");
   fs.renameSync(temporary, file);

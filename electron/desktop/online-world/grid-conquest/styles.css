@@ -272,7 +272,7 @@ aside::-webkit-scrollbar-thumb { border: 2px solid var(--line); border-radius: 9
 .chat-message { align-self: flex-start; max-width: 94%; min-width: 50%; border-radius: 4px 14px 14px 14px; border: 1px solid #b2946240; background: #fff5de; padding: 10px; }
 .chat-message.self { align-self: flex-end; background: #e3ebc9; border-color: #80945b40; border-radius: 14px 4px 14px 14px; }
 .chat-message header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px; color: #785931; font-size: 11px; }
-.chat-message time { font-size: 9px; color: var(--muted); }
+.chat-message time { flex: 0 0 auto; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 10px; color: var(--muted); }
 .chat-message p { font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; margin: 5px 0 0; }
 .chat-composer, .social-thread form { display: grid; grid-template-columns: minmax(0, 1fr) 42px; align-items: end; gap: 8px; padding-top: 4px; }
 .chat-composer textarea, .social-thread textarea { min-height: 76px; max-height: 140px; resize: none; width: 100%; font-size: 13px; line-height: 1.6; border: 1px solid #a482524f; border-radius: 12px; background: #fff8e8; padding: 10px; }

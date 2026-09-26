@@ -2003,9 +2003,19 @@ function switchSocialTab(tab) {
   for (const name of ["world", "generals", "letters"]) document.querySelector(`#social-${name}`).classList.toggle("hidden", name !== tab);
   markCommunicationRead(tab);
 }
+function worldChatTimestamp(item) {
+  const raw = item?.createdAt ?? item?.timestamp ?? 0;
+  if (typeof raw === "string" && raw.trim() && !/^\d+(?:\.\d+)?$/.test(raw.trim())) {
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+  return numeric < 100_000_000_000 ? numeric * 1000 : numeric;
+}
 function worldChatTime(item) {
-  const timestamp = Number(item?.createdAt || item?.timestamp || 0);
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "刚刚";
+  const timestamp = worldChatTimestamp(item);
+  if (!timestamp) return "刚刚";
   const date = new Date(timestamp);
   if (!Number.isFinite(date.getTime())) return "刚刚";
   const pad = value => String(value).padStart(2, "0");
@@ -2026,9 +2036,12 @@ function renderWorldChat() {
       const header = document.createElement("header");
       const name = document.createElement("b"); name.textContent = item.displayName || accountLabel(item.accountId);
       const time = document.createElement("time"); time.textContent = worldChatTime(item);
-      const timestamp = Number(item?.createdAt || item?.timestamp || 0);
+      const timestamp = worldChatTimestamp(item);
       const date = new Date(timestamp);
-      if (Number.isFinite(timestamp) && timestamp > 0 && Number.isFinite(date.getTime())) time.dateTime = date.toISOString();
+      if (timestamp && Number.isFinite(date.getTime())) {
+        time.dateTime = date.toISOString();
+        time.title = `本地时间：${time.textContent}\nUTC：${date.toISOString()}\nUnix：${timestamp} ms`;
+      }
       const text = document.createElement("p"); text.textContent = item.text;
       header.append(name, time); article.append(header, text); target.append(article);
     }

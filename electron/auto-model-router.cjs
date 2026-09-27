@@ -48,7 +48,29 @@ function rankModels(items) {
   return [...items].sort((a, b) => a.priority - b.priority
     || (score(a) === score(b) ? 0 : score(a) > score(b) ? -1 : 1)
     || (a.latency > 0 ? a.latency : Infinity) - (b.latency > 0 ? b.latency : Infinity)
-    || (a.price ?? Infinity) - (b.price ?? Infinity) || a.key.localeCompare(b.key));
+    || (a.price ?? Infinity) - (b.price ?? Infinity)
+    || String(a.key || `${a.provider || ""}\0${a.model || ""}`).localeCompare(String(b.key || `${b.provider || ""}\0${b.model || ""}`)));
+}
+
+function modelVersion(text, family) {
+  const match = String(text || "").toLowerCase().match(new RegExp(`${family}[^0-9]{0,24}(\\d+)(?:[._-](\\d+))?`));
+  return match ? Number(`${match[1]}.${match[2] || 0}`) : null;
+}
+
+function editorModelTier(item) {
+  const text = `${item?.model || ""} ${item?.label || ""}`.toLowerCase();
+  const gpt = modelVersion(text, "gpt");
+  if (gpt != null && gpt >= 5.6) return 0;
+  const claude = modelVersion(text, "claude");
+  if (claude != null && claude >= 4.6 && /\bopus\b/.test(text)) return 1;
+  const glm = modelVersion(text, "glm");
+  if (glm != null && glm >= 5.3) return 2;
+  return 3;
+}
+
+function rankEditorModels(items) {
+  const ranked = rankModels(items);
+  return ranked.sort((left, right) => editorModelTier(left) - editorModelTier(right));
 }
 function abortError() { const error = new Error("已取消模型请求"); error.name = "AbortError"; return error; }
 function assertActive(signal) { if (signal?.aborted) throw abortError(); }
@@ -72,7 +94,7 @@ function retryDelay(baseMs, error) {
 
 // A round visits every live candidate once. Refreshing between rounds admits new
 // models and avoids retrying a cached, removed model forever. No attempt ceiling.
-async function runAutoModel({ loadModels, execute, signal, onState = () => {}, wait = delay, maxAttempts = null }) {
+async function runAutoModel({ loadModels, execute, signal, onState = () => {}, wait = delay, maxAttempts = null, rank = rankModels }) {
   let attempt = 0;
   let cycle = 0;
   for (;;) {
@@ -81,7 +103,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
     onState({ stage: "selecting", attempt, cycle });
     let candidates;
     try {
-      candidates = rankModels(await loadModels());
+      candidates = rank(await loadModels());
       assertActive(signal);
       if (!candidates.length) throw new Error("平台暂未返回可用文本模型");
     } catch (error) {
@@ -113,4 +135,4 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
   }
 }
 
-module.exports = { normalizeCatalog, rankModels, priority, runAutoModel, abortError, assertActive, retryable, retryDelay };
+module.exports = { normalizeCatalog, rankModels, rankEditorModels, editorModelTier, priority, runAutoModel, abortError, assertActive, retryable, retryDelay };

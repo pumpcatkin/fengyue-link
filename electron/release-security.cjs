@@ -306,7 +306,7 @@ class ReleaseSecurityGate {
     this.currentArtifact = null;
     this.latestVerification = null;
     this.securityState = this.isPackaged
-      ? this.makeState("required", false, "启动时将验证本地程序完整性")
+      ? this.makeState("required", false, "启动时将进行本地程序校验")
       : this.makeState("development", true, "开发模式不进行本地完整性验证");
   }
 
@@ -559,18 +559,14 @@ class ReleaseSecurityGate {
     const issue = error instanceof ReleaseSecurityError
       ? error
       : new ReleaseSecurityError("verification-failed", "官方版本安全验证失败");
-    const status = issue.code === "update-required"
-      ? "update-required"
-      : ["artifact-mismatch", "signature-mismatch", "unregistered-version", "runtime-version-mismatch", "missing-runtime-proof", "invalid-runtime-proof"].includes(issue.code)
-        ? "blocked"
-        : "unavailable";
+    const status = issue.code === "update-required" ? "update-required" : "warning";
     const temporaryNetworkIssue = ["network-timeout", "network-error"].includes(issue.code)
       || (issue.code === "network-response" && Boolean(issue.details?.retryable));
     const publicMessage = issue.code === "update-required"
       ? `发现新版本 v${issue.details?.latestVersion || ""}`.trim()
       : temporaryNetworkIssue
         ? "最新版本信息获取暂未完成"
-        : "本地程序完整性验证未通过";
+        : "本地程序与官方文件不符，可能存在恶意篡改";
     return this.setState(status, false, publicMessage, {
       errorCode: issue.code,
       latestVersion: issue.details?.latestVersion || null,

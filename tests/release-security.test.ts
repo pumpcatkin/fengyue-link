@@ -279,6 +279,8 @@ describe("official release security", () => {
 
     writeFileSync(appAsarPath, "tampered app fixture", "utf8");
     const tampered = await new ReleaseSecurityGate({ ...options, net: reader.net }).initialize();
-    expect(tampered).toMatchObject({ status: "blocked", verified: false, errorCode: "artifact-mismatch" });
+    expect(tampered).toMatchObject({ status: "warning", verified: false, errorCode: "artifact-mismatch" });
+    await expect(new ReleaseSecurityGate({ ...options, net: reader.net }).ensureVerified())
+      .rejects.toMatchObject({ code: "artifact-mismatch" });
   });
 });

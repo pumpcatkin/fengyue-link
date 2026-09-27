@@ -59,7 +59,7 @@ const gateOptions = {
       net: offlineNet
     });
     const tamperedState = await tamperedGate.initialize();
-    assert.equal(tamperedState.status, "blocked");
+    assert.equal(tamperedState.status, "warning");
     assert.equal(tamperedState.errorCode, "artifact-mismatch");
     assert.equal(offlineNet.requests, 0);
 
@@ -67,11 +67,11 @@ const gateOptions = {
     fs.appendFileSync(executablePath, Buffer.from([0]));
     const executableTamperedGate = new ReleaseSecurityGate({ ...gateOptions, net: offlineNet });
     const executableTamperedState = await executableTamperedGate.initialize();
-    assert.equal(executableTamperedState.status, "blocked");
+    assert.equal(executableTamperedState.status, "warning");
     assert.equal(executableTamperedState.errorCode, "artifact-mismatch");
     assert.equal(offlineNet.requests, 0);
 
-    process.stdout.write("安装版安全门端到端验证通过：断开 GitHub 后仍会验签并校验 2 个关键文件，篡改 app.asar 或主 EXE 均会被阻断。\n");
+    process.stdout.write("安装版本地校验端到端验证通过：断开 GitHub 后仍会验签并校验 2 个关键文件，发现差异时标记警告但允许进入工具。\n");
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

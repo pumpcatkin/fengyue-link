@@ -1041,6 +1041,7 @@ describe("Electron platform API regressions", () => {
     expect(html).toContain('id="official-notice-overlay"');
     expect(html).toContain("正在获取最新版本信息");
     expect(html).toContain("github.com/pumpcatkin/fengyue-link/releases/latest");
+    expect(html).toContain('id="official-notice-release-page"');
     expect(html).toContain('id="official-notice-open" type="button">检查最新版本</button>');
     expect(html).toContain('id="settings-update-action" type="button">检查最新版本</button>');
     expect(html).not.toMatch(/公钥|指纹/);
@@ -1060,6 +1061,7 @@ describe("Electron platform API regressions", () => {
     expect(releaseSecurity).toContain("initializeStartupVerification()");
     expect(releaseSecurity).toContain('source: "bundled-signed-runtime-proof"');
     expect(releaseSecurity).toContain("readBundledRuntimeProof()");
+    expect(releaseSecurity).toContain('const status = issue.code === "update-required" ? "update-required" : "warning"');
     expect(packageJson.scripts["release:runtime-proof"]).toContain("create-runtime-proof.cjs");
     expect(releaseSecurity).not.toContain("attempt.json");
     expect(releaseSecurity).not.toContain("refreshInBackground");

@@ -61,6 +61,9 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   hidePlatform: () => ipcRenderer.invoke("backend:hide-platform"),
   getOnlineWorldState: () => ipcRenderer.invoke("online-world:get-state"),
   listOnlineWorldCards: () => ipcRenderer.invoke("online-world:list-cards"),
+  getOnlineWorldCardEditor: libraryId => ipcRenderer.invoke("online-world:get-editor", libraryId),
+  saveOnlineWorldCardEditor: (libraryId, project, options) => ipcRenderer.invoke("online-world:save-editor", libraryId, project, options),
+  runOnlineWorldEditorAgents: payload => ipcRenderer.invoke("online-world:run-editor-agents", payload),
   importOnlineWorldCard: () => ipcRenderer.invoke("online-world:import-card"),
   importOnlineWorldCardFiles: files => {
     const paths = Array.from(files || [], file => webUtils.getPathForFile(file)).filter(Boolean);

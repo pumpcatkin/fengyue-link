@@ -20,7 +20,7 @@ describe("optional desktop updates", () => {
     expect(renderer.match(/\? "重启并安装"/g)).toHaveLength(2);
     expect(renderer.match(/\?"退出后安装":"重启并安装"/g)).toHaveLength(2);
     expect(renderer).not.toContain('"更新并重启"');
-    expect(renderer).toContain('officialNoticeTitle.textContent="正在获取最新版本信息"');
+    expect(renderer).toContain('officialNoticeTitle.textContent="正在进行本地程序校验"');
     expect(renderer).toContain(': "正在获取最新版本信息"');
   });
 
@@ -37,8 +37,11 @@ describe("optional desktop updates", () => {
   });
 
   it("lets the player dismiss an available update without quitting", () => {
-    expect(renderer).toContain('officialNoticeAction.textContent=securityBlocked?"退出工具":available?"暂不更新"');
-    expect(renderer).toContain('if(officialNoticeCard.dataset.mode==="blocked"){void api.quitApp();return}');
+    expect(renderer).toContain('officialNoticeAction.textContent=available?"暂不更新"');
+    expect(renderer).not.toContain('if(officialNoticeCard.dataset.mode==="blocked"){void api.quitApp();return}');
+    expect(renderer).toContain('const releaseChecking=["required","checking"].includes(next.releaseSecurity?.status)');
+    expect(renderer).toContain('api.openOfficialReleasePage()');
+    expect(html).toContain('id="official-notice-release-page"');
     expect(renderer).toContain("releaseNoticeDismissed=true");
     expect(renderer).toContain('officialNoticeOverlay.classList.add("hidden")');
   });

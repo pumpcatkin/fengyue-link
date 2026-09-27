@@ -21,6 +21,7 @@
         <div class="landing-actions" aria-label="功能入口">
           <button class="feature-card primary" id="enter-multiplayer"><b>联机同乐</b><small>创建或加入多人房间</small></button>
           <button class="feature-card online-world-entry" id="enter-online-world"><b>在线游戏世界</b><small>多人在线的非风月小游戏</small></button>
+          <button class="feature-card online-editor-entry" id="enter-online-editor"><b>在线游戏编辑器</b><small>拆解游戏卡、协作生成和发布</small></button>
           <button class="feature-card" id="edit-profiles"><b>编辑个人设定</b><small id="edit-profiles-note">管理联机角色资料</small></button>
         </div>
       </div>
@@ -44,6 +45,74 @@
           <div class="oauth-divider"><span>或使用第三方账号</span></div>
           <div class="split"><button id="google-login" type="button">Google 登录</button><button id="telegram-login" type="button">Telegram 登录</button></div>
         </form>
+      </div>
+    </section>
+    <section id="online-world-editor-page" class="online-world-editor-page hidden">
+      <header class="online-editor-header">
+        <div><small>在线游戏编辑器</small><h1>游戏卡工作区</h1><p>导入后分栏编辑，保存时重新组包并执行完整校验。</p></div>
+        <div class="online-editor-actions">
+          <button id="online-editor-import" type="button">导入游戏卡</button>
+          <button id="online-editor-save" type="button" class="primary">保存本地游戏卡</button>
+          <button id="online-editor-publish" type="button">保存并同步作品</button>
+          <button id="online-editor-create-work" type="button">创建新作品并同步</button>
+          <button id="online-editor-back" type="button">返回主页</button>
+        </div>
+      </header>
+      <div class="online-editor-layout">
+        <aside class="online-editor-sidebar">
+          <label class="online-editor-search"><span class="visually-hidden">搜索游戏卡</span><input id="online-editor-search-input" type="search" placeholder="搜索游戏卡"></label>
+          <div class="online-editor-sidebar-title"><span>本地项目</span><b id="online-editor-card-count">0</b></div>
+          <div id="online-editor-card-list" class="online-editor-card-list"></div>
+          <div class="online-editor-side-note">服主发布前会回读作品配置；游客打开游戏时只更新本地程序快照，不改动服主本地 JSON。</div>
+        </aside>
+        <main class="online-editor-main">
+          <div id="online-editor-empty" class="online-editor-empty"><strong>先导入一张游戏卡</strong><span>支持现有 fyow.game-card/1 文件，也可从在线游戏库选择已导入卡片。</span></div>
+          <section id="online-editor-workspace" class="hidden">
+            <div class="online-editor-project-head">
+              <div><span id="online-editor-project-label"></span><small id="online-editor-project-meta"></small></div>
+              <span id="online-editor-validation-badge" class="online-editor-validation-badge"></span>
+            </div>
+            <nav class="online-editor-tabs" aria-label="编辑器分区">
+              <button type="button" data-editor-tab="overview" class="active">概览</button>
+              <button type="button" data-editor-tab="program">程序</button>
+              <button type="button" data-editor-tab="prompts">提示词</button>
+              <button type="button" data-editor-tab="world-book">世界书</button>
+              <button type="button" data-editor-tab="agents">Agent 协作</button>
+              <button type="button" data-editor-tab="advanced">全部配置</button>
+            </nav>
+            <section class="online-editor-pane active" data-editor-pane="overview">
+              <div class="online-editor-form-grid">
+                <label>游戏卡标题<input id="online-editor-title" maxlength="80"></label>
+                <label>作品名称<input id="online-editor-app-name" maxlength="120"></label>
+                <label class="wide">作品简介<textarea id="online-editor-summary" maxlength="4000"></textarea></label>
+              </div>
+              <div class="online-editor-info-grid"><div><small>卡片编号</small><code id="online-editor-card-id"></code></div><div><small>游戏编号</small><code id="online-editor-game-id"></code></div><div><small>伴生作品</small><code id="online-editor-work-id"></code></div></div>
+            </section>
+            <section class="online-editor-pane" data-editor-pane="program">
+              <label class="online-editor-block-label">单文件 HTML 程序<textarea id="online-editor-program" class="code-editor" spellcheck="false"></textarea></label>
+              <small class="online-editor-hint">保存时会重新压缩并生成程序信封；外链脚本、样式和网络请求仍由卡片沙箱规则校验。</small>
+            </section>
+            <section class="online-editor-pane" data-editor-pane="prompts">
+              <label class="online-editor-block-label">全局前置词<textarea id="online-editor-pre-text"></textarea></label>
+              <label class="online-editor-block-label">世界观前置提示词<textarea id="online-editor-pre-prompt"></textarea></label>
+              <label class="online-editor-block-label">全局后置词<textarea id="online-editor-post-text"></textarea></label>
+            </section>
+            <section class="online-editor-pane" data-editor-pane="world-book">
+              <label class="online-editor-block-label">世界书 JSON<textarea id="online-editor-world-book" class="code-editor" spellcheck="false"></textarea></label>
+              <small class="online-editor-hint">保留平台导出的完整条目字段；编辑器不会把世界书关键词当成宿主 API。</small>
+            </section>
+            <section class="online-editor-pane" data-editor-pane="agents">
+              <div class="online-editor-agent-toolbar"><label>本次编辑目标<textarea id="online-editor-agent-goal" maxlength="4000" placeholder="例如：把开局流程改为三阶段探索，并补齐任务 schema 和断线恢复文案"></textarea></label><button id="online-editor-run-agents" type="button" class="primary">运行协作 Agent</button></div>
+              <div id="online-editor-agent-components" class="online-editor-agent-components"></div>
+              <div id="online-editor-agent-progress" class="online-editor-agent-progress"><span>尚未运行 Agent</span></div>
+              <pre id="online-editor-agent-result" class="online-editor-agent-result"></pre>
+            </section>
+            <section class="online-editor-pane" data-editor-pane="advanced">
+              <label class="online-editor-block-label">完整作品配置 JSON<textarea id="online-editor-config-json" class="code-editor" spellcheck="false"></textarea></label>
+              <small class="online-editor-hint">这是导入卡中的完整配置快照。修改结构化分区后，保存时会以分区内容覆盖这里。</small>
+            </section>
+          </section>
+        </main>
       </div>
     </section>
     <section id="profiles-page" class="profiles-page hidden">
@@ -317,12 +386,13 @@
           <em id="official-notice-version">正在获取</em>
         </header>
         <div class="official-notice-copy">
-          <h2 id="official-notice-title">正在获取最新版本信息</h2>
-          <p id="official-notice-message">正在连接 GitHub 官方发布页。</p>
+          <h2 id="official-notice-title">正在进行本地程序校验</h2>
+          <p id="official-notice-message">正在核对本地程序与内置官方版本证明。</p>
         </div>
         <div class="official-notice-source">
           <span aria-hidden="true">✓</span>
-          <span><small>版本发布页</small><b>github.com/pumpcatkin/fengyue-link/releases/latest</b></span>
+          <span><small>官方版本地址</small><b>https://github.com/pumpcatkin/fengyue-link/releases/latest</b></span>
+          <button id="official-notice-release-page" type="button">打开地址</button>
         </div>
         <div id="official-notice-points" class="official-notice-points" aria-label="版本号信息">
           <span>当前版本</span><span>发布版本</span><span>每次启动</span>

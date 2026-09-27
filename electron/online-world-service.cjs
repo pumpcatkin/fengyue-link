@@ -26,6 +26,7 @@ const {
   builtInGridProgram,
   validateGameCard,
   createExportedGameCard,
+  rebindGameCardWithAuthor,
   refreshGameCardProgram,
   summarizeGameCard
 } = require("./online-world-card.cjs");
@@ -927,7 +928,7 @@ function exportedConfig(payload) {
     || payload?.data || payload;
 }
 
-function modelConfigSavePayload(exported, workId, name, description, model) {
+function modelConfigSavePayload(exported, workId, name, description, model, { preserveExtras = false } = {}) {
   const source = JSON.parse(JSON.stringify(exported || {}));
   const firstString = (...values) => values.find(value => typeof value === "string") || "";
   const firstNumber = (fallback, ...values) => {
@@ -943,6 +944,7 @@ function modelConfigSavePayload(exported, workId, name, description, model) {
   const postText = String(source.post_text ?? source.posttxt ?? source.potx ?? source.post_tx ?? source.suffix_txt ?? "");
   const worldBook = cloneJson(source.world_book || source.wbook || source.lore_bk || source.world_bk || source.wb || []);
   return {
+    ...(preserveExtras ? source : {}),
     pre_prompt: prePrompt,
     pre_prompt_sort: firstNumber(0, source.pre_prompt_sort),
     pre_text: preText,
@@ -987,6 +989,7 @@ function modelConfigSavePayload(exported, workId, name, description, model) {
     recommended_mod_ids: cloneJson(source.recommended_mod_ids || []),
     extend: cloneJson(source.extend || { ai_variable_enabled: false }),
     app: {
+      ...(source.app && typeof source.app === "object" ? source.app : {}),
       name: String(name),
       description: String(description),
       summary,
@@ -3021,7 +3024,8 @@ class OnlineWorldService {
       workId,
       configuration.app?.name || card.companion.name || card.title,
       configuration.app?.description || "",
-      model
+      model,
+      { preserveExtras: true }
     );
     await this.retryPlatformWrite(() => this.requestConsole(
       `/apps/${encodeURIComponent(workId)}/model-config`,
@@ -3033,6 +3037,39 @@ class OnlineWorldService {
     )));
     if (!coreConfigMatches(verified, payload)) throw new Error("云端配置保存后回读不一致");
     return createExportedGameCard(card, verified);
+  }
+
+  async createGameCardCloud(selectedCard, { name = "" } = {}) {
+    if (!selectedCard) throw new Error("请先选择一张游戏卡");
+    const card = validateGameCard(selectedCard);
+    const accountId = this.account().accountId;
+    if (!accountId) throw new Error("请先登录风月账号");
+    const configuration = cloneJson(card.companion.configuration);
+    const description = String(configuration.app?.description || "");
+    const title = String(name || configuration.app?.name || card.title || "在线游戏世界").slice(0, 80);
+    const created = await this.retryPlatformWrite(() => this.requestConsole("/apps", {
+      method: "POST",
+      body: { name: title, description, icon: "", icon_background: "", mode: "chat", type: 1 },
+      timeout: 30000
+    }));
+    const workId = String(created?.data?.app?.id || created?.app?.id || created?.data?.id || created?.id || "");
+    if (!workId) throw new Error("平台没有返回新作品编号");
+    const modelPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(workId)}`, { timeout: 15000 });
+    const model = firstObject(modelPayload, item => typeof item.provider === "string"
+      && typeof (item.name || item.model) === "string");
+    if (!model) throw new Error("新作品没有可用模型配置");
+    const payload = modelConfigSavePayload(configuration, workId, title, description, model, { preserveExtras: true });
+    await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(workId)}/model-config`,
+      { method: "POST", body: payload, timeout: 30000 }
+    ));
+    const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
+      `/apps/${encodeURIComponent(workId)}/model-config/export`,
+      { timeout: 30000 }
+    )));
+    if (!coreConfigMatches(verified, payload)) throw new Error("新作品配置保存后回读不一致");
+    const rebound = rebindGameCardWithAuthor(card, workId, this.getOrigin?.(), accountId);
+    return createExportedGameCard(rebound, verified);
   }
 
   async ensureMigrationTargetAvailable(workId) {

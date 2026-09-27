@@ -71,10 +71,23 @@ const {
   scanGameCardDirectory,
   mergeBundledGameCardDirectory,
   removeGameCardDirectoryFiles,
-  rebindGameCard
+  rebindGameCard,
+  rebindGameCardWithAuthor,
+  createEditedGameCard,
+  decomposeGameCard
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
-const { normalizeCatalog, runAutoModel, abortError, assertActive } = require("./auto-model-router.cjs");
+const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive } = require("./auto-model-router.cjs");
+const { packProgram } = require("./online-world-runtime.cjs");
+const {
+  editorProjectPath,
+  normalizeEditorProject,
+  loadEditorProjects,
+  saveEditorProjects,
+  createEditorProject,
+  parseAgentAnswer,
+  agentJobId
+} = require("./online-game-editor.cjs");
 
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
 const RELEASE_CHANNEL = "official";
@@ -689,6 +702,10 @@ class AccountBackend {
     this.migrationResumeTimer = null;
     this.migrationResumeInFlight = null;
     this.migrationResumeAttempt = 0;
+    this.onlineWorldEditorFile = editorProjectPath(app.getPath("userData"), this.profileId);
+    this.onlineWorldEditorProjects = loadEditorProjects(this.onlineWorldEditorFile);
+    this.onlineWorldEditorJob = null;
+    this.onlineWorldEditorSessionKey = null;
     this.onlineWorldCardFile = onlineWorldCardLibraryPath(this.profileId);
     this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
     this.onlineWorldCardInstallDirectory = onlineWorldCardInstallDirectory();
@@ -948,6 +965,7 @@ class AccountBackend {
         updatedAt: this.account.updatedAt
       },
       onlineWorld: this.onlineWorldService.summary(),
+      onlineWorldEditor: this.onlineWorldEditorJob ? JSON.parse(JSON.stringify(this.onlineWorldEditorJob)) : null,
       room: this.room ? {
         id: this.room.id,
         role: this.room.role,
@@ -2778,7 +2796,7 @@ class AccountBackend {
     void this.updateService.start();
     const releaseState = await this.releaseSecurity.initialize();
     this.appendSessionLog("release-security", {
-      event: releaseState.verified ? "startup-verification-complete" : "startup-verification-blocked",
+      event: releaseState.verified ? "startup-verification-complete" : "startup-verification-warning",
       version: releaseState.currentVersion,
       latestVersion: releaseState.latestVersion,
       source: releaseState.source,
@@ -2790,30 +2808,24 @@ class AccountBackend {
   }
 
   async verifyOfficialRelease() {
-    try {
-      const result = await this.releaseSecurity.ensureVerified();
-      this.appendSessionLog("release-security", {
-        event: "verified",
-        version: result.currentVersion,
-        latestVersion: result.latestVersion,
-        source: result.source
-      });
-      this.emit({ releaseSecurityVerified: true });
-      return result;
-    } catch (error) {
-      this.appendSessionLog("release-security", {
-        event: "blocked",
-        code: error?.code || "verification-failed",
-        error: error?.message || String(error)
-      });
-      this.emit({ releaseSecurityError: error?.message || "版本号对照未通过" });
-      throw new Error(error?.message || "版本号对照未通过");
-    }
+    const result = await this.releaseSecurity.initialize();
+    this.appendSessionLog("release-security", {
+      event: result.verified ? "verified" : "warning",
+      version: result.currentVersion,
+      latestVersion: result.latestVersion,
+      source: result.source,
+      code: result.errorCode || null
+    });
+    this.emit({
+      releaseSecurityVerified: result.verified,
+      releaseSecurityWarning: !result.verified
+    });
+    return result;
   }
 
   async allowDetectedAuthenticatedSession() {
-    const releaseState = await this.releaseSecurity.initialize();
-    return Boolean(releaseState.verified);
+    await this.releaseSecurity.initialize();
+    return true;
   }
 
   async prepareLoginPage() {
@@ -3860,6 +3872,116 @@ class AccountBackend {
     };
   }
 
+  onlineWorldEditorProject(libraryId) {
+    const card = this.onlineWorldCard(libraryId);
+    const key = gameCardLibraryKey(card);
+    const stored = this.onlineWorldEditorProjects.projects[key];
+    if (stored) return normalizeEditorProject(stored, card.companion.workId);
+    const project = createEditorProject(card);
+    this.onlineWorldEditorProjects.projects[key] = project;
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    return project;
+  }
+
+  async getOnlineWorldCardEditor(libraryId) {
+    return this.onlineWorldEditorProject(libraryId);
+  }
+
+  persistEditedOnlineWorldCard(previousCard, nextCard) {
+    const previous = validateGameCard(previousCard);
+    const next = validateGameCard(nextCard);
+    const previousKey = gameCardLibraryKey(previous);
+    const nextKey = gameCardLibraryKey(next);
+    const sources = new Set(this.onlineWorldCardSources?.get(previousKey) || []);
+    Map.prototype.delete.call(this.onlineWorldCards, previousKey);
+    this.onlineWorldCards.set(nextKey, next);
+    saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+    for (const file of sources) {
+      try {
+        atomicWriteFileSync(fs, file, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      } catch (error) {
+        this.appendSessionLog("online-world-editor", {
+          event: "game-card-source-save-failed",
+          status: "degraded",
+          file,
+          error: error?.message || String(error)
+        });
+      }
+    }
+    this.onlineWorldCardSources?.delete(previousKey);
+    if (sources.size) this.onlineWorldCardSources?.set(nextKey, sources);
+    this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
+    return next;
+  }
+
+  async saveOnlineWorldCardEditor(libraryId, project = {}, options = {}) {
+    const current = this.onlineWorldCard(libraryId);
+    const input = normalizeEditorProject(project, current.companion.workId);
+    const configuration = JSON.parse(JSON.stringify(input.configuration || current.companion.configuration));
+    configuration.fengyue_editor = {
+      ...(configuration.fengyue_editor && typeof configuration.fengyue_editor === "object" ? configuration.fengyue_editor : {}),
+      agents: input.agents
+    };
+    const programHtml = String(input.program?.html || "").trim();
+    if (programHtml) {
+      const packed = packProgram({
+        gameId: current.gameId,
+        title: String(configuration.app?.name || current.title),
+        html: programHtml
+      });
+      configuration.app ||= {};
+      configuration.app.description = packed.envelope;
+    }
+    const edited = createEditedGameCard(current, {
+      title: input.card?.title || current.title,
+      configuration,
+      version: Math.max(Number(current.version || 0) + 1, Number(input.card?.version || 0))
+    });
+    const shouldPublish = Boolean(options.publish);
+    let saved = edited;
+    if (shouldPublish) {
+      if (options.createWork) saved = await this.onlineWorldService.createGameCardCloud(edited, { name: edited.title });
+      else saved = await this.onlineWorldService.updateGameCardCloud(edited);
+    }
+    this.persistEditedOnlineWorldCard(current, saved);
+    const key = gameCardLibraryKey(saved);
+    this.onlineWorldEditorProjects.projects[key] = {
+      ...input,
+      card: {
+        ...input.card,
+        title: saved.title,
+        version: saved.version,
+        companion: {
+          ...input.card?.companion,
+          workId: saved.companion.workId,
+          authorAccountId: saved.companion.authorAccountId,
+          name: saved.companion.name,
+          summary: saved.companion.summary
+        }
+      },
+      configuration: JSON.parse(JSON.stringify(saved.companion.configuration)),
+      program: {
+        ...input.program,
+        html: require("./online-world-runtime.cjs").parseProgram(saved.companion.configuration.app.description, saved.gameId).html,
+        digest: saved.program.digest
+      },
+      validation: {
+        configurationSha256: saved.companion.configurationSha256,
+        packageSha256: saved.packageSha256,
+        programDigest: saved.program.digest
+      },
+      updatedAt: Date.now()
+    };
+    if (key !== gameCardLibraryKey(current)) delete this.onlineWorldEditorProjects.projects[gameCardLibraryKey(current)];
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    return {
+      project: this.onlineWorldEditorProjects.projects[key],
+      card: summarizeGameCard(saved, key),
+      published: shouldPublish,
+      ...await this.listOnlineWorldCards()
+    };
+  }
+
   onlineWorldCard(cardId, workId = null) {
     const requested = String(cardId || "");
     const composite = requested && workId ? `${requested}::${String(workId)}` : requested;
@@ -3889,7 +4011,12 @@ class AccountBackend {
         && refreshedCard?.gameId === card.gameId
         && refreshedCard?.companion?.workId === card.companion.workId
         && refreshedCard?.companion?.authorAccountId === card.companion.authorAccountId;
-      if (matchesOpenedCard) this.persistRefreshedOnlineWorldCard(card, refreshedCard);
+      const openedByAuthor = Boolean(
+        this.onlineWorldService?.work?.authorAccountId
+        && this.account?.accountId
+        && this.onlineWorldService.work.authorAccountId === this.account.accountId
+      );
+      if (matchesOpenedCard && !openedByAuthor) this.persistRefreshedOnlineWorldCard(card, refreshedCard);
     }
     const activeCard = this.onlineWorldService.card || card;
     if (this.onlineWorldService.migrationDraft && this.onlineWorldService.isAuthority()
@@ -4239,20 +4366,23 @@ class AccountBackend {
     }
   }
 
-  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null, maxAttempts = null } = {}) {
+  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null, maxAttempts = null, rank = null } = {}) {
     this.assertToolLoggedIn();
     if (!appId) throw new Error("尚未选择模型请求的作品");
     const controller = new AbortController();
     const jobId = crypto.randomUUID();
     const authRevision = this.authSessionRevision;
     const room = this.room;
-    const work = scope === "online-world" ? this.onlineWorldService?.work : this.work;
+    const work = scope === "online-world" ? this.onlineWorldService?.work
+      : scope === "online-world-editor" ? this.onlineWorldEditorSessionKey
+      : this.work;
     const job = { controller, scope, state: { id: jobId, label, stage: "queued", attempt: 0, points: null } };
     this.autoModelJobs.set(jobId, job);
     this.emit();
     const checkContext = () => {
       if (this.destroying || !this.loggedIn || this.authSessionRevision !== authRevision
         || (scope === "online-world" ? this.onlineWorldService?.work !== work || this.onlineWorldService?.status === "closed"
+          : scope === "online-world-editor" ? this.onlineWorldEditorSessionKey !== work
           : this.work !== work || this.room !== room)) controller.abort();
     };
     const watcher = setInterval(checkContext, 250);
@@ -4267,6 +4397,7 @@ class AccountBackend {
         this.emit();
       },
       maxAttempts,
+      rank: rank || (scope === "online-world-editor" ? rankEditorModels : undefined),
       execute: async context => {
         checkContext();
         assertActive(context.signal);
@@ -4391,6 +4522,201 @@ class AccountBackend {
     } finally {
       clearTimeout(timeoutId);
       signal?.removeEventListener("abort", cancel);
+    }
+  }
+
+  async requestEditorModelForWork(workId, query, { signal, label = "在线游戏编辑器 Agent" } = {}) {
+    this.assertToolLoggedIn();
+    const targetWorkId = String(workId || "").trim();
+    if (!targetWorkId) throw new Error("编辑器 Agent 缺少提示词作品编号");
+    const pointsBefore = this.account.points;
+    let anchor = null;
+    let token = "";
+    let tokenError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        anchor = await this.ensureAnchor();
+        if (anchor.webContents.isLoading()) await Promise.race([
+          new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
+        ]);
+        token = String(await anchor.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
+        break;
+      } catch (error) {
+        tokenError = error;
+        await new Promise(resolve => setTimeout(resolve, attempt * 250));
+      }
+    }
+    if (!anchor) throw new Error(`读取账号会话失败：${tokenError?.message || "登录状态尚未就绪"}`);
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    assertActive(signal);
+    signal?.addEventListener("abort", cancel, { once: true });
+    const timeoutId = setTimeout(() => controller.abort(), 180000);
+    try {
+      const requestHeaders = { "Content-Type": "application/json", "X-Language": "zh-Hans" };
+      if (token) requestHeaders.Authorization = `Bearer ${token}`;
+      const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: requestHeaders,
+        body: JSON.stringify(createModelRequestPayload({ workId: targetWorkId, query: String(query || "") }))
+      });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        const message = String(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
+        const rateLimited = response.status === 429 || isRateLimitMessage(`${message} ${failure?.code || ""}`);
+        const error = rateLimited
+          ? platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
+            status: 429,
+            httpStatus: response.status,
+            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
+          })
+          : new Error(message);
+        if ([401, 402, 403].includes(response.status)) error.retryable = false;
+        throw error;
+      }
+      if (/json/i.test(String(response.headers.get("content-type") || ""))) {
+        const failure = await response.json().catch(() => ({}));
+        const message = String(failure?.message || failure?.msg || "模型接口返回了业务错误");
+        if (isRateLimitMessage(`${message} ${failure?.code || ""}`)) {
+          throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
+            status: 429,
+            httpStatus: response.status,
+            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
+          });
+        }
+        throw new Error(message);
+      }
+      const result = await consumeModelEventStream(response.body);
+      if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
+      await this.refreshOnlineWorldPoints(label, "after");
+      const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, this.account.points);
+      this.recordAutomaticModelUsage(signal, { points });
+      return { ...result, points, remainingPoints: this.account.points };
+    } catch (error) {
+      const normalized = signal?.aborted ? abortError() : error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
+      if (normalized !== error || error?.name !== "AbortError") {
+        await this.refreshOnlineWorldPoints(label, "after").catch(() => null);
+      }
+      normalized.modelUsage = {
+        points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, this.account.points),
+        remainingPoints: this.account.points
+      };
+      this.recordAutomaticModelUsage(signal, normalized.modelUsage);
+      throw normalized;
+    } finally {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", cancel);
+    }
+  }
+
+  async runOnlineWorldEditorAgents(payload = {}) {
+    this.assertToolLoggedIn();
+    if (this.room) throw new Error("房间进行期间不能运行在线游戏编辑器 Agent");
+    const card = this.onlineWorldCard(payload.libraryId || payload.cardId);
+    const key = gameCardLibraryKey(card);
+    const currentProject = this.onlineWorldEditorProject(key);
+    const goal = String(payload.goal || "").trim().slice(0, 4000);
+    if (!goal) throw new Error("请填写本次编辑目标");
+    const components = currentProject.agents.filter(item => item.enabled);
+    if (!components.length) throw new Error("至少启用一个编辑器 Agent");
+    const sessionKey = agentJobId();
+    this.onlineWorldEditorSessionKey = sessionKey;
+    this.onlineWorldEditorJob = {
+      id: sessionKey,
+      status: "running",
+      goal,
+      currentAgent: null,
+      agents: components.map(item => ({ id: item.id, label: item.label, role: item.role, status: "queued", model: null, error: null })),
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      result: null
+    };
+    this.emit();
+    const compactProject = {
+      title: currentProject.card?.title || card.title,
+      summary: currentProject.configuration?.app?.summary || "",
+      preText: currentProject.configuration?.pre_text || "",
+      prePrompt: currentProject.configuration?.pre_prompt || "",
+      postText: currentProject.configuration?.post_text || "",
+      worldBook: currentProject.configuration?.world_book || [],
+      programDigest: currentProject.validation?.programDigest || card.program.digest
+    };
+    const results = [];
+    const agentInstruction = item => {
+      const schemas = {
+        architect: '{"summary":"...","coreLoop":["..."],"stateSchema":{},"eventSchema":{},"tasks":[{"id":"...","input":{},"output":{}}]}',
+        "prompt-designer": '{"preText":"...","prePrompt":"...","postText":"...","worldBook":[{"group":"...","key":"...","key_region":2,"value":"...","enable":true,"probability":100,"sort":0,"depth":0}]}',
+        "ux-designer": '{"layout":"...","components":["..."],"interactions":["..."],"playerProgress":["..."]}',
+        verifier: '{"score":0,"issues":[{"severity":"P0|P1|P2","message":"...","fix":"..."}],"approved":false}'
+      };
+      return `你是${item.label}，负责${item.role}。这是在线游戏卡编辑器的受信 Agent 协作步骤。
+目标：${goal}
+当前项目：${JSON.stringify(compactProject)}
+只输出一个 JSON 对象，不要输出 Markdown 解释。建议输出结构：${schemas[item.id] || '{"result":"..."}'}。
+不要生成账号、Token、Cookie、平台 HTTP、任意本地文件或主进程代码；所有规则必须可被宿主校验，程序只运行在受限卡片沙箱中。`;
+    };
+    try {
+      for (const item of components) {
+        const record = this.onlineWorldEditorJob.agents.find(agent => agent.id === item.id);
+        this.onlineWorldEditorJob.currentAgent = item.id;
+        if (record) record.status = "running";
+        this.onlineWorldEditorJob.updatedAt = Date.now();
+        this.emit();
+        const targetWorkId = item.workId || card.companion.workId;
+        const query = `[[FYOW:EDITOR:${item.id}:v1]]\n${JSON.stringify({
+          schema: "fyow.editor-agent/1",
+          input: { role: item.id, instruction: agentInstruction(item) }
+        })}`;
+        try {
+          const result = await this.withAutoModel(
+            targetWorkId,
+            `编辑器 · ${item.label}`,
+            ({ signal }) => this.requestEditorModelForWork(targetWorkId, query, { signal, label: item.label }),
+            { scope: "online-world-editor" }
+          );
+          const parsed = parseAgentAnswer(result.answer);
+          results.push({ id: item.id, label: item.label, model: result.model || null, output: parsed });
+          if (record) {
+            record.status = "done";
+            record.model = result.model || null;
+          }
+        } catch (error) {
+          if (record) {
+            record.status = error?.name === "AbortError" ? "cancelled" : "failed";
+            record.error = error?.message || String(error);
+          }
+          throw error;
+        }
+        this.onlineWorldEditorJob.updatedAt = Date.now();
+        this.emit();
+      }
+      const draft = { schema: "fyow.editor-agent-draft/1", goal, generatedAt: Date.now(), agents: results };
+      const nextProject = {
+        ...currentProject,
+        agentDraft: draft,
+        updatedAt: Date.now()
+      };
+      this.onlineWorldEditorProjects.projects[key] = nextProject;
+      saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+      this.onlineWorldEditorJob.status = "completed";
+      this.onlineWorldEditorJob.currentAgent = null;
+      this.onlineWorldEditorJob.result = draft;
+      this.onlineWorldEditorJob.updatedAt = Date.now();
+      this.emit();
+      return { project: nextProject, draft, card: summarizeGameCard(card, key) };
+    } catch (error) {
+      this.onlineWorldEditorJob.status = error?.name === "AbortError" ? "cancelled" : "failed";
+      this.onlineWorldEditorJob.currentAgent = null;
+      this.onlineWorldEditorJob.error = error?.message || String(error);
+      this.onlineWorldEditorJob.updatedAt = Date.now();
+      this.emit();
+      throw error;
+    } finally {
+      if (this.onlineWorldEditorSessionKey === sessionKey) this.onlineWorldEditorSessionKey = null;
     }
   }
 
@@ -9994,6 +10320,9 @@ handleLocalIpc("backend:game-key", (_event, payload) => backend.dispatchGameKey(
 handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
 handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
+handleLocalIpc("online-world:get-editor", (_event, libraryId) => backend.getOnlineWorldCardEditor(libraryId));
+handleLocalIpc("online-world:save-editor", (_event, libraryId, project, options) => backend.saveOnlineWorldCardEditor(libraryId, project || {}, options || {}));
+handleLocalIpc("online-world:run-editor-agents", (_event, payload) => backend.runOnlineWorldEditorAgents(payload || {}));
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
 handleLocalIpc("online-world:import-card-files", (_event, files) => backend.importOnlineWorldCardFiles(files));
 handleLocalIpc("online-world:remove-card", (_event, libraryId) => backend.removeOnlineWorldCard(libraryId));

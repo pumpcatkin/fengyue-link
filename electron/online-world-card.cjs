@@ -254,6 +254,10 @@ function createExportedGameCard(card, exportedConfiguration, exportedAt = new Da
 }
 
 function rebindGameCard(card, workId, origin = null) {
+  return rebindGameCardWithAuthor(card, workId, origin, null);
+}
+
+function rebindGameCardWithAuthor(card, workId, origin = null, authorAccountId = null) {
   const base = validateGameCard(card);
   const nextWorkId = String(workId || "");
   if (!/^[0-9a-z-]{8,80}$/i.test(nextWorkId)) throw new Error("迁移后的伴生作品编号无效");
@@ -266,6 +270,7 @@ function rebindGameCard(card, workId, origin = null) {
       ...base.companion,
       origin: nextOrigin,
       workId: nextWorkId,
+      ...(authorAccountId ? { authorAccountId: String(authorAccountId) } : {}),
       installedUrl: `${nextOrigin}/zh/explore/installed/${encodeURIComponent(nextWorkId)}`,
       configurationUrl: `${nextOrigin}/zh/app/${encodeURIComponent(nextWorkId)}/configuration`,
       configuration,
@@ -273,6 +278,87 @@ function rebindGameCard(card, workId, origin = null) {
     },
     exportedAt: new Date().toISOString()
   });
+}
+
+function createEditedGameCard(card, patch = {}, exportedAt = new Date().toISOString()) {
+  const base = validateGameCard(card);
+  const sourceConfiguration = patch.configuration && typeof patch.configuration === "object"
+    ? patch.configuration
+    : base.companion.configuration;
+  const configuration = normalizeConfiguration(sourceConfiguration, base.companion);
+  const programHtml = String(patch.programHtml || "").trim();
+  if (programHtml) {
+    const packed = packProgram({
+      gameId: base.gameId,
+      title: String(configuration.app?.name || base.title),
+      html: programHtml
+    });
+    configuration.app.description = packed.envelope;
+  }
+  const parsedProgram = parseProgram(configuration.app.description, base.gameId);
+  if (!parsedProgram) throw new Error("编辑后的作品详细介绍中没有有效游戏程序包");
+  const nextVersion = Number.isSafeInteger(Number(patch.version))
+    ? Math.max(Number(base.version || 0), Number(patch.version))
+    : Number(base.version || 0) + 1;
+  return finalizeGameCard({
+    ...base,
+    title: String(patch.title || configuration.app.name || base.title).slice(0, 80),
+    version: nextVersion,
+    companion: {
+      ...base.companion,
+      ...(patch.companion && typeof patch.companion === "object" ? JSON.parse(JSON.stringify(patch.companion)) : {}),
+      name: configuration.app.name,
+      summary: configuration.app.summary,
+      configuration,
+      configurationSha256: configurationDigest(configuration)
+    },
+    program: {
+      format: parsedProgram.manifest.format,
+      apiVersion: parsedProgram.manifest.apiVersion,
+      digest: parsedProgram.digest
+    },
+    exportedAt
+  });
+}
+
+function decomposeGameCard(card) {
+  const normalized = validateGameCard(card);
+  const configuration = JSON.parse(JSON.stringify(normalized.companion.configuration));
+  const program = parseProgram(configuration.app.description, normalized.gameId);
+  const editor = configuration.fengyue_editor && typeof configuration.fengyue_editor === "object"
+    ? JSON.parse(JSON.stringify(configuration.fengyue_editor))
+    : {};
+  return {
+    schema: "fyow.game-card-editor/1",
+    card: {
+      cardId: normalized.cardId,
+      gameId: normalized.gameId,
+      title: normalized.title,
+      version: normalized.version,
+      exportedAt: normalized.exportedAt || null,
+      companion: {
+        origin: normalized.companion.origin,
+        workId: normalized.companion.workId,
+        authorAccountId: normalized.companion.authorAccountId,
+        name: normalized.companion.name,
+        summary: normalized.companion.summary,
+        language: normalized.companion.language
+      }
+    },
+    program: {
+      format: program.manifest.format,
+      apiVersion: program.manifest.apiVersion,
+      digest: program.digest,
+      html: program.html
+    },
+    configuration,
+    agents: editor.agents && typeof editor.agents === "object" ? editor.agents : {},
+    validation: {
+      configurationSha256: normalized.companion.configurationSha256,
+      packageSha256: normalized.packageSha256,
+      programDigest: normalized.program.digest
+    }
+  };
 }
 
 function refreshGameCardProgram(card, description, exportedAt = new Date().toISOString()) {
@@ -546,8 +632,11 @@ module.exports = {
   createBundledGridCard,
   validateGameCard,
   createExportedGameCard,
+  createEditedGameCard,
   refreshGameCardProgram,
   rebindGameCard,
+  rebindGameCardWithAuthor,
+  decomposeGameCard,
   gameCardLibraryKey,
   compareGameCardFreshness,
   summarizeGameCard,

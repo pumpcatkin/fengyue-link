@@ -292,6 +292,7 @@ class ReleaseSecurityGate {
     this.net = options.net;
     this.appVersion = String(options.appVersion || "");
     this.isPackaged = Boolean(options.isPackaged);
+    this.testMode = Boolean(options.testMode);
     this.resourcesPath = String(options.resourcesPath || "");
     this.executablePath = String(options.executablePath || "");
     this.userDataPath = String(options.userDataPath || "");
@@ -306,7 +307,9 @@ class ReleaseSecurityGate {
     this.currentArtifact = null;
     this.latestVerification = null;
     this.securityState = this.isPackaged
-      ? this.makeState("required", false, "启动时将进行本地程序校验")
+      ? this.testMode
+        ? this.makeState("test-required", false, "测试分支将校验本地运行清单", { channel: "test" })
+        : this.makeState("required", false, "启动时将进行本地程序校验")
       : this.makeState("development", true, "开发模式不进行本地完整性验证");
   }
 
@@ -411,8 +414,54 @@ class ReleaseSecurityGate {
     return validateManifestForRuntime(rawManifest);
   }
 
+  readTestRuntimeProof() {
+    const manifestFile = this.runtimeProofPaths().manifest;
+    if (!physicalFs.existsSync(manifestFile) || !physicalFs.statSync(manifestFile).isFile()) {
+      throw new ReleaseSecurityError("missing-runtime-proof", `安装目录缺少 ${RUNTIME_PROOF_MANIFEST_ASSET}`);
+    }
+    const size = physicalFs.statSync(manifestFile).size;
+    if (size <= 0 || size > MAX_MANIFEST_BYTES) {
+      throw new ReleaseSecurityError("invalid-runtime-proof", `${RUNTIME_PROOF_MANIFEST_ASSET} 大小无效`);
+    }
+    let rawManifest;
+    try { rawManifest = JSON.parse(physicalFs.readFileSync(manifestFile, "utf8")); }
+    catch { throw new ReleaseSecurityError("invalid-manifest", "测试分支运行清单无法解析"); }
+    if (rawManifest?.channel !== "test") {
+      throw new ReleaseSecurityError("invalid-manifest", "测试分支运行清单的渠道标记无效");
+    }
+    return validateManifestForRuntime(rawManifest);
+  }
+
+  async verifyTestRuntime() {
+    this.setState("checking", false, "正在验证测试分支本地文件…", { channel: "test" });
+    try {
+      const manifest = this.readTestRuntimeProof();
+      if (manifest.version !== parseVersion(this.appVersion)?.raw) {
+        throw new ReleaseSecurityError("runtime-version-mismatch", "测试分支运行清单与程序版本不一致");
+      }
+      const artifacts = await this.readCurrentArtifacts();
+      if (artifacts.appAsar.size !== manifest.files.appAsar.size || artifacts.appAsar.sha256 !== manifest.files.appAsar.sha256
+          || artifacts.executable.size !== manifest.files.executable.size || artifacts.executable.sha256 !== manifest.files.executable.sha256) {
+        throw new ReleaseSecurityError("artifact-mismatch", "测试分支本地文件与运行清单不一致");
+      }
+      this.currentArtifact = artifacts;
+      return this.setState("verified", true, `测试分支本地校验完成：v${this.appVersion}`, {
+        latestVersion: manifest.version,
+        checkedAt: new Date().toISOString(),
+        source: "test-channel-local-manifest",
+        channel: "test",
+        releasePage: manifest.releasePage,
+        verifiedFileCount: RUNTIME_INTEGRITY_FILE_COUNT
+      });
+    } catch (error) {
+      this.setFailure(error);
+      throw error;
+    }
+  }
+
   async verifyBundledRuntime() {
     if (!this.isPackaged) return this.state();
+    if (this.testMode) return this.verifyTestRuntime();
     this.setState("checking", false, "正在验证本地程序完整性…");
     try {
       const manifest = this.readBundledRuntimeProof();
@@ -543,6 +592,9 @@ class ReleaseSecurityGate {
   }
 
   async fetchSignedUpdate(expectedVersion = null) {
+    if (this.testMode) {
+      throw new ReleaseSecurityError("test-channel-update-disabled", "测试分支不参与自动更新");
+    }
     const expected = expectedVersion ? parseVersion(expectedVersion)?.raw : null;
     if (expectedVersion && !expected) throw new ReleaseSecurityError("invalid-version", "待更新版本号格式无效");
     let result = this.latestVerification;
@@ -562,7 +614,9 @@ class ReleaseSecurityGate {
     const status = issue.code === "update-required" ? "update-required" : "warning";
     const temporaryNetworkIssue = ["network-timeout", "network-error"].includes(issue.code)
       || (issue.code === "network-response" && Boolean(issue.details?.retryable));
-    const publicMessage = issue.code === "update-required"
+    const publicMessage = this.testMode
+      ? "测试分支本地运行清单缺失或不匹配"
+      : issue.code === "update-required"
       ? `发现新版本 v${issue.details?.latestVersion || ""}`.trim()
       : temporaryNetworkIssue
         ? "最新版本信息获取暂未完成"
@@ -570,12 +624,13 @@ class ReleaseSecurityGate {
     return this.setState(status, false, publicMessage, {
       errorCode: issue.code,
       latestVersion: issue.details?.latestVersion || null,
-      releasePage: issue.details?.releasePage || null
+      releasePage: issue.details?.releasePage || null,
+      ...(this.testMode ? { channel: "test" } : {})
     });
   }
 
   async verifyOnline() {
-    if (!this.isPackaged) return this.state();
+    if (!this.isPackaged || this.testMode) return this.state();
     this.setState("checking", false, "正在获取最新版本信息");
     try {
       const deadlineAt = Date.now() + this.networkTimeoutMs;

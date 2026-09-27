@@ -283,4 +283,66 @@ describe("official release security", () => {
     await expect(new ReleaseSecurityGate({ ...options, net: reader.net }).ensureVerified())
       .rejects.toMatchObject({ code: "artifact-mismatch" });
   });
+
+  it("verifies a packaged test channel with a local manifest and no signature key", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "fengyue-test-channel-"));
+    temporaryDirectories.push(directory);
+    const resourcesPath = path.join(directory, "resources");
+    const proofPath = path.join(resourcesPath, "release-proof");
+    const executablePath = path.join(directory, "风月联机工具.exe");
+    const appAsarPath = path.join(resourcesPath, "app.asar");
+    mkdirSync(proofPath, { recursive: true });
+    writeFileSync(executablePath, "test executable fixture", "utf8");
+    writeFileSync(appAsarPath, "test app fixture", "utf8");
+    const manifest = signedManifestShape();
+    manifest.version = "1.6.0";
+    manifest.tag = "v1.6.0";
+    manifest.releasePage = exactReleasePage(manifest.tag);
+    (manifest as typeof manifest & { channel: string }).channel = "test";
+    manifest.files.appAsar = {
+      path: "resources/app.asar",
+      size: Buffer.byteLength("test app fixture"),
+      sha256: sha256File(appAsarPath)
+    };
+    manifest.files.executable = {
+      name: "风月联机工具.exe",
+      size: Buffer.byteLength("test executable fixture"),
+      sha256: sha256File(executablePath)
+    };
+    writeFileSync(path.join(proofPath, "runtime-manifest.json"), `${JSON.stringify(manifest)}\n`, "utf8");
+
+    let requested = false;
+    const net = {
+      fetch: async () => {
+        requested = true;
+        throw new Error("test channel must stay offline");
+      }
+    };
+    const options = {
+      appVersion: "1.6.0",
+      isPackaged: true,
+      testMode: true,
+      resourcesPath,
+      executablePath,
+      userDataPath: directory
+    };
+    const cleanState = await new ReleaseSecurityGate({ ...options, net }).ensureVerified();
+    expect(cleanState).toMatchObject({
+      status: "verified",
+      verified: true,
+      source: "test-channel-local-manifest",
+      channel: "test",
+      verifiedFileCount: 2
+    });
+    expect(requested).toBe(false);
+
+    writeFileSync(appAsarPath, "tampered test app fixture", "utf8");
+    const tamperedState = await new ReleaseSecurityGate({ ...options, net }).initialize();
+    expect(tamperedState).toMatchObject({
+      status: "warning",
+      verified: false,
+      errorCode: "artifact-mismatch",
+      channel: "test"
+    });
+  });
 });

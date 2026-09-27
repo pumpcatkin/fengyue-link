@@ -971,6 +971,7 @@ describe("Electron platform API regressions", () => {
     expect(packageJson.version).toMatch(/^\d+\.\d+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/);
     expect(packageJson.devDependencies.electron).toBe("^44.0.0");
     expect(packageJson.name).toBe("fengyue-link");
+    expect(packageJson.fengyueReleaseChannel).toBe("test");
     expect(packageJson.build.appId).toBe("cc.aiero.fengyue.link");
     expect(packageJson.build.productName).toBe("风月联机工具");
     expect(packageJson.build.electronVersion).toBe("44.0.0");
@@ -1017,6 +1018,9 @@ describe("Electron platform API regressions", () => {
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
     const releaseSecurity = readFileSync(new URL("../electron/release-security.cjs", import.meta.url), "utf8");
     expect(main).toContain("new ReleaseSecurityGate({");
+    expect(main).toContain("PACKAGE_METADATA.fengyueReleaseChannel");
+    expect(main).toContain('testMode: RELEASE_CHANNEL === "test"');
+    expect(main).toContain('isPackaged: app.isPackaged && RELEASE_CHANNEL === "official"');
     expect(main).toContain("await this.releaseSecurity.initialize()");
     expect(main.match(/this\.verifyOfficialRelease\(\)/g)).toHaveLength(2);
     expect(main).toContain("await waitForLoginTask(this.verifyOfficialRelease(), controller.signal)");
@@ -1060,6 +1064,8 @@ describe("Electron platform API regressions", () => {
     expect(releaseSecurity).toContain("const RUNTIME_INTEGRITY_FILE_COUNT = 2");
     expect(releaseSecurity).toContain("initializeStartupVerification()");
     expect(releaseSecurity).toContain('source: "bundled-signed-runtime-proof"');
+    expect(releaseSecurity).toContain('source: "test-channel-local-manifest"');
+    expect(releaseSecurity).toContain("readTestRuntimeProof()");
     expect(releaseSecurity).toContain("readBundledRuntimeProof()");
     expect(releaseSecurity).toContain('const status = issue.code === "update-required" ? "update-required" : "warning"');
     expect(packageJson.scripts["release:runtime-proof"]).toContain("create-runtime-proof.cjs");

@@ -89,15 +89,16 @@ const {
   agentJobId
 } = require("./online-game-editor.cjs");
 
+const PROJECT_ROOT = path.resolve(__dirname, "..");
+const PACKAGE_METADATA = require(path.join(PROJECT_ROOT, "package.json"));
 const DEFAULT_ORIGIN = "https://staging.aiero.cc";
-const RELEASE_CHANNEL = "official";
+const RELEASE_CHANNEL = PACKAGE_METADATA.fengyueReleaseChannel === "test" ? "test" : "official";
 const APPLICATION_ID = "cc.aiero.fengyue.link";
 const APPLICATION_NAME = "风月联机工具";
 const DOMAIN_DIRECTORY_URLS = OFFICIAL_DOMAIN_DIRECTORY_URLS;
 const OFFICIAL_FALLBACK_ORIGINS = FALLBACK_PLATFORM_ORIGINS;
 const TRUSTED_PLATFORM_ORIGINS = new Set([DEFAULT_ORIGIN, ...OFFICIAL_FALLBACK_ORIGINS]);
 const WORK_PATH = /\/(?:zh\/)?explore\/installed\/[^/?#]+/;
-const PROJECT_ROOT = path.resolve(__dirname, "..");
 const WIRE_PREFIX = "§FYMP1§";
 const ADMIN_EMAIL = "8zhua@test.com";
 const PREFIX_ADAPTER_APP_ID = "649fbb98-07b3-4cbd-a7ed-3e3d224dca87";
@@ -10220,6 +10221,7 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
     net,
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
+    testMode: RELEASE_CHANNEL === "test",
     resourcesPath: process.resourcesPath,
     executablePath: process.execPath,
     userDataPath: app.getPath("userData"),
@@ -10231,7 +10233,7 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
     updater: autoUpdater,
     releaseSecurity,
     feedOptions: { provider: "github", owner: "pumpcatkin", repo: "fengyue-link" },
-    isPackaged: app.isPackaged,
+    isPackaged: app.isPackaged && RELEASE_CHANNEL === "official",
     currentVersion: app.getVersion(),
     installDirectory: process.platform === "win32" ? path.dirname(process.execPath) : null,
     // The player has explicitly chosen "update and restart". Install as soon as

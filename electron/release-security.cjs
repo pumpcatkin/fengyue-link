@@ -592,9 +592,6 @@ class ReleaseSecurityGate {
   }
 
   async fetchSignedUpdate(expectedVersion = null) {
-    if (this.testMode) {
-      throw new ReleaseSecurityError("test-channel-update-disabled", "测试分支不参与自动更新");
-    }
     const expected = expectedVersion ? parseVersion(expectedVersion)?.raw : null;
     if (expectedVersion && !expected) throw new ReleaseSecurityError("invalid-version", "待更新版本号格式无效");
     let result = this.latestVerification;

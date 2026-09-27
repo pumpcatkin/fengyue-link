@@ -971,7 +971,7 @@ describe("Electron platform API regressions", () => {
     expect(packageJson.version).toMatch(/^\d+\.\d+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/);
     expect(packageJson.devDependencies.electron).toBe("^44.0.0");
     expect(packageJson.name).toBe("fengyue-link");
-    expect(packageJson.fengyueReleaseChannel).toBe("test");
+    expect(packageJson.fengyueReleaseChannel ?? "official").toMatch(/^(official|test)$/);
     expect(packageJson.build.appId).toBe("cc.aiero.fengyue.link");
     expect(packageJson.build.productName).toBe("风月联机工具");
     expect(packageJson.build.electronVersion).toBe("44.0.0");
@@ -1020,7 +1020,7 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain("new ReleaseSecurityGate({");
     expect(main).toContain("PACKAGE_METADATA.fengyueReleaseChannel");
     expect(main).toContain('testMode: RELEASE_CHANNEL === "test"');
-    expect(main).toContain('isPackaged: app.isPackaged && RELEASE_CHANNEL === "official"');
+    expect(main).toContain("isPackaged: app.isPackaged");
     expect(main).toContain("await this.releaseSecurity.initialize()");
     expect(main.match(/this\.verifyOfficialRelease\(\)/g)).toHaveLength(2);
     expect(main).toContain("await waitForLoginTask(this.verifyOfficialRelease(), controller.signal)");

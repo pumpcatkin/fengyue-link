@@ -321,6 +321,58 @@ function createEditedGameCard(card, patch = {}, exportedAt = new Date().toISOStr
   });
 }
 
+function createGameCardFromEditorProject(project = {}, { origin, authorAccountId, workId } = {}, exportedAt = new Date().toISOString()) {
+  const sourceCard = project.card && typeof project.card === "object" ? project.card : {};
+  const sourceCompanion = sourceCard.companion && typeof sourceCard.companion === "object" ? sourceCard.companion : {};
+  const cardId = String(sourceCard.cardId || `cc.aiero.fyow.local.${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`);
+  const gameId = String(sourceCard.gameId || `fyow-local-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`);
+  const nextWorkId = String(workId || crypto.randomUUID());
+  const nextAuthorAccountId = String(authorAccountId || sourceCompanion.authorAccountId || "");
+  if (!/^[0-9a-z-]{8,80}$/i.test(nextWorkId)) throw new Error("新建游戏卡的临时作品编号无效");
+  if (!/^[0-9a-z-]{8,80}$/i.test(nextAuthorAccountId)) throw new Error("新建游戏卡缺少当前账号绑定");
+  const nextOrigin = normalizeOrigin(origin || sourceCompanion.origin);
+  if (!/^[0-9a-z._-]{4,120}$/i.test(cardId)) throw new Error("新建游戏卡编号无效");
+  if (!/^[0-9a-z._-]{4,160}$/i.test(gameId)) throw new Error("新建游戏编号无效");
+  const companion = {
+    origin: nextOrigin,
+    workId: nextWorkId,
+    authorAccountId: nextAuthorAccountId,
+    name: String(sourceCompanion.name || project.configuration?.app?.name || sourceCard.title || "在线游戏世界").slice(0, 120),
+    summary: String(sourceCompanion.summary || project.configuration?.app?.summary || "").slice(0, 4000),
+    language: String(sourceCompanion.language || project.configuration?.app?.language || "zh-Hans")
+  };
+  const configuration = normalizeConfiguration(project.configuration, companion);
+  configuration.app.id = nextWorkId;
+  const html = String(project.program?.html || "").trim()
+    || "<!doctype html><html lang=\"zh-CN\"><body><main><h1>未命名游戏</h1></main></body></html>";
+  const packed = packProgram({
+    gameId,
+    title: String(configuration.app?.name || sourceCard.title || "在线游戏世界"),
+    html
+  });
+  configuration.app.description = packed.envelope;
+  return finalizeGameCard({
+    schema: GAME_CARD_SCHEMA,
+    cardId,
+    gameId,
+    title: String(sourceCard.title || configuration.app.name || "在线游戏世界").slice(0, 80),
+    version: Math.max(1, Number(sourceCard.version || 0)),
+    companion: {
+      ...companion,
+      name: configuration.app.name,
+      summary: configuration.app.summary,
+      configuration,
+      configurationSha256: configurationDigest(configuration)
+    },
+    program: {
+      format: packed.manifest.format,
+      apiVersion: packed.manifest.apiVersion,
+      digest: packed.digest
+    },
+    exportedAt
+  });
+}
+
 function decomposeGameCard(card) {
   const normalized = validateGameCard(card);
   const configuration = JSON.parse(JSON.stringify(normalized.companion.configuration));
@@ -633,6 +685,7 @@ module.exports = {
   validateGameCard,
   createExportedGameCard,
   createEditedGameCard,
+  createGameCardFromEditorProject,
   refreshGameCardProgram,
   rebindGameCard,
   rebindGameCardWithAuthor,

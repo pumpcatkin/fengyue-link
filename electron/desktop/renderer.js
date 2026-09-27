@@ -200,6 +200,7 @@ let onlineWorldState = null;
 let onlineWorldCards = [];
 let selectedOnlineWorldCardId = null;
 let onlineWorldEditorCards = [];
+let onlineWorldEditorProjects = [];
 let selectedOnlineWorldEditorId = null;
 let onlineWorldEditorProject = null;
 let onlineWorldEditorDirty = false;
@@ -1005,27 +1006,32 @@ function parseEditorJson(id,label){
   catch(error){throw new Error(`${label} JSON 无效：${error.message}`)}
 }
 
-function renderOnlineWorldEditorCards(){
-  const list=document.querySelector("#online-editor-card-list");
-  const cards=onlineWorldEditorCards.filter(card=>{
-    const query=String(editorValue("online-editor-search-input")||"").trim().toLocaleLowerCase();
-    return !query||String(card.title||"").toLocaleLowerCase().includes(query)||String(card.workId||"").toLocaleLowerCase().includes(query);
-  });
+function renderOnlineWorldEditorProjects(){
+  const list=document.querySelector("#online-editor-project-list");
+  if(!list)return;
   list.replaceChildren();
-  for(const card of cards){
+  if(!onlineWorldEditorProjects.length){
+    const empty=document.createElement("div");
+    empty.className="online-editor-project-empty";
+    empty.textContent="还没有可编辑的本地项目，请从零新建一张游戏卡。";
+    list.append(empty);
+    return;
+  }
+  for(const project of onlineWorldEditorProjects){
     const button=document.createElement("button");
     button.type="button";
-    button.className="online-editor-card-item";
-    button.classList.toggle("active",(card.libraryId||card.cardId)===selectedOnlineWorldEditorId);
-    const title=document.createElement("b");title.textContent=card.title||"未命名游戏";
-    const meta=document.createElement("small");meta.textContent=`${card.isCurrentUserAuthor?"服主":"本地"} · ${card.workId||"未绑定作品"}`;
+    button.className="online-editor-project-item";
+    button.classList.toggle("active",(project.libraryId||project.cardId)===selectedOnlineWorldEditorId);
+    const title=document.createElement("b");
+    title.textContent=project.title||"未命名游戏";
+    const meta=document.createElement("small");
+    meta.textContent=project.isDraft?"本地草稿 · 尚未创建伴生作品":`服主项目 · ${project.workId||"未绑定作品"}`;
     button.append(title,meta);
-    button.addEventListener("click",()=>void loadOnlineWorldEditorProject(card.libraryId||card.cardId));
+    button.addEventListener("click",async()=>{
+      document.querySelector("#online-editor-project-picker")?.close();
+      await loadOnlineWorldEditorProject(project.libraryId||project.cardId);
+    });
     list.append(button);
-  }
-  document.querySelector("#online-editor-card-count").textContent=String(onlineWorldEditorCards.length);
-  if(!cards.length){
-    const empty=document.createElement("div");empty.className="online-editor-card-empty";empty.textContent="没有匹配的游戏卡";list.append(empty);
   }
 }
 
@@ -1040,8 +1046,9 @@ function renderOnlineWorldEditorProject(){
   const configuration=project.configuration||{};
   const app=configuration.app||{};
   document.querySelector("#online-editor-project-label").textContent=project.card?.title||"未命名游戏";
-  document.querySelector("#online-editor-project-meta").textContent=`${card.companion?.workId||"未绑定作品"} · ${card.gameId||"未知游戏"} · v${card.version||0}`;
-  document.querySelector("#online-editor-validation-badge").textContent=project.validation?.packageSha256?"已通过卡包校验":"待校验";
+  document.querySelector("#online-editor-project-menu-title").textContent=project.card?.title||"未命名游戏";
+  document.querySelector("#online-editor-project-meta").textContent=`${project.isDraft?"本地草稿":card.companion?.workId||"未绑定作品"} · ${card.gameId||"未知游戏"} · v${card.version||0}`;
+  document.querySelector("#online-editor-validation-badge").textContent=project.validation?.packageSha256?"已通过卡包校验":project.isDraft?"本地草稿，保存同步时校验":"待校验";
   setEditorValue("online-editor-title",card.title||"");
   setEditorValue("online-editor-app-name",app.name||"");
   setEditorValue("online-editor-summary",app.summary||"");
@@ -1055,25 +1062,11 @@ function renderOnlineWorldEditorProject(){
   setEditorValue("online-editor-world-book",editorJson(configuration.world_book||[]));
   setEditorValue("online-editor-config-json",editorJson(configuration));
   renderOnlineWorldEditorAgents();
-  renderOnlineWorldEditorCards();
+  renderOnlineWorldEditorProjects();
   onlineWorldEditorDirty=false;
 }
 
 function renderOnlineWorldEditorAgents(){
-  const mount=document.querySelector("#online-editor-agent-components");
-  const components=Array.isArray(onlineWorldEditorProject?.agents)?onlineWorldEditorProject.agents:[];
-  mount.replaceChildren();
-  for(const component of components){
-    const label=document.createElement("label");label.className="online-editor-agent-component";
-    const checkbox=document.createElement("input");checkbox.type="checkbox";checkbox.checked=component.enabled!==false;
-    checkbox.addEventListener("change",()=>{component.enabled=checkbox.checked;onlineWorldEditorDirty=true});
-    const copy=document.createElement("span");
-    const name=document.createElement("b");name.textContent=component.label;
-    const role=document.createElement("small");role.textContent=component.role;
-    const work=document.createElement("input");work.type="text";work.placeholder="留空使用当前伴生作品";work.value=component.workId||"";
-    work.addEventListener("input",()=>{component.workId=work.value.trim();onlineWorldEditorDirty=true});
-    copy.append(name,role,work);label.append(checkbox,copy);mount.append(label);
-  }
   const draft=onlineWorldEditorProject?.agentDraft;
   document.querySelector("#online-editor-agent-result").textContent=draft?JSON.stringify(draft,null,2):"";
 }
@@ -1091,6 +1084,13 @@ function renderOnlineWorldEditorProgress(job){
     if(item.model)row.textContent+=` · ${item.model}`;
     list.append(row);
   }
+  if(job.synthesis){
+    const row=document.createElement("span");
+    row.className=`status-${job.synthesis.status}`;
+    row.textContent=`中枢审查：${job.synthesis.status==="done"?"完成":job.synthesis.status==="running"?"运行中":job.synthesis.status==="failed"?"失败":"等待"}`;
+    if(job.synthesis.model)row.textContent+=` · ${job.synthesis.model}`;
+    list.append(row);
+  }
   mount.replaceChildren(head,list);
 }
 
@@ -1100,6 +1100,7 @@ async function loadOnlineWorldEditorProject(libraryId){
     selectedOnlineWorldEditorId=libraryId;
     onlineWorldEditorProject=project;
     renderOnlineWorldEditorProject();
+    renderOnlineWorldEditorProjects();
   }catch(error){toast(friendlyError(error))}
 }
 
@@ -1126,10 +1127,13 @@ function syncOnlineWorldEditorFromForm(){
 }
 
 async function refreshOnlineWorldEditorCards(){
-  const result=await api.listOnlineWorldCards();
-  onlineWorldEditorCards=Array.isArray(result?.cards)?result.cards:[];
-  renderOnlineWorldEditorCards();
-  if(!selectedOnlineWorldEditorId&&onlineWorldEditorCards[0])await loadOnlineWorldEditorProject(onlineWorldEditorCards[0].libraryId||onlineWorldEditorCards[0].cardId);
+  const result=await api.listOnlineWorldEditorProjects();
+  onlineWorldEditorProjects=Array.isArray(result?.projects)?result.projects:[];
+  onlineWorldEditorCards=onlineWorldEditorProjects.filter(item=>!item.isDraft);
+  renderOnlineWorldEditorProjects();
+  if(!selectedOnlineWorldEditorId&&onlineWorldEditorProjects[0]){
+    await loadOnlineWorldEditorProject(onlineWorldEditorProjects[0].libraryId||onlineWorldEditorProjects[0].cardId);
+  }
 }
 
 document.querySelector("#online-world-unopened-back").addEventListener("click",()=>invoke(async()=>{
@@ -1627,16 +1631,35 @@ document.querySelector("#online-editor-back").addEventListener("click",async()=>
   if(onlineWorldEditorDirty&&!await confirmAction("当前编辑尚未保存，确定返回主页吗？",{title:"离开编辑器",acceptText:"返回主页"}))return;
   showPage("home");
 });
+async function openOnlineWorldEditorProjects(){
+  try{
+    await refreshOnlineWorldEditorCards();
+    const picker=document.querySelector("#online-editor-project-picker");
+    if(picker?.showModal)picker.showModal();
+  }catch(error){toast(friendlyError(error))}
+}
+document.querySelector("#online-editor-new").addEventListener("click",openOnlineWorldEditorProjects);
+document.querySelector("#online-editor-open-projects").addEventListener("click",openOnlineWorldEditorProjects);
+document.querySelector("#online-editor-create-blank").addEventListener("click",()=>invoke(async()=>{
+  const result=await api.createOnlineWorldCardEditor();
+  onlineWorldEditorProjects=Array.isArray(result?.editorProjects)?result.editorProjects:onlineWorldEditorProjects;
+  selectedOnlineWorldEditorId=result.libraryId;
+  onlineWorldEditorProject=result.project;
+  document.querySelector("#online-editor-project-picker")?.close();
+  renderOnlineWorldEditorProject();
+  renderOnlineWorldEditorProjects();
+  toast("已创建本地草稿，保存并同步时才会创建伴生作品");
+}).catch(()=>{}));
 document.querySelector("#online-editor-import").addEventListener("click",()=>invoke(async()=>{
-  const result=await api.importOnlineWorldCard();
+  const result=await api.importOnlineWorldEditorCard();
   if(result?.canceled)return;
-  onlineWorldEditorCards=Array.isArray(result?.cards)?result.cards:[];
+  onlineWorldEditorProjects=Array.isArray(result?.editorProjects)?result.editorProjects:onlineWorldEditorProjects;
+  onlineWorldEditorCards=onlineWorldEditorProjects.filter(item=>!item.isDraft);
   const imported=result?.importedCards?.[0]||result?.imported;
-  renderOnlineWorldEditorCards();
+  renderOnlineWorldEditorProjects();
   if(imported)await loadOnlineWorldEditorProject(imported.libraryId||imported.cardId);
   toast("游戏卡已导入编辑器");
 }).catch(()=>{}));
-document.querySelector("#online-editor-search-input").addEventListener("input",renderOnlineWorldEditorCards);
 document.querySelectorAll("[data-editor-tab]").forEach(button=>button.addEventListener("click",()=>{
   const tab=button.dataset.editorTab;
   document.querySelectorAll("[data-editor-tab]").forEach(item=>item.classList.toggle("active",item===button));
@@ -1648,39 +1671,38 @@ document.querySelector("#online-editor-save").addEventListener("click",()=>invok
   const result=await api.saveOnlineWorldCardEditor(selectedOnlineWorldEditorId,project,{publish:false});
   onlineWorldEditorProject=result.project;
   onlineWorldEditorCards=result.cards||onlineWorldEditorCards;
+  onlineWorldEditorProjects=result.editorProjects||onlineWorldEditorProjects;
   renderOnlineWorldEditorProject();
-  toast("本地游戏卡已保存并完成校验");
+  renderOnlineWorldEditorProjects();
+  toast(result.draft?"本地草稿已保存，尚未创建伴生作品":"本地游戏卡已保存并完成校验");
 }).catch(()=>{}));
 document.querySelector("#online-editor-publish").addEventListener("click",()=>invoke(async()=>{
   const project=syncOnlineWorldEditorFromForm();
   if(!state?.account?.accountId)throw new Error("请先登录风月账号");
   const card=onlineWorldEditorCards.find(item=>(item.libraryId||item.cardId)===selectedOnlineWorldEditorId);
-  if(!card?.isCurrentUserAuthor)throw new Error("只有伴生作品作者可以同步作品");
-  if(!await confirmAction("这会把当前编辑器内容保存到本地游戏卡，并上传到伴生作品后回读验证。是否继续？",{title:"同步在线游戏作品",acceptText:"保存并同步"}))return;
+  if(!onlineWorldEditorProject?.isDraft&&!card?.isCurrentUserAuthor)throw new Error("只有伴生作品作者可以同步作品");
+  const message=onlineWorldEditorProject?.isDraft
+    ?"这会创建一个新的风月作品，并把当前全部配置导入后生成游戏卡绑定。是否继续？"
+    :"这会把当前编辑器内容保存到本地游戏卡，并上传到伴生作品后回读验证。是否继续？";
+  if(!await confirmAction(message,{title:"同步在线游戏作品",acceptText:"保存并同步"}))return;
   const result=await api.saveOnlineWorldCardEditor(selectedOnlineWorldEditorId,project,{publish:true});
   onlineWorldEditorProject=result.project;
   onlineWorldEditorCards=result.cards||onlineWorldEditorCards;
+  onlineWorldEditorProjects=result.editorProjects||onlineWorldEditorProjects;
   selectedOnlineWorldEditorId=result.card?.libraryId||selectedOnlineWorldEditorId;
   renderOnlineWorldEditorProject();
+  renderOnlineWorldEditorProjects();
   toast("作品配置已同步并通过回读校验");
-}).catch(()=>{}));
-document.querySelector("#online-editor-create-work").addEventListener("click",()=>invoke(async()=>{
-  const project=syncOnlineWorldEditorFromForm();
-  if(!await confirmAction("这会创建一个新的风月作品，导入当前全部配置并生成新的游戏卡绑定。是否继续？",{title:"创建新伴生作品",acceptText:"创建并同步"}))return;
-  const result=await api.saveOnlineWorldCardEditor(selectedOnlineWorldEditorId,project,{publish:true,createWork:true});
-  onlineWorldEditorCards=result.cards||onlineWorldEditorCards;
-  selectedOnlineWorldEditorId=result.card?.libraryId||selectedOnlineWorldEditorId;
-  onlineWorldEditorProject=result.project;
-  renderOnlineWorldEditorProject();
-  toast("新伴生作品已创建，配置已回读并保存为新游戏卡");
 }).catch(()=>{}));
 document.querySelector("#online-editor-run-agents").addEventListener("click",()=>invoke(async()=>{
   const project=syncOnlineWorldEditorFromForm();
   const goal=editorValue("online-editor-agent-goal").trim();
   if(!goal)throw new Error("请填写本次编辑目标");
+  if(onlineWorldEditorProject?.isDraft)throw new Error("请先保存并同步草稿，绑定伴生作品后再运行编辑中枢");
   const saved=await api.saveOnlineWorldCardEditor(selectedOnlineWorldEditorId,project,{publish:false});
   onlineWorldEditorProject=saved.project;
   onlineWorldEditorCards=saved.cards||onlineWorldEditorCards;
+  onlineWorldEditorProjects=saved.editorProjects||onlineWorldEditorProjects;
   renderOnlineWorldEditorProject();
   const result=await api.runOnlineWorldEditorAgents({libraryId:selectedOnlineWorldEditorId,goal});
   onlineWorldEditorProject=result.project;

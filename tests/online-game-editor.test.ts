@@ -14,8 +14,11 @@ const {
 const {
   DEFAULT_AGENT_COMPONENTS,
   createEditorProject,
+  createBlankEditorProject,
   loadEditorProjects,
   normalizeEditorProject,
+  normalizeAgentSynthesis,
+  applyAgentSynthesis,
   parseAgentAnswer,
   saveEditorProjects
 } = require("../electron/online-game-editor.cjs");
@@ -67,6 +70,42 @@ describe("online game editor projects", () => {
     expect(loaded.projects["card::work"].agents.find((item: any) => item.id === "architect").enabled).toBe(false);
     expect(parseAgentAnswer("```json\n{\"approved\":true}\n```")).toEqual({ approved: true });
     expect(parseAgentAnswer("plain text")).toEqual({ text: "plain text" });
+  });
+
+  it("creates a local-only blank draft without a companion work", () => {
+    const project = createBlankEditorProject({
+      origin: "https://staging.aiero.cc",
+      accountId: "39404f0e-7678-45a1-86c6-9a21116bacbd"
+    });
+    expect(project.isDraft).toBe(true);
+    expect(project.card.companion.workId).toBe("");
+    expect(project.card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
+    expect(project.program.html).toContain("未命名游戏");
+    expect(project.agents.every((item: any) => item.workId === "")).toBe(true);
+  });
+
+  it("returns only an allowlisted synthesis patch to the editor project", () => {
+    const project = createBlankEditorProject();
+    const synthesis = normalizeAgentSynthesis({
+      summary: "补齐开局说明",
+      configurationPatch: {
+        app: { name: "新名字", summary: "新简介", id: "不要覆盖" },
+        pre_prompt: "新的世界观",
+        world_book: [{ key: "opening", value: "开局" }],
+        program: "<script>ignored</script>",
+        companion: { workId: "ignored" }
+      }
+    });
+    expect(synthesis.configurationPatch).toEqual({
+      app: { name: "新名字", summary: "新简介" },
+      pre_prompt: "新的世界观",
+      world_book: [{ key: "opening", value: "开局" }]
+    });
+    const applied = applyAgentSynthesis(project, synthesis);
+    expect(applied.configuration.app.id).toBe("");
+    expect(applied.configuration.app.name).toBe("新名字");
+    expect(applied.configuration.pre_prompt).toBe("新的世界观");
+    expect(applied.program.html).toBe(project.program.html);
   });
 
   it("prioritizes editor model families before general catalog ranking", () => {

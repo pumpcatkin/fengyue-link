@@ -101,6 +101,52 @@
 @media(max-width:900px){.online-editor-header{align-items:flex-start;flex-direction:column;padding:16px 18px}.online-editor-actions{justify-content:flex-start}.online-editor-layout{grid-template-columns:190px minmax(0,1fr)}.online-editor-form-grid,.online-editor-info-grid{grid-template-columns:1fr}.online-editor-form-grid .wide{grid-column:auto}.online-editor-agent-components{grid-template-columns:1fr}}
 @media(max-width:620px){.online-editor-layout{grid-template-columns:1fr}.online-editor-sidebar{max-height:220px;border-right:0;border-bottom:1px solid #293847}.online-editor-side-note{display:none}.online-editor-main{padding:16px}.online-editor-agent-toolbar{grid-template-columns:1fr}}
 
+/* Editor workspace v2: vertical document flow with a fixed navigation rail. */
+.online-world-editor-page{display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden}
+.online-editor-header{flex:0 0 auto;align-items:flex-start}
+.online-editor-header>div:first-child{min-width:0}
+.online-editor-header h1,.online-editor-header p{overflow-wrap:anywhere}
+.online-editor-actions{min-width:0;max-width:100%}
+.online-editor-layout{flex:1 0 auto;min-height:calc(100vh - 112px);grid-template-columns:238px minmax(0,1fr);align-items:stretch}
+.online-editor-sidebar{position:sticky;top:0;align-self:start;grid-template-rows:auto auto 1fr;min-height:calc(100vh - 112px);overflow:hidden}
+.online-editor-project-menu{display:grid;gap:7px;border:1px solid #293847;background:#151f2a;padding:11px}
+.online-editor-project-menu span{color:#7f94a5;font-size:10px;text-transform:uppercase}
+.online-editor-project-menu b{overflow-wrap:anywhere;color:#eef5f8;font-size:13px}
+.online-editor-project-menu button{font-size:10px}
+.online-editor-sidebar .online-editor-tabs{display:grid;gap:4px;border:0;margin:0;padding:0;overflow:visible}
+.online-editor-sidebar .online-editor-tabs button{border:1px solid transparent;border-radius:3px;padding:10px;text-align:left}
+.online-editor-sidebar .online-editor-tabs button.active{border-color:#75deb455;background:#75deb414}
+.online-editor-side-note{align-self:end}
+.online-editor-main{overflow:visible;padding-bottom:34px}
+.online-editor-workspace{display:grid;gap:18px;min-width:0}
+.online-editor-pane{max-width:none}
+.online-editor-agent-dock{display:grid;gap:12px;border-top:1px solid #33495a;background:#111b25;padding:16px 0 0}
+.online-editor-agent-dock-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.online-editor-agent-dock-head>div{display:grid;gap:4px;min-width:0}
+.online-editor-agent-dock-head b{color:#bff5da;font-size:13px}
+.online-editor-agent-dock-head small{color:#8ea3b2;font-size:10px;line-height:1.5}
+.online-editor-agent-dock-body{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:end}
+.online-editor-agent-dock-body textarea{min-height:58px;max-height:180px;resize:vertical}
+.online-editor-agent-dock-body button{min-height:42px}
+.online-editor-agent-dock .online-editor-agent-progress{border:0;background:transparent;padding:0}
+.online-editor-agent-result{min-height:0;max-height:360px;margin:0}
+.online-editor-project-picker{width:min(520px,calc(100vw - 32px));max-width:100%;border:1px solid #526577;background:#111b25;color:#eef3f7;padding:0}
+.online-editor-project-picker::backdrop{background:#0009}
+.online-editor-project-picker form{display:grid;gap:14px;padding:18px}
+.online-editor-project-picker header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.online-editor-project-picker header>div{display:grid;gap:4px}
+.online-editor-project-picker header b{font-size:16px}
+.online-editor-project-picker header small{color:#7f94a5;font-size:10px}
+.online-editor-project-list{display:grid;gap:6px;max-height:46vh;overflow:auto}
+.online-editor-project-item{display:grid;gap:4px;border-radius:3px;padding:10px;text-align:left}
+.online-editor-project-item b,.online-editor-project-item small{overflow-wrap:anywhere}
+.online-editor-project-item b{color:#eef3f7;font-size:12px}
+.online-editor-project-item small{color:#8ea3b2;font-size:10px}
+.online-editor-project-item.active{border-color:#75deb477;background:#75deb414}
+.online-editor-project-empty{border:1px dashed #526577;padding:16px;color:#8297a7;font-size:11px;line-height:1.5;text-align:center}
+@media(max-width:900px){.online-editor-layout{grid-template-columns:190px minmax(0,1fr)}.online-editor-sidebar{min-height:calc(100vh - 160px)}}
+@media(max-width:620px){.online-editor-header{padding:14px 16px}.online-editor-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.online-editor-actions button{min-width:0}.online-editor-layout{display:block;min-height:0}.online-editor-sidebar{position:static;display:grid;min-height:0;max-height:none;border-right:0;border-bottom:1px solid #293847;padding:10px}.online-editor-sidebar .online-editor-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}.online-editor-main{padding:18px 16px 30px}.online-editor-agent-dock-head{display:grid;gap:8px}.online-editor-agent-dock-body{grid-template-columns:1fr}.online-editor-project-picker{margin:auto}}
+
 /* The game library stays a dark media surface in both application themes. */
 .online-world-page{background:#0e141b!important;color:#eef2f4!important}.online-world-library{background:linear-gradient(145deg,#18232e 0,#0d141b 48%,#0b1117 100%)!important}.online-world-library::before{background:radial-gradient(circle at 68% -12%,rgba(83,155,197,.24),transparent 43%)!important}.online-world-library-head{border-bottom:1px solid rgba(136,170,193,.16)!important;background:rgba(13,20,27,.75)!important;box-shadow:0 8px 24px rgba(0,0,0,.16)!important;backdrop-filter:blur(16px)!important}.online-world-library-head small{color:#66c0f4!important}.online-world-library-head h1{color:#f2f6f8!important}.online-world-library-head p{color:#7f94a5!important}
 .online-world-library-sidebar{border-right:1px solid rgba(139,174,198,.16)!important;background:rgba(17,25,34,.92)!important}.online-world-library-count{color:#7f94a5!important}.online-world-library-count b{background:#263746!important;color:#9db5c6!important}.online-world-library-list-item{color:#aab8c3!important}.online-world-library-list-item>i{border:1px solid rgba(255,255,255,.14)!important;background:linear-gradient(145deg,#36566b,#162631)!important;color:#d8edf9!important}.online-world-library-list-item small{color:#708798!important}.online-world-library-list-item.active small{color:#b8d8e9!important}

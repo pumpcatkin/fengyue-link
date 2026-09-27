@@ -49,37 +49,38 @@
     </section>
     <section id="online-world-editor-page" class="online-world-editor-page hidden">
       <header class="online-editor-header">
-        <div><small>在线游戏编辑器</small><h1>游戏卡工作区</h1><p>导入后分栏编辑，保存时重新组包并执行完整校验。</p></div>
+        <div><small>在线游戏编辑器</small><h1>游戏卡工作区</h1><p>先保存本地草稿，保存并同步时才创建或更新伴生作品。</p></div>
         <div class="online-editor-actions">
+          <button id="online-editor-new" type="button">新建游戏卡</button>
           <button id="online-editor-import" type="button">导入游戏卡</button>
-          <button id="online-editor-save" type="button" class="primary">保存本地游戏卡</button>
+          <button id="online-editor-save" type="button" class="primary">保存本地草稿</button>
           <button id="online-editor-publish" type="button">保存并同步作品</button>
-          <button id="online-editor-create-work" type="button">创建新作品并同步</button>
           <button id="online-editor-back" type="button">返回主页</button>
         </div>
       </header>
       <div class="online-editor-layout">
         <aside class="online-editor-sidebar">
-          <label class="online-editor-search"><span class="visually-hidden">搜索游戏卡</span><input id="online-editor-search-input" type="search" placeholder="搜索游戏卡"></label>
-          <div class="online-editor-sidebar-title"><span>本地项目</span><b id="online-editor-card-count">0</b></div>
-          <div id="online-editor-card-list" class="online-editor-card-list"></div>
-          <div class="online-editor-side-note">服主发布前会回读作品配置；游客打开游戏时只更新本地程序快照，不改动服主本地 JSON。</div>
+          <div class="online-editor-project-menu">
+            <span>当前项目</span>
+            <b id="online-editor-project-menu-title">尚未选择</b>
+            <button id="online-editor-open-projects" type="button">选择本地项目</button>
+          </div>
+          <nav class="online-editor-tabs" aria-label="编辑器分区">
+            <button type="button" data-editor-tab="overview" class="active">概览</button>
+            <button type="button" data-editor-tab="program">程序</button>
+            <button type="button" data-editor-tab="prompts">提示词</button>
+            <button type="button" data-editor-tab="world-book">世界书</button>
+            <button type="button" data-editor-tab="advanced">全部配置</button>
+          </nav>
+          <div class="online-editor-side-note">只有游戏卡服主能在这里识别和保存本地项目。访客仍可在游戏库中打开别人分享的游戏卡，但不能通过编辑器上传或修改。</div>
         </aside>
         <main class="online-editor-main">
-          <div id="online-editor-empty" class="online-editor-empty"><strong>先导入一张游戏卡</strong><span>支持现有 fyow.game-card/1 文件，也可从在线游戏库选择已导入卡片。</span></div>
+          <div id="online-editor-empty" class="online-editor-empty"><strong>新建或导入一张游戏卡</strong><span>新建时先保存为本地草稿，不会立即创建伴生作品。</span></div>
           <section id="online-editor-workspace" class="hidden">
             <div class="online-editor-project-head">
               <div><span id="online-editor-project-label"></span><small id="online-editor-project-meta"></small></div>
               <span id="online-editor-validation-badge" class="online-editor-validation-badge"></span>
             </div>
-            <nav class="online-editor-tabs" aria-label="编辑器分区">
-              <button type="button" data-editor-tab="overview" class="active">概览</button>
-              <button type="button" data-editor-tab="program">程序</button>
-              <button type="button" data-editor-tab="prompts">提示词</button>
-              <button type="button" data-editor-tab="world-book">世界书</button>
-              <button type="button" data-editor-tab="agents">Agent 协作</button>
-              <button type="button" data-editor-tab="advanced">全部配置</button>
-            </nav>
             <section class="online-editor-pane active" data-editor-pane="overview">
               <div class="online-editor-form-grid">
                 <label>游戏卡标题<input id="online-editor-title" maxlength="80"></label>
@@ -101,19 +102,25 @@
               <label class="online-editor-block-label">世界书 JSON<textarea id="online-editor-world-book" class="code-editor" spellcheck="false"></textarea></label>
               <small class="online-editor-hint">保留平台导出的完整条目字段；编辑器不会把世界书关键词当成宿主 API。</small>
             </section>
-            <section class="online-editor-pane" data-editor-pane="agents">
-              <div class="online-editor-agent-toolbar"><label>本次编辑目标<textarea id="online-editor-agent-goal" maxlength="4000" placeholder="例如：把开局流程改为三阶段探索，并补齐任务 schema 和断线恢复文案"></textarea></label><button id="online-editor-run-agents" type="button" class="primary">运行协作 Agent</button></div>
-              <div id="online-editor-agent-components" class="online-editor-agent-components"></div>
-              <div id="online-editor-agent-progress" class="online-editor-agent-progress"><span>尚未运行 Agent</span></div>
-              <pre id="online-editor-agent-result" class="online-editor-agent-result"></pre>
-            </section>
             <section class="online-editor-pane" data-editor-pane="advanced">
               <label class="online-editor-block-label">完整作品配置 JSON<textarea id="online-editor-config-json" class="code-editor" spellcheck="false"></textarea></label>
               <small class="online-editor-hint">这是导入卡中的完整配置快照。修改结构化分区后，保存时会以分区内容覆盖这里。</small>
             </section>
+            <section class="online-editor-agent-dock" aria-label="默认 Agent 协作">
+              <div class="online-editor-agent-dock-head"><div><b>编辑中枢</b><small>默认协调架构、提示词、界面和校验 Agent，并把结果交回中枢模型判断后应用。</small></div><span id="online-editor-agent-progress" class="online-editor-agent-progress"><span>输入目标后开始协作</span></span></div>
+              <div class="online-editor-agent-dock-body"><textarea id="online-editor-agent-goal" maxlength="4000" placeholder="描述你想修改的游戏卡内容，例如：把开局流程改为三阶段探索，并补齐任务提示词和断线恢复文案"></textarea><button id="online-editor-run-agents" type="button" class="primary" aria-label="发送编辑目标">发送</button></div>
+              <pre id="online-editor-agent-result" class="online-editor-agent-result"></pre>
+            </section>
           </section>
         </main>
       </div>
+      <dialog id="online-editor-project-picker" class="online-editor-project-picker">
+        <form method="dialog">
+          <header><div><b>选择本地项目</b><small>仅显示当前账号作为服主的项目</small></div><button value="cancel" type="submit">关闭</button></header>
+          <div id="online-editor-project-list" class="online-editor-project-list"></div>
+          <button id="online-editor-create-blank" value="cancel" type="button" class="primary">从零新建游戏卡</button>
+        </form>
+      </dialog>
     </section>
     <section id="profiles-page" class="profiles-page hidden">
       <div class="profiles-card">

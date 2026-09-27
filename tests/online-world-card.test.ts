@@ -13,6 +13,7 @@ const {
   createBundledGridCard,
   normalizeProgramText,
   createExportedGameCard,
+  createGameCardFromEditorProject,
   refreshGameCardProgram,
   validateGameCard,
   rebindGameCard,
@@ -38,6 +39,34 @@ describe("online world game cards", () => {
     expect(normalizeProgramText("界面\r\n样式\r脚本")).toBe("界面\n样式\n脚本");
     const card = createBundledGridCard();
     expect(parseProgram(card.companion.configuration.app.description, card.gameId).digest).toBe(card.program.digest);
+  });
+
+  it("builds a valid card from a draft only after a work binding is supplied", () => {
+    const project = {
+      card: {
+        cardId: "cc.aiero.fyow.local.test",
+        gameId: "fyow-local-test",
+        title: "草稿游戏",
+        version: 0,
+        companion: { name: "草稿作品", summary: "", language: "zh-Hans" }
+      },
+      program: { html: "<!doctype html><html><body><main>draft</main></body></html>" },
+      configuration: {
+        app: { name: "草稿作品", summary: "", language: "zh-Hans" },
+        pre_text: "",
+        pre_prompt: "",
+        post_text: "",
+        world_book: []
+      }
+    };
+    const card = validateGameCard(createGameCardFromEditorProject(project, {
+      origin: "https://staging.aiero.cc",
+      authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd",
+      workId: GRID_COMPANION_WORK_ID
+    }));
+    expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
+    expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
+    expect(card.program.digest).toBeTruthy();
   });
 
   it("ships one fixed companion work and its complete creation-page snapshot", () => {

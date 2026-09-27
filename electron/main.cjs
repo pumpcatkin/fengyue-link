@@ -74,6 +74,7 @@ const {
   rebindGameCard,
   rebindGameCardWithAuthor,
   createEditedGameCard,
+  createGameCardFromEditorProject,
   decomposeGameCard
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
@@ -85,7 +86,10 @@ const {
   loadEditorProjects,
   saveEditorProjects,
   createEditorProject,
+  createBlankEditorProject,
   parseAgentAnswer,
+  normalizeAgentSynthesis,
+  applyAgentSynthesis,
   agentJobId
 } = require("./online-game-editor.cjs");
 
@@ -3873,8 +3877,85 @@ class AccountBackend {
     };
   }
 
+  isOnlineWorldEditorOwner(card) {
+    const accountId = String(this.account.accountId || "");
+    return Boolean(accountId && card?.companion?.authorAccountId === accountId);
+  }
+
+  assertOnlineWorldEditorOwner(card) {
+    if (!this.isOnlineWorldEditorOwner(card)) throw new Error("只有游戏卡服主可以识别和编辑本地项目");
+  }
+
+  summarizeOnlineWorldEditorProject(project, libraryId) {
+    const card = project?.card || {};
+    const companion = card.companion || {};
+    const key = String(libraryId || "");
+    return {
+      libraryId: key,
+      cardId: String(card.cardId || ""),
+      gameId: String(card.gameId || ""),
+      title: String(card.title || project?.configuration?.app?.name || "未命名游戏"),
+      version: Number(card.version || 0),
+      workId: String(companion.workId || ""),
+      workName: String(companion.name || ""),
+      authorAccountId: String(companion.authorAccountId || this.account.accountId || ""),
+      isCurrentUserAuthor: true,
+      isDraft: Boolean(project?.isDraft || key.startsWith("draft::"))
+    };
+  }
+
+  listOnlineWorldEditorProjects() {
+    const projects = [];
+    const accountId = String(this.account.accountId || "");
+    if (!accountId) return { projects: [], selectedId: null };
+    for (const [libraryId, card] of this.onlineWorldCards.entries()) {
+      if (!this.isOnlineWorldEditorOwner(card)) continue;
+      const project = this.onlineWorldEditorProjects.projects[libraryId] || createEditorProject(card);
+      projects.push({
+        ...summarizeGameCard(card, libraryId),
+        isCurrentUserAuthor: true,
+        isDraft: false
+      });
+      if (!this.onlineWorldEditorProjects.projects[libraryId]) {
+        this.onlineWorldEditorProjects.projects[libraryId] = project;
+      }
+    }
+    for (const [libraryId, project] of Object.entries(this.onlineWorldEditorProjects.projects)) {
+      if (!libraryId.startsWith("draft::") || String(project?.card?.companion?.authorAccountId || "") !== accountId) continue;
+      projects.push(this.summarizeOnlineWorldEditorProject(project, libraryId));
+    }
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    return { projects, selectedId: projects[0]?.libraryId || null };
+  }
+
+  async createOnlineWorldCardEditor() {
+    this.assertToolLoggedIn();
+    const project = createBlankEditorProject({
+      origin: this.origin,
+      accountId: this.account.accountId
+    });
+    const libraryId = `draft::${project.draftId}`;
+    this.onlineWorldEditorProjects.projects[libraryId] = project;
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    return {
+      project,
+      libraryId,
+      editorProjects: this.listOnlineWorldEditorProjects().projects
+    };
+  }
+
   onlineWorldEditorProject(libraryId) {
+    const requested = String(libraryId || "");
+    if (requested.startsWith("draft::")) {
+      const storedDraft = this.onlineWorldEditorProjects.projects[requested];
+      if (!storedDraft) throw new Error("本地草稿不存在");
+      if (String(storedDraft.card?.companion?.authorAccountId || "") !== String(this.account.accountId || "")) {
+        throw new Error("只有草稿创建者可以识别本地项目");
+      }
+      return normalizeEditorProject(storedDraft);
+    }
     const card = this.onlineWorldCard(libraryId);
+    this.assertOnlineWorldEditorOwner(card);
     const key = gameCardLibraryKey(card);
     const stored = this.onlineWorldEditorProjects.projects[key];
     if (stored) return normalizeEditorProject(stored, card.companion.workId);
@@ -3916,9 +3997,37 @@ class AccountBackend {
   }
 
   async saveOnlineWorldCardEditor(libraryId, project = {}, options = {}) {
-    const current = this.onlineWorldCard(libraryId);
-    const input = normalizeEditorProject(project, current.companion.workId);
-    const configuration = JSON.parse(JSON.stringify(input.configuration || current.companion.configuration));
+    const requested = String(libraryId || "");
+    const isDraft = requested.startsWith("draft::");
+    const current = isDraft ? null : this.onlineWorldCard(libraryId);
+    if (current) this.assertOnlineWorldEditorOwner(current);
+    if (isDraft && String(project?.card?.companion?.authorAccountId || this.account.accountId || "") !== String(this.account.accountId || "")) {
+      throw new Error("只有草稿创建者可以保存本地项目");
+    }
+    const input = normalizeEditorProject(project, current?.companion?.workId || "");
+    if (isDraft && !options.publish) {
+      input.isDraft = true;
+      input.draftId ||= requested.slice("draft::".length);
+      input.card ||= {};
+      input.card.companion ||= {};
+      input.card.companion.origin ||= this.origin;
+      input.card.companion.authorAccountId ||= this.account.accountId;
+      this.onlineWorldEditorProjects.projects[requested] = input;
+      saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+      return {
+        project: input,
+        card: null,
+        published: false,
+        draft: true,
+        cards: (await this.listOnlineWorldCards()).cards,
+        editorProjects: this.listOnlineWorldEditorProjects().projects
+      };
+    }
+    const baseCard = current || createGameCardFromEditorProject(input, {
+      origin: this.origin,
+      authorAccountId: this.account.accountId
+    });
+    const configuration = JSON.parse(JSON.stringify(input.configuration || baseCard.companion.configuration));
     configuration.fengyue_editor = {
       ...(configuration.fengyue_editor && typeof configuration.fengyue_editor === "object" ? configuration.fengyue_editor : {}),
       agents: input.agents
@@ -3926,28 +4035,36 @@ class AccountBackend {
     const programHtml = String(input.program?.html || "").trim();
     if (programHtml) {
       const packed = packProgram({
-        gameId: current.gameId,
-        title: String(configuration.app?.name || current.title),
+        gameId: baseCard.gameId,
+        title: String(configuration.app?.name || baseCard.title),
         html: programHtml
       });
       configuration.app ||= {};
       configuration.app.description = packed.envelope;
     }
-    const edited = createEditedGameCard(current, {
+    const edited = current ? createEditedGameCard(current, {
       title: input.card?.title || current.title,
       configuration,
-      version: Math.max(Number(current.version || 0) + 1, Number(input.card?.version || 0))
+      version: Math.max(Number(current.version || 0) + 1, Number(input.card?.version || 0)),
+      programHtml: ""
+    }) : createGameCardFromEditorProject({ ...input, configuration }, {
+      origin: this.origin,
+      authorAccountId: this.account.accountId,
+      workId: baseCard.companion.workId
     });
     const shouldPublish = Boolean(options.publish);
     let saved = edited;
     if (shouldPublish) {
-      if (options.createWork) saved = await this.onlineWorldService.createGameCardCloud(edited, { name: edited.title });
+      if (isDraft || options.createWork) saved = await this.onlineWorldService.createGameCardCloud(edited, { name: edited.title });
       else saved = await this.onlineWorldService.updateGameCardCloud(edited);
     }
-    this.persistEditedOnlineWorldCard(current, saved);
+    if (!current && !shouldPublish) throw new Error("新建游戏卡请先保存为草稿，或保存并同步以创建伴生作品");
+    if (current) this.persistEditedOnlineWorldCard(current, saved);
     const key = gameCardLibraryKey(saved);
     this.onlineWorldEditorProjects.projects[key] = {
       ...input,
+      isDraft: false,
+      draftId: null,
       card: {
         ...input.card,
         title: saved.title,
@@ -3973,13 +4090,15 @@ class AccountBackend {
       },
       updatedAt: Date.now()
     };
-    if (key !== gameCardLibraryKey(current)) delete this.onlineWorldEditorProjects.projects[gameCardLibraryKey(current)];
+    if (isDraft) delete this.onlineWorldEditorProjects.projects[requested];
+    if (current && key !== gameCardLibraryKey(current)) delete this.onlineWorldEditorProjects.projects[gameCardLibraryKey(current)];
     saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
     return {
       project: this.onlineWorldEditorProjects.projects[key],
       card: summarizeGameCard(saved, key),
       published: shouldPublish,
-      ...await this.listOnlineWorldCards()
+      ...await this.listOnlineWorldCards(),
+      editorProjects: this.listOnlineWorldEditorProjects().projects
     };
   }
 
@@ -4133,6 +4252,22 @@ class AccountBackend {
     });
     if (selected.canceled || !selected.filePaths.length) return { canceled: true, ...await this.listOnlineWorldCards() };
     return this.importOnlineWorldCardFiles(selected.filePaths);
+  }
+
+  async importOnlineWorldEditorCard() {
+    this.assertToolLoggedIn();
+    const selected = await dialog.showOpenDialog(this.window, {
+      title: "导入可编辑游戏卡",
+      properties: ["openFile", "multiSelections"],
+      filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
+    });
+    if (selected.canceled || !selected.filePaths.length) {
+      return { canceled: true, editorProjects: this.listOnlineWorldEditorProjects().projects };
+    }
+    const loaded = selected.filePaths.map(file => readGameCardFile(file));
+    for (const { card } of loaded) this.assertOnlineWorldEditorOwner(card);
+    const result = await this.importOnlineWorldCardFiles(selected.filePaths);
+    return { ...result, editorProjects: this.listOnlineWorldEditorProjects().projects };
   }
 
   async importOnlineWorldCardFiles(files) {
@@ -4618,6 +4753,7 @@ class AccountBackend {
     this.assertToolLoggedIn();
     if (this.room) throw new Error("房间进行期间不能运行在线游戏编辑器 Agent");
     const card = this.onlineWorldCard(payload.libraryId || payload.cardId);
+    this.assertOnlineWorldEditorOwner(card);
     const key = gameCardLibraryKey(card);
     const currentProject = this.onlineWorldEditorProject(key);
     const goal = String(payload.goal || "").trim().slice(0, 4000);
@@ -4632,6 +4768,7 @@ class AccountBackend {
       goal,
       currentAgent: null,
       agents: components.map(item => ({ id: item.id, label: item.label, role: item.role, status: "queued", model: null, error: null })),
+      synthesis: { id: "synthesizer", label: "中枢审查与合并", status: "queued", model: null, error: null },
       startedAt: Date.now(),
       updatedAt: Date.now(),
       result: null
@@ -4647,7 +4784,7 @@ class AccountBackend {
       programDigest: currentProject.validation?.programDigest || card.program.digest
     };
     const results = [];
-    const agentInstruction = item => {
+    const agentInstruction = (item, priorOutputs) => {
       const schemas = {
         architect: '{"summary":"...","coreLoop":["..."],"stateSchema":{},"eventSchema":{},"tasks":[{"id":"...","input":{},"output":{}}]}',
         "prompt-designer": '{"preText":"...","prePrompt":"...","postText":"...","worldBook":[{"group":"...","key":"...","key_region":2,"value":"...","enable":true,"probability":100,"sort":0,"depth":0}]}',
@@ -4657,6 +4794,7 @@ class AccountBackend {
       return `你是${item.label}，负责${item.role}。这是在线游戏卡编辑器的受信 Agent 协作步骤。
 目标：${goal}
 当前项目：${JSON.stringify(compactProject)}
+前序 Agent 输出（需要核对、补充或指出冲突）：${JSON.stringify(priorOutputs).slice(0, 30000)}
 只输出一个 JSON 对象，不要输出 Markdown 解释。建议输出结构：${schemas[item.id] || '{"result":"..."}'}。
 不要生成账号、Token、Cookie、平台 HTTP、任意本地文件或主进程代码；所有规则必须可被宿主校验，程序只运行在受限卡片沙箱中。`;
     };
@@ -4667,10 +4805,10 @@ class AccountBackend {
         if (record) record.status = "running";
         this.onlineWorldEditorJob.updatedAt = Date.now();
         this.emit();
-        const targetWorkId = item.workId || card.companion.workId;
+        const targetWorkId = card.companion.workId;
         const query = `[[FYOW:EDITOR:${item.id}:v1]]\n${JSON.stringify({
           schema: "fyow.editor-agent/1",
-          input: { role: item.id, instruction: agentInstruction(item) }
+          input: { role: item.id, instruction: agentInstruction(item, results.map(result => ({ id: result.id, output: result.output }))) }
         })}`;
         try {
           const result = await this.withAutoModel(
@@ -4695,12 +4833,53 @@ class AccountBackend {
         this.onlineWorldEditorJob.updatedAt = Date.now();
         this.emit();
       }
-      const draft = { schema: "fyow.editor-agent-draft/1", goal, generatedAt: Date.now(), agents: results };
-      const nextProject = {
+      const synthesisRecord = this.onlineWorldEditorJob.synthesis;
+      this.onlineWorldEditorJob.currentAgent = "synthesizer";
+      synthesisRecord.status = "running";
+      this.onlineWorldEditorJob.updatedAt = Date.now();
+      this.emit();
+      const synthesisInstruction = `你是在线游戏编辑器的中枢审查模型。请综合多个 Agent 输出，判断冲突和可执行性，只把安全、明确、属于作品配置的数据写入 configurationPatch。
+目标：${goal}
+当前项目：${JSON.stringify(compactProject)}
+Agent 输出：${JSON.stringify(results).slice(0, 50000)}
+只输出一个 JSON 对象，格式为：{"summary":"判断与修改摘要","configurationPatch":{"app":{"name":"可选","summary":"可选"},"pre_text":"可选","pre_prompt":"可选","post_text":"可选","world_book":[]},"validation":{"approved":true,"issues":[]},"questions":[]}
+configurationPatch 只能包含 app.name、app.summary、pre_text、pre_prompt、post_text、world_book；不要改 app.id、程序代码、伴生作品编号、Agent 工具绑定或任何平台权限字段。若没有足够依据，返回空 configurationPatch，并在 questions 中说明。`;
+      const synthesisQuery = `[[FYOW:EDITOR:synthesizer:v1]]\n${JSON.stringify({
+        schema: "fyow.editor-synthesis-request/1",
+        input: { goal, project: compactProject, agentOutputs: results, instruction: synthesisInstruction }
+      })}`;
+      let synthesis;
+      try {
+        const result = await this.withAutoModel(
+          card.companion.workId,
+          "编辑器 · 中枢审查与合并",
+          ({ signal }) => this.requestEditorModelForWork(card.companion.workId, synthesisQuery, {
+            signal,
+            label: "中枢审查与合并"
+          }),
+          { scope: "online-world-editor" }
+        );
+        synthesis = normalizeAgentSynthesis(parseAgentAnswer(result.answer));
+        synthesisRecord.status = "done";
+        synthesisRecord.model = result.model || null;
+      } catch (error) {
+        synthesisRecord.status = error?.name === "AbortError" ? "cancelled" : "failed";
+        synthesisRecord.error = error?.message || String(error);
+        throw error;
+      }
+      const draft = {
+        schema: "fyow.editor-agent-draft/1",
+        goal,
+        generatedAt: Date.now(),
+        agents: results,
+        synthesis
+      };
+      const nextProject = applyAgentSynthesis({
         ...currentProject,
         agentDraft: draft,
         updatedAt: Date.now()
-      };
+      }, synthesis);
+      nextProject.agentDraft = draft;
       this.onlineWorldEditorProjects.projects[key] = nextProject;
       saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
       this.onlineWorldEditorJob.status = "completed";
@@ -10322,10 +10501,13 @@ handleLocalIpc("backend:game-key", (_event, payload) => backend.dispatchGameKey(
 handleLocalIpc("backend:hide-platform", () => backend.hidePlatform());
 handleLocalIpc("online-world:get-state", () => backend.onlineWorldService.state());
 handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
+handleLocalIpc("online-world:list-editor-projects", () => backend.listOnlineWorldEditorProjects());
+handleLocalIpc("online-world:create-editor-project", () => backend.createOnlineWorldCardEditor());
 handleLocalIpc("online-world:get-editor", (_event, libraryId) => backend.getOnlineWorldCardEditor(libraryId));
 handleLocalIpc("online-world:save-editor", (_event, libraryId, project, options) => backend.saveOnlineWorldCardEditor(libraryId, project || {}, options || {}));
 handleLocalIpc("online-world:run-editor-agents", (_event, payload) => backend.runOnlineWorldEditorAgents(payload || {}));
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
+handleLocalIpc("online-world:import-editor-card", () => backend.importOnlineWorldEditorCard());
 handleLocalIpc("online-world:import-card-files", (_event, files) => backend.importOnlineWorldCardFiles(files));
 handleLocalIpc("online-world:remove-card", (_event, libraryId) => backend.removeOnlineWorldCard(libraryId));
 handleLocalIpc("online-world:export-card", (_event, cardId) => backend.exportOnlineWorldCard(cardId));

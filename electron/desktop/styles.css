@@ -74,3 +74,12 @@ select{width:100%;border:1px solid var(--line);border-radius:9px;background:#0d1
 @keyframes model-loading-spin{to{transform:rotate(360deg)}}
 :root .model-loading-logo{border:3px solid #b7ccbe !important;border-top-color:#376f56 !important}
 @media(prefers-reduced-motion:reduce){.model-loading-logo{animation:none}}
+
+/* Keep the desktop surfaces usable in narrow windows. */
+html,body{overflow-x:hidden}
+.app-shell{max-width:100%;overflow:hidden}
+.landing-page,.profiles-page{overflow-y:auto;overflow-x:hidden;align-items:start}
+.landing-card,.profiles-card{margin:auto}
+.landing-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}
+.feature-card{min-width:0;width:100%;flex:1 1 auto}
+@media(max-width:700px){.landing-page,.profiles-page{padding:16px}.landing-card,.profiles-card{width:100%;padding:20px}.landing-actions{grid-template-columns:1fr}.feature-card{min-height:130px}}

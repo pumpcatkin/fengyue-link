@@ -67,6 +67,16 @@ describe("online world game cards", () => {
     expect(card.companion.workId).toBe(GRID_COMPANION_WORK_ID);
     expect(card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(card.program.digest).toBeTruthy();
+    expect(validateGameCard(card).packageSha256).toBe(card.packageSha256);
+    const rebound = rebindGameCard(card, "8b6bcf88-6170-4de9-a5ea-c01228b67a2d");
+    expect(validateGameCard(rebound).companion.workId).toBe("8b6bcf88-6170-4de9-a5ea-c01228b67a2d");
+    const exported = createExportedGameCard(rebound, rebound.companion.configuration);
+    const directory = mkdtempSync(join(tmpdir(), "fyow-editor-publish-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "cards.json");
+    const libraryId = gameCardLibraryKey(exported);
+    saveGameCardLibrary(file, new Map([[libraryId, exported]]));
+    expect(loadGameCardLibrary(file, null).get(libraryId)?.packageSha256).toBe(exported.packageSha256);
   });
 
   it("ships one fixed companion work and its complete creation-page snapshot", () => {

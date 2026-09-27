@@ -339,7 +339,9 @@ function createGameCardFromEditorProject(project = {}, { origin, authorAccountId
     authorAccountId: nextAuthorAccountId,
     name: String(sourceCompanion.name || project.configuration?.app?.name || sourceCard.title || "在线游戏世界").slice(0, 120),
     summary: String(sourceCompanion.summary || project.configuration?.app?.summary || "").slice(0, 4000),
-    language: String(sourceCompanion.language || project.configuration?.app?.language || "zh-Hans")
+    language: String(sourceCompanion.language || project.configuration?.app?.language || "zh-Hans"),
+    installedUrl: `${nextOrigin}/zh/explore/installed/${encodeURIComponent(nextWorkId)}`,
+    configurationUrl: `${nextOrigin}/zh/app/${encodeURIComponent(nextWorkId)}/configuration`
   };
   const configuration = normalizeConfiguration(project.configuration, companion);
   configuration.app.id = nextWorkId;

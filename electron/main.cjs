@@ -4060,6 +4060,14 @@ class AccountBackend {
     }
     if (!current && !shouldPublish) throw new Error("新建游戏卡请先保存为草稿，或保存并同步以创建伴生作品");
     if (current) this.persistEditedOnlineWorldCard(current, saved);
+    else {
+      const validated = validateGameCard(saved);
+      const newKey = gameCardLibraryKey(validated);
+      this.onlineWorldCards.set(newKey, validated);
+      saveGameCardLibrary(this.onlineWorldCardFile, this.onlineWorldCards);
+      this.onlineWorldCards = loadGameCardLibrary(this.onlineWorldCardFile, null);
+      if (!this.onlineWorldCards.has(newKey)) throw new Error("新建游戏卡保存后回读失败");
+    }
     const key = gameCardLibraryKey(saved);
     this.onlineWorldEditorProjects.projects[key] = {
       ...input,

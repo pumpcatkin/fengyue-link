@@ -6,6 +6,7 @@ const { validateGameCard, summarizeGameCard, createBundledGridCard, createEdited
 const { createEditorProject, createBlankEditorProject } = require("../electron/online-game-editor.cjs");
 const { parseProgram } = require("../electron/online-world-runtime.cjs");
 const { createWorld, projectWorldState } = require("../electron/grid-world-game.cjs");
+const { isStandalone, validateSave } = require("../electron/standalone-game.cjs");
 
 const root = path.resolve(__dirname, "..");
 const starter = process.argv.includes("--starter");
@@ -16,6 +17,7 @@ const input = process.argv.find(arg => arg.startsWith("--card="))?.slice(7);
 const base = input ? validateGameCard(JSON.parse(fs.readFileSync(input, "utf8"))) : createBundledGridCard();
 const card = starter ? createEditedGameCard(base, { programHtml: createBlankEditorProject().program.html }) : base;
 const program = parseProgram(card.companion.configuration.app.description, card.gameId);
+const standalone = isStandalone(program.html);
 const version = require("../package.json").version;
 const state = {
   loggedIn: true, profileId: "render-qa", mode: "lobby", uiTheme: "dark",
@@ -32,7 +34,9 @@ const world = {
   program, programHtml: program.html, world: null, control: null,
   localPreferences: {}, history: {}, loadProgress: { active: false }, card: summarizeGameCard(card)
 };
+if (standalone) Object.assign(world, { runtime: "standalone/1", status: "ready", initialized: true, isServerOwner: false, isAuthor: false, gameSave: null });
 let closeCalls = 0;
+let gameSaveCalls = 0;
 let syncCalls = 0;
 let saveCalls = 0;
 let savedProject = null;
@@ -49,6 +53,10 @@ const handlers = {
   "online-world:list-cards": () => ({ cards: [summarizeGameCard(card)] }),
   "online-world:close": () => { closeCalls += 1; return { ...world, status: "closed" }; },
   "online-world:reconnect": () => { syncCalls += 1; return world; },
+  "online-world:save-game": (_event, value) => {
+    assert.equal(value.workId, card.companion.workId); assert.equal(value.gameId, card.gameId);
+    world.gameSave = validateSave(value.data); gameSaveCalls++; return { saved: true };
+  },
   "online-world:save-editor": (_event, _id, project) => {
     saveCalls += 1;
     const edited = createEditedGameCard(card, {
@@ -77,13 +85,13 @@ app.whenReady().then(async () => {
       frameHidden:onlineWorldFrame.classList.contains("hidden"),
       src:onlineWorldFrame.src
     })`);
-    assert.equal(unopened.visible, true);
-    assert.equal(unopened.frameHidden, true);
-    assert.equal(unopened.src, "about:blank");
+    assert.equal(unopened.visible, !standalone);
+    assert.equal(unopened.frameHidden, !standalone);
+    if (!standalone) assert.equal(unopened.src, "about:blank");
     assert.equal(unopened.title, /^猎艳疆土\([1-5]服\)$/.test(card.title)
       ? card.title : card.companion.name.replace(/\[[a-f0-9]{16}\]$/i, ""));
     fs.writeFileSync(path.join(output, "unopened.png"), (await win.webContents.capturePage()).toPNG());
-    Object.assign(world, {
+    if (!standalone) Object.assign(world, {
       status: "ready", initialized: true,
       world: projectWorldState(createWorld({ authorityAccountId: state.account.accountId }), state.account.accountId, Date.now())
     });
@@ -107,15 +115,27 @@ app.whenReady().then(async () => {
     console.log(JSON.stringify(result, null, 2));
     assert.equal(frameState.ready, true);
     assert.equal(frameState.display, "block");
-    if (starter) {
+    if (standalone) {
       const embedded = win.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
+      await embedded.executeJavaScript(`document.querySelector("#advance").click()`);
+      await new Promise(resolve => setTimeout(resolve, 650));
+      assert.ok(gameSaveCalls > 0, "game did not save through the production renderer and preload bridge");
+      assert.equal(world.gameSave.step, 1);
       await embedded.executeJavaScript(`document.querySelector("#sync").click()`);
-      for (let attempt = 0; attempt < 20 && !syncCalls; attempt += 1) await new Promise(resolve => setTimeout(resolve, 100));
-      assert.equal(syncCalls, 1, "starter sync did not reach the host");
+      if (starter) {
+        for (let attempt = 0; attempt < 20 && !syncCalls; attempt += 1) await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(syncCalls, 1, "starter sync did not reach the host");
+      }
       await new Promise(resolve => setTimeout(resolve, 200));
       assert.equal(await embedded.executeJavaScript(`document.querySelector("#sync").disabled`), false);
-      assert.equal(await embedded.executeJavaScript(`document.querySelector("#status").textContent`), "宿主已返回最新结果");
-      await embedded.executeJavaScript(`document.querySelector("#library").remove()`);
+      assert.ok(await embedded.executeJavaScript(`document.querySelector("#progress").textContent.includes("1 / 3")`));
+      await win.webContents.executeJavaScript(`returnToOnlineWorldLibrary()`);
+      await win.webContents.executeJavaScript(`onlineWorldInLibrary=false;renderOnlineWorld(${JSON.stringify(world)})`);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const reopened = win.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
+      assert.ok(await reopened.executeJavaScript(`document.querySelector("#progress").textContent.includes("1 / 3")`), "lobby reopen did not restore gameplay");
+      fs.writeFileSync(path.join(output, "playing.png"), (await win.webContents.capturePage()).toPNG());
+      await reopened.executeJavaScript(`document.querySelector("#library")?.remove()`);
     }
     win.webContents.debugger.attach("1.3");
     for (const [width, height] of [[1280, 900], [420, 820]]) {
@@ -152,7 +172,7 @@ app.whenReady().then(async () => {
     }
     await win.webContents.executeJavaScript(`document.querySelector("#online-world-floating-back").click()`);
     for (let attempt = 0; attempt < 20 && !closeCalls; attempt += 1) await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal(closeCalls, 1);
+    assert.equal(closeCalls, standalone ? 2 : 1);
     assert.equal(await win.webContents.executeJavaScript(`onlineWorldInLibrary && onlineWorldFrame.src==="about:blank"`), true);
 
     await win.webContents.executeJavaScript(`onlineWorldEditorProject=${JSON.stringify(createEditorProject(card))};
@@ -184,7 +204,7 @@ app.whenReady().then(async () => {
     }
     win.webContents.debugger.detach();
     fs.writeFileSync(path.join(output, "interaction-result.json"), JSON.stringify({
-      passed: true, starter, syncCalls, closeCalls, saveCalls, promptValues: savedProject.configuration.pre_prompt
+      passed: true, starter, standalone, gameSaveCalls, syncCalls, closeCalls, saveCalls, promptValues: savedProject.configuration.pre_prompt
     }, null, 2));
     console.log("Game return, starter sync, and editor prompt roundtrip QA passed");
   } catch (error) {

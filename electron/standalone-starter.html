@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="fyow-runtime" content="standalone/1"><title>遗迹探索 · 玩法样例</title>
+<style>
+:root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#e5f2ea;background:#14201b}*{box-sizing:border-box}body{margin:0;padding:24px}main{max-width:760px;margin:auto}header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}h1{font-size:24px}p{line-height:1.8;color:#b9ccbf}.map{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:32px 0}.room{padding:28px 4px;text-align:center;background:#283c31;border:2px solid #4d6857;border-radius:6px}.room.active{border-color:#f0d986;background:#45523a}.controls{display:flex;gap:8px;flex-wrap:wrap}button{font:inherit;background:#e0c974;color:#1d291e;border:0;border-radius:4px;padding:10px 18px;cursor:pointer}button:disabled{opacity:.45;cursor:default}#restart,#library,#sync{background:#344a3e;color:#ecf4ee}#status{font-weight:bold;font-size:20px}#storage{font-size:12px;color:#abcab5;min-height:20px}#log{min-height:40px}@media(max-width:480px){body{padding:16px}.room{padding:20px 2px}h1{font-size:20px}}
+</style></head><body><main>
+<header><h1>遗迹探索</h1><span>单人玩法样例</span></header>
+<p>穿过三间遗迹抵达出口。稳步探索消耗一点体力；冒险会触发陷阱。返回游戏库后仍可继续。</p>
+<div class="map" aria-label="探索路线"><div class="room">入口</div><div class="room">石廊</div><div class="room">密室</div><div class="room">出口</div></div>
+<div id="status">等待宿主连接</div><p id="progress">进度 0 / 3</p><p id="health">体力 4</p><p id="log">选择行动开始探索。</p>
+<div class="controls"><button id="advance" disabled>稳步探索</button><button id="risk" disabled>冒险前进</button><button id="restart" disabled>重新开始</button><button id="sync">刷新</button><button id="library">游戏库</button></div><p id="storage">读取本地存档…</p>
+</main><script>
+const SOURCE="fyow-grid-conquest",PROTOCOL="fyow-host/1";
+const fresh=()=>({version:1,step:0,hp:4});let game=fresh(),loaded=false,timer=null,pending=null,pendingTimer=null;
+const $=id=>document.getElementById(id);
+function send(type,data={}){parent.postMessage({source:SOURCE,protocol:PROTOCOL,type,...data},"*")}
+function render(){const ended=game.hp<=0||game.step>=3;$("status").textContent=game.hp<=0?"探索失败":game.step>=3?"探索胜利":"探索中";$("progress").textContent=`进度 ${game.step} / 3`;$("health").textContent=`体力 ${game.hp}`;document.querySelectorAll(".room").forEach((el,i)=>el.classList.toggle("active",i===game.step));$("advance").disabled=$("risk").disabled=!loaded||ended;$("restart").disabled=!loaded}
+function save(){clearTimeout(timer);timer=setTimeout(()=>{if(pending){save();return}pending=crypto.randomUUID();$("storage").textContent="保存中…";send("game-save",{requestId:pending,data:game});pendingTimer=setTimeout(()=>{pending=null;$("storage").textContent="保存超时，点击刷新重试"},5000)},180)}
+function act(risk){if(!loaded||game.hp<=0||game.step>=3)return;game.step++;game.hp=Math.max(0,game.hp-(risk?4:1));$("log").textContent=risk?"踩中了陷阱。重新开始可以再次探索。":"找到通向下一间遗迹的石阶。";render();save()}
+$("advance").onclick=()=>act(false);$("risk").onclick=()=>act(true);$("restart").onclick=()=>{game=fresh();$("log").textContent="选择行动开始探索。";render();save()};
+$("library").onclick=()=>send("library");$("sync").onclick=()=>{if(loaded)save();send("sync",{requestId:crypto.randomUUID()})};
+addEventListener("message",e=>{if(e.source!==parent||e.data?.source!=="fengyue-host"||e.data.protocol!==PROTOCOL)return;
+if(e.data.type==="state"&&!loaded){const value=e.data.state?.gameSave;if(value?.version===1&&Number.isInteger(value.step)&&value.step>=0&&value.step<=3&&Number.isInteger(value.hp)&&value.hp>=0&&value.hp<=4)game=value;loaded=true;$("storage").textContent=value?"已恢复本地进度":"本地存档就绪";render()}
+if(e.data.requestId===pending&&["result","error"].includes(e.data.type)){clearTimeout(pendingTimer);pending=null;$("storage").textContent=e.data.type==="result"?"进度已保存":`保存失败：${e.data.message||"请重试"}`}});
+send("ready");
+</script></body></html>

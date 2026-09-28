@@ -16,13 +16,19 @@ function answerText(data) {
   return candidates.find(value => typeof value === "string" && value) || "";
 }
 
-function createModelRequestPayload({ workId, query }) {
+function createModelRequestPayload({ workId, query, files = [] }) {
+  if (!Array.isArray(files) || files.length > 3) throw new Error("模型附件最多 3 个");
+  const attachments = files.map(file => {
+    if (!["document", "image"].includes(file?.type) || file.transfer_method !== "local_file"
+      || !/^[a-zA-Z0-9_-]{1,120}$/.test(String(file.upload_file_id || ""))) throw new Error("模型附件必须来自已验证的本地文件上传结果");
+    return { type: file.type, transfer_method: "local_file", upload_file_id: file.upload_file_id };
+  });
   return {
     app_id: String(workId || ""),
     inputs: {},
     query: String(query || ""),
     response_mode: "streaming",
-    files: []
+    files: attachments
   };
 }
 

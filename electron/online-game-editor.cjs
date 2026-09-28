@@ -43,7 +43,9 @@ const ONLINE_WORLD_EDITOR_PLAYBOOK = Object.freeze({
   ]
 });
 
-const DEFAULT_EDITOR_PROGRAM = `<!doctype html>
+const DEFAULT_EDITOR_PROGRAM = fs.readFileSync(path.join(__dirname, "standalone-starter.html"), "utf8");
+const STARTER_TESTS = require("./standalone-starter-tests.json");
+const LEGACY_CONNECTED_PROGRAM = `<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -139,8 +141,11 @@ function normalizeEditorProject(value, fallbackWorkId = "") {
   project.configuration = configuration;
   const programHtml = String(project.program?.html || "").replace(/\r\n?/g, "\n").trim();
   if (programHtml === LEGACY_DEFAULT_EDITOR_PROGRAM.trim()
-    || programHtml === injectSandboxCsp(LEGACY_DEFAULT_EDITOR_PROGRAM).trim()) {
+    || programHtml === injectSandboxCsp(LEGACY_DEFAULT_EDITOR_PROGRAM).trim()
+    || programHtml === LEGACY_CONNECTED_PROGRAM.trim()
+    || programHtml === injectSandboxCsp(LEGACY_CONNECTED_PROGRAM).trim()) {
     project.program = { ...(project.program || {}), html: DEFAULT_EDITOR_PROGRAM };
+    project.harness = { tests: clone(STARTER_TESTS), status: "needs-implementation", migration: "原卡只有欢迎页；当前是开发用玩法样例，需按原游戏规则实现后再发布" };
   }
   project.agents = normalizeAgentComponents(project.agents, fallbackWorkId);
   project.updatedAt = Number(project.updatedAt || Date.now());
@@ -168,6 +173,7 @@ function saveEditorProjects(file, projects) {
 
 function createEditorProject(card) {
   const project = decomposeGameCard(card);
+  if (project.configuration?.fengyue_editor?.tests) project.harness = { tests: clone(project.configuration.fengyue_editor.tests), status: "needs-test" };
   project.agents = normalizeAgentComponents(project.agents, card?.companion?.workId || "");
   project.agentDraft = null;
   project.updatedAt = Date.now();
@@ -218,6 +224,7 @@ function createBlankEditorProject({ origin = "", accountId = "", title = "未命
       world_book: []
     },
     validation: null,
+    harness: { tests: clone(STARTER_TESTS), status: "starter" },
     agentDraft: null,
     workSelection: "create"
   });

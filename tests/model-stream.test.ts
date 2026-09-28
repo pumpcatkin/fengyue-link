@@ -6,6 +6,12 @@ const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints
 const encoder = new TextEncoder();
 
 describe("online world model event stream", () => {
+  it("sends validated uploaded files and rejects arbitrary remote or credential-bearing attachments", () => {
+    const file = { type: "document", transfer_method: "local_file", upload_file_id: "file-123" };
+    expect(createModelRequestPayload({ workId: "work", query: "read", files: [file] }).files).toEqual([file]);
+    expect(() => createModelRequestPayload({ files: [{ type: "document", transfer_method: "remote_url", url: "file:///private" }] })).toThrow();
+    expect(() => createModelRequestPayload({ files: Array(4).fill(file) })).toThrow();
+  });
   it("always omits the conversation id so every platform request creates a new session", () => {
     expect(createModelRequestPayload({ workId: "work", conversationId: "", query: "hello" })).toEqual({
       app_id: "work", inputs: {}, query: "hello", response_mode: "streaming", files: []

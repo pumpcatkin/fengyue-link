@@ -21,6 +21,7 @@ const {
 } = require("./online-world-protocol.cjs");
 const { sealJson, openSealedJson } = require("./online-world-crypto.cjs");
 const { parseProgram } = require("./online-world-runtime.cjs");
+const { isStandalone, savePath, readSave, writeSave } = require("./standalone-game.cjs");
 const {
   GRID_GAME_TITLE,
   builtInGridProgram,
@@ -1493,6 +1494,16 @@ class OnlineWorldService {
 
   state() {
     const account = this.account();
+    if (this.standalone && (this.standalone.accountId !== account.accountId || this.standalone.origin !== this.getOrigin?.())) {
+      return { status: "closed", initialized: false, runtime: "standalone/1", card: null, work: null, account, programHtml: null, gameSave: null, localPreferences: {} };
+    }
+    if (this.standalone) return {
+      status: this.status, initialized: true, runtime: "standalone/1", error: this.error,
+      isServerOwner: account.accountId === this.work?.authorAccountId,
+      card: summarizeGameCard(this.card), account, work: this.work ? { ...this.work, description: undefined } : null,
+      programHtml: this.program.html, gameSave: this.standalone.data, loadProgress: this.loadProgress,
+      localPreferences: {}, world: null, serverNow: this.now()
+    };
     const projection = this.world ? projectWorldState(this.world, account.accountId, this.now()) : null;
     if (projection && !this.mapFactsCache) {
       this.mapFactsCache = [];
@@ -1527,6 +1538,17 @@ class OnlineWorldService {
 
   notify() {
     try { this.onChange(this.state()); } catch {}
+  }
+
+  saveStandaloneState({ workId, gameId, data } = {}) {
+    if (!this.standalone || this.status !== "ready" || this.syncPaused) throw new Error("独立游戏尚未打开");
+    if (this.standalone.accountId !== this.account().accountId || this.standalone.origin !== this.getOrigin?.()) throw new Error("账号或节点已经变化，请重新打开游戏");
+    if (workId !== this.work.id || gameId !== this.card.gameId) throw new Error("存档请求来自已关闭或其他游戏");
+    const now = Date.now();
+    if (now - (this.standalone.lastWriteAt || 0) < 100) throw new Error("存档过于频繁，请合并变更后重试");
+    this.standalone.data = writeSave(this.standalone.file, data);
+    this.standalone.lastWriteAt = now;
+    return { saved: true };
   }
 
   pendingPublicationState(transaction = this.pendingIntentTransaction) {
@@ -2547,6 +2569,7 @@ class OnlineWorldService {
   }
 
   saveCache() {
+    if (this.standalone) return;
     const cacheFile = this.scopedCacheFile();
     if (!cacheFile || !this.work || !this.world) return;
     const accountId = this.account().accountId;
@@ -2737,6 +2760,7 @@ class OnlineWorldService {
 
   async forgetOpenedCard() {
     await this.pause();
+    this.standalone = null;
     this.card = null;
     this.work = null;
     this.program = builtInGridProgram();
@@ -2805,6 +2829,7 @@ class OnlineWorldService {
   async open({ card, workUrl, orientation, displayName, migrationProof = null } = {}) {
     const previousWorkId = String(this.work?.id || "");
     await this.pause();
+    this.standalone = null;
     this.syncPaused = false;
     this.pendingMigration = null;
     this.migrationProof = migrationProof && typeof migrationProof === "object" ? cloneJson(migrationProof) : null;
@@ -2894,6 +2919,21 @@ class OnlineWorldService {
     if (normalizedCard && this.work.name === "在线游戏世界") this.work.name = normalizedCard.companion.name;
     const liveDescription = await liveDescriptionPromise;
     this.loadWorkProgram(normalizedCard, liveDescription);
+    if (isStandalone(this.program?.html)) {
+      const file = savePath(this.scopedCacheFile(), account.accountId, this.card);
+      this.control = null; this.world = null;
+      this.standalone = { file, data: readSave(file), accountId: account.accountId, origin: this.getOrigin?.() };
+      this.status = "ready";
+      this.error = null;
+      this.loadProgress = { active: false, phase: "complete" };
+      this.notify();
+      return this.state();
+    }
+    if (normalizedCard && normalizedCard.gameId !== GRID_GAME_ID) {
+      this.status = "error";
+      this.loadProgress = { active: false, phase: "error" };
+      throw new Error("此卡尚未实现可运行的独立玩法。请在编辑器生成 standalone/1 程序并通过玩法测试；提示词或欢迎页不是游戏程序。");
+    }
     this.mapFactsCache = null;
     this.knownCommentIds = new Set(Array.isArray(cached?.knownCommentIds) ? cached.knownCommentIds.slice(-500).map(String) : []);
     this.historyTailPage = Math.max(1, Math.trunc(Number(cached?.historyTailPage || 1)));
@@ -3223,6 +3263,7 @@ class OnlineWorldService {
   }
 
   async initialize() {
+    if (this.standalone) return this.state();
     if (!this.work) throw new Error("请先选择伴生作品");
     if (this.control || this.world) throw new Error("本游戏已经开服");
     if (!isVerifiedProgram(this.program)) throw new Error("游戏卡中尚未包含有效游戏程序包");
@@ -5660,6 +5701,10 @@ class OnlineWorldService {
   }
 
   async reconnect(fullScan = false) {
+    if (this.standalone) {
+      if (this.status === "closed") throw new Error("游戏已关闭，请重新进入");
+      return this.state();
+    }
     if (this.syncPaused || !this.work) return this.state();
     this.clearPlatformRateLimit();
     const lastPublishError = this.pendingIntentTransaction?.lastPublishError || {};
@@ -5707,6 +5752,7 @@ class OnlineWorldService {
   }
 
   async sync(fullScan = false, { force = false, respectRetryGate = false } = {}) {
+    if (this.standalone) return this.state();
     if (this.syncPaused || !this.work || this.intentInFlight || this.migrationActive) return this.state();
     if (respectRetryGate && !force && Number(this.syncRetryAt || 0) > this.now()) return this.state();
     if (this.syncInFlight) return this.syncInFlight;

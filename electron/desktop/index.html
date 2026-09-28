@@ -103,9 +103,9 @@
               <label class="online-editor-block-label">完整作品配置 JSON<textarea id="online-editor-config-json" class="code-editor" spellcheck="false"></textarea></label>
               <small class="online-editor-hint">这是导入卡中的完整配置快照。修改结构化分区后，保存时会以分区内容覆盖这里。</small>
             </section>
-            <section class="online-editor-agent-dock" aria-label="默认 Agent 协作">
-              <div class="online-editor-agent-dock-head"><div><b>编辑中枢</b><small>默认协调架构、提示词、界面和校验 Agent，并把结果交回中枢模型判断后应用。</small></div><span id="online-editor-agent-progress" class="online-editor-agent-progress"><span>输入目标后开始协作</span></span></div>
-              <div class="online-editor-agent-dock-body"><textarea id="online-editor-agent-goal" maxlength="4000" placeholder="描述你想修改的游戏卡内容，例如：把开局流程改为三阶段探索，并补齐任务提示词和断线恢复文案"></textarea><button id="online-editor-run-agents" type="button" class="primary" aria-label="发送编辑目标">发送</button></div>
+            <section class="online-editor-agent-dock" aria-label="游戏开发 Harness">
+              <div class="online-editor-agent-dock-head"><div><b>游戏开发</b><small>源码 · 运行记录 · 独立评审</small></div><span id="online-editor-agent-progress" class="online-editor-agent-progress"><span>输入目标后开始开发</span></span></div>
+              <div class="online-editor-agent-dock-body"><textarea id="online-editor-agent-goal" maxlength="4000" placeholder="描述玩法、玩家选择与胜负目标…"></textarea><button id="online-editor-run-agents" type="button" class="primary" aria-label="发送编辑目标">发送</button><button id="online-editor-stop" type="button" aria-label="停止开发">停止</button></div>
               <pre id="online-editor-agent-result" class="online-editor-agent-result"></pre>
             </section>
           </section>

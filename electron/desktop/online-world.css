@@ -126,10 +126,10 @@
 .online-editor-agent-dock-head>div{display:grid;gap:4px;min-width:0}
 .online-editor-agent-dock-head b{color:#bff5da;font-size:13px}
 .online-editor-agent-dock-head small{color:#8ea3b2;font-size:10px;line-height:1.5}
-.online-editor-agent-dock-body{display:grid;grid-template-columns:minmax(0,1fr) 72px;gap:8px;align-items:end}
+.online-editor-agent-dock-body{display:grid;grid-template-columns:minmax(0,1fr) 72px 64px;gap:8px;align-items:end}
 .online-editor-agent-dock-body textarea{min-height:58px;max-height:180px;resize:vertical}
 .online-editor-agent-dock-body button{min-height:42px}
-.online-editor-agent-dock .online-editor-agent-progress{border:0;background:transparent;padding:0}
+.online-editor-agent-dock .online-editor-agent-progress{border:0;background:transparent;padding:0;max-height:220px;overflow-y:auto;overflow-wrap:anywhere;min-width:0}
 .online-editor-agent-result{min-height:0;max-height:360px;margin:0}
 .online-editor-project-picker{width:min(520px,calc(100vw - 32px));max-width:100%;border:1px solid #526577;background:#111b25;color:#eef3f7;padding:0}
 .online-editor-project-picker::backdrop{background:#0009}

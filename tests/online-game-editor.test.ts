@@ -116,7 +116,8 @@ describe("online game editor projects", () => {
     expect(project.isDraft).toBe(true);
     expect(project.card.companion.workId).toBe("");
     expect(project.card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
-    expect(project.program.html).toContain("未命名游戏");
+    expect(project.program.html).toContain("standalone/1");
+    expect(project.harness.tests.scenarios).toHaveLength(2);
     expect(project.program.html).toContain("fyow-host/1");
     expect(project.program.html).toContain('send("ready")');
     expect(project.agents.every((item: any) => item.workId === "")).toBe(true);
@@ -185,54 +186,44 @@ describe("online game editor projects", () => {
   });
 });
 
-describe("editor agent orchestration", () => {
-  it.each([true, false])("returns component outputs to the central reviewer and respects approval=%s", async approved => {
-    const directory = mkdtempSync(join(tmpdir(), "fyow-editor-agent-"));
+describe("editor harness dispatch", () => {
+  it("saves unfinished editor drafts without touching the playable card or cloud", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-draft-isolation-"));
     temporaryDirectories.push(directory);
-    const editor = require("../electron/online-game-editor.cjs");
     const cards = require("../electron/online-world-card.cjs");
-    const router = require("../electron/auto-model-router.cjs");
+    const harness = require("../electron/game-harness.cjs");
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-      ...editor, ...cards, ...router, crypto: require("node:crypto"), Buffer, AbortController, setInterval, clearInterval,
-      runAutoModel: (options: any) => router.runAutoModel({ ...options, wait: async () => {}, maxAttempts: 4 })
+      normalizeEditorProject, saveEditorProjects, summarizeGameCard: cards.summarizeGameCard,
+      harnessFingerprint: harness.fingerprint, harnessFiles: harness.projectFiles
     });
-    const card = createBundledGridCard();
-    const project = createEditorProject(card);
-    const instance = Object.create(Backend.prototype);
-    const queries: any[] = [];
-    const models: string[] = [];
-    const attempts = new Map<string, number>();
-    Object.assign(instance, {
-      loggedIn: true, authSessionRevision: 1, autoModelJobs: new Map(), autoModelQueues: new Map(),
+    const card = createBundledGridCard(), project = createEditorProject(card);
+    const originalHash = card.packageSha256;
+    project.program.html = '<html><script src="unfinished.js"></script></html>';
+    project.configuration.pre_prompt = "尚未完成但要保存的提示词";
+    const backend = Object.assign(Object.create(Backend.prototype), {
+      account: { accountId: card.companion.authorAccountId }, origin: card.companion.origin,
+      onlineWorldCard: () => card, assertOnlineWorldEditorOwner: vi.fn(),
       onlineWorldEditorProjects: { projects: {} }, onlineWorldEditorFile: join(directory, "projects.json"),
-      assertToolLoggedIn: vi.fn(), assertOnlineWorldEditorOwner: vi.fn(), emit: vi.fn(), appendSessionLog: vi.fn(),
-      onlineWorldCard: () => card, onlineWorldEditorProject: () => project,
-      platformGoApi: async () => ({ data: { models: ["glm-5.3", "claude-opus-4.6", "gpt-5.6"].map(model => ({ provider_name: "test", model_id: model })) } }),
-      configureAutomaticModel: async (_id: string, model: any) => { models.push(model.model); },
-      requestEditorModelForWork: async (_id: string, query: string) => {
-        const request = JSON.parse(query.slice(query.indexOf("\n") + 1));
-        const id = request.input.role || "synthesizer";
-        const attempt = (attempts.get(id) || 0) + 1;
-        attempts.set(id, attempt);
-        if (attempt === 1) return { answer: "invalid JSON" };
-        queries.push(request);
-        return { answer: JSON.stringify(id === "synthesizer"
-          ? { summary: "reviewed", configurationPatch: { pre_prompt: "中枢已审查内容" }, validation: { approved, issues: [] } }
-          : { summary: id, facts: ["host protocol checked"] }) };
-      }
+      listOnlineWorldCards: async () => ({ cards: [card] }), listOnlineWorldEditorProjects: () => ({ projects: [] }),
+      persistEditedOnlineWorldCard: vi.fn(), onlineWorldService: { updateGameCardCloud: vi.fn() }
     });
-    const result = await instance.runOnlineWorldEditorAgents({ goal: "检查提示词与通信节奏" });
-    const synthesisInput = queries.at(-1).input;
-    expect(synthesisInput.agentOutputs.map((item: any) => item.output.summary)).toEqual(DEFAULT_AGENT_COMPONENTS.map((item: any) => item.id));
-    expect(queries[1].input.instruction).toContain("host protocol checked");
-    expect(queries.every(request => request.input.instruction.includes("fyow-host/1"))).toBe(true);
-    expect(models).toEqual(Array.from({ length: DEFAULT_AGENT_COMPONENTS.length + 1 }, () => ["gpt-5.6", "claude-opus-4.6"]).flat());
-    expect(result.project.configuration.pre_prompt).toBe(approved ? "中枢已审查内容" : project.configuration.pre_prompt);
-    expect(result.project.program.html).toBe(project.program.html);
-    expect(synthesisInput.project.programReview).toMatchObject({ sourceIncluded: false, executed: false });
-    expect(instance.onlineWorldEditorJob.agents.every((agent: any) => agent.model)).toBe(true);
-    expect(instance.onlineWorldEditorJob.status).toBe("completed");
-    expect(instance.autoModelJobs.size).toBe(0);
+    const result = await backend.saveOnlineWorldCardEditor("existing-card", project, { publish: false });
+    expect(result.draftSaved).toBe(true);
+    expect(result.project.program.html).toContain("unfinished.js");
+    expect(loadEditorProjects(backend.onlineWorldEditorFile).projects["existing-card"].configuration.pre_prompt).toBe("尚未完成但要保存的提示词");
+    expect(card.packageSha256).toBe(originalHash);
+    expect(backend.persistEditedOnlineWorldCard).not.toHaveBeenCalled();
+    expect(backend.onlineWorldService.updateGameCardCloud).not.toHaveBeenCalled();
+  });
+  it("routes the existing editor IPC to the new harness, not a fixed role sequence", async () => {
+    const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    const runEditorHarness = vi.fn(async (_backend, payload) => ({ project: payload }));
+    const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, { runEditorHarness });
+    const backend = Object.create(Backend.prototype);
+    const payload = { libraryId: "draft::test", goal: "生成可玩的探索游戏" };
+    expect(await backend.runOnlineWorldEditorAgents(payload)).toEqual({ project: payload });
+    expect(runEditorHarness).toHaveBeenCalledWith(backend, payload);
+    expect(source).not.toContain("runLegacyOnlineWorldEditorAgents");
   });
 });

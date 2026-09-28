@@ -1,8 +1,9 @@
 import { createRequire } from "node:module";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import vm from "node:vm";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
 const {
@@ -13,6 +14,7 @@ const {
 } = require("../electron/online-world-card.cjs");
 const {
   DEFAULT_AGENT_COMPONENTS,
+  ONLINE_WORLD_EDITOR_PLAYBOOK,
   createEditorProject,
   createBlankEditorProject,
   loadEditorProjects,
@@ -20,9 +22,11 @@ const {
   normalizeAgentSynthesis,
   applyAgentSynthesis,
   parseAgentAnswer,
+  parseStructuredAgentAnswer,
   saveEditorProjects
 } = require("../electron/online-game-editor.cjs");
 const { rankEditorModels } = require("../electron/auto-model-router.cjs");
+const { injectSandboxCsp } = require("../electron/online-world-runtime.cjs");
 
 const temporaryDirectories: string[] = [];
 
@@ -70,6 +74,38 @@ describe("online game editor projects", () => {
     expect(loaded.projects["card::work"].agents.find((item: any) => item.id === "architect").enabled).toBe(false);
     expect(parseAgentAnswer("```json\n{\"approved\":true}\n```")).toEqual({ approved: true });
     expect(parseAgentAnswer("plain text")).toEqual({ text: "plain text" });
+    expect(parseStructuredAgentAnswer("{\"approved\":true}", "测试 Agent")).toEqual({ approved: true });
+    expect(() => parseStructuredAgentAnswer("plain text", "测试 Agent")).toThrow("未返回有效 JSON");
+    for (const answer of ["[]", "{}", "null"]) {
+      expect(() => parseStructuredAgentAnswer(answer)).toThrow();
+    }
+    expect(() => parseStructuredAgentAnswer('{"summary":"done"}', "中枢", { synthesis: true })).toThrow("审查结论");
+  });
+
+  it("keeps all prompt sections visible in the normalized project snapshot", () => {
+    const project = normalizeEditorProject({
+      configuration: {
+        app: { name: "提示词测试" },
+        pre_text: "全局前置",
+        pre_prompt: "世界观前置",
+        post_text: "严格后置",
+        world_book: [{ key: "task", value: "只返回 JSON" }]
+      }
+    });
+    expect(project.configuration).toMatchObject({
+      pre_text: "全局前置",
+      pre_prompt: "世界观前置",
+      post_text: "严格后置",
+      world_book: [{ key: "task", value: "只返回 JSON" }]
+    });
+  });
+
+  it("ships the card-specific host and network rules to every editor agent", () => {
+    const playbook = JSON.stringify(ONLINE_WORLD_EDITOR_PLAYBOOK);
+    expect(playbook).toContain("fyow-host/1");
+    expect(playbook).toContain("1000ms");
+    expect(playbook).toContain("idempotencyKey");
+    expect(DEFAULT_AGENT_COMPONENTS.map((item: any) => item.id)).toContain("runtime-network-engineer");
   });
 
   it("creates a local-only blank draft without a companion work", () => {
@@ -81,7 +117,26 @@ describe("online game editor projects", () => {
     expect(project.card.companion.workId).toBe("");
     expect(project.card.companion.authorAccountId).toBe("39404f0e-7678-45a1-86c6-9a21116bacbd");
     expect(project.program.html).toContain("未命名游戏");
+    expect(project.program.html).toContain("fyow-host/1");
+    expect(project.program.html).toContain('send("ready")');
     expect(project.agents.every((item: any) => item.workId === "")).toBe(true);
+  });
+
+  it("repairs the old static starter card into a host-connected program", () => {
+    const html = `<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>未命名游戏</title></head>
+  <body><main><h1>未命名游戏</h1><p>从这里开始设计你的游戏卡。</p></main></body>
+</html>`;
+    const project = normalizeEditorProject({
+      program: {
+        html: injectSandboxCsp(html)
+      }
+    });
+    expect(project.program.html).toContain("fyow-host/1");
+    expect(project.program.html).toContain('send("ready")');
+    const customHtml = html.replace("</main>", "<button>玩家自定义内容</button></main>");
+    expect(normalizeEditorProject({ program: { html: customHtml } }).program.html).toBe(customHtml);
   });
 
   it("returns only an allowlisted synthesis patch to the editor project", () => {
@@ -108,6 +163,17 @@ describe("online game editor projects", () => {
     expect(applied.program.html).toBe(project.program.html);
   });
 
+  it("keeps the project unchanged when the central verifier rejects a synthesis", () => {
+    const project = createBlankEditorProject();
+    const synthesis = normalizeAgentSynthesis({
+      summary: "发现程序没有宿主握手",
+      approved: false,
+      configurationPatch: { pre_prompt: "不应写入" }
+    });
+    expect(synthesis.accepted).toBe(false);
+    expect(applyAgentSynthesis(project, synthesis)).toEqual(project);
+  });
+
   it("prioritizes editor model families before general catalog ranking", () => {
     const ranked = rankEditorModels([
       { model: "glm-5.3", label: "GLM 5.3", price: 1, successRate: 90 },
@@ -116,5 +182,57 @@ describe("online game editor projects", () => {
       { model: "other-model", label: "Other", price: 0, successRate: 100 }
     ]);
     expect(ranked.map((item: any) => item.model)).toEqual(["gpt-5.6", "claude-opus-4.6", "glm-5.3", "other-model"]);
+  });
+});
+
+describe("editor agent orchestration", () => {
+  it.each([true, false])("returns component outputs to the central reviewer and respects approval=%s", async approved => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-editor-agent-"));
+    temporaryDirectories.push(directory);
+    const editor = require("../electron/online-game-editor.cjs");
+    const cards = require("../electron/online-world-card.cjs");
+    const router = require("../electron/auto-model-router.cjs");
+    const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+    const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
+      ...editor, ...cards, ...router, crypto: require("node:crypto"), Buffer, AbortController, setInterval, clearInterval,
+      runAutoModel: (options: any) => router.runAutoModel({ ...options, wait: async () => {}, maxAttempts: 4 })
+    });
+    const card = createBundledGridCard();
+    const project = createEditorProject(card);
+    const instance = Object.create(Backend.prototype);
+    const queries: any[] = [];
+    const models: string[] = [];
+    const attempts = new Map<string, number>();
+    Object.assign(instance, {
+      loggedIn: true, authSessionRevision: 1, autoModelJobs: new Map(), autoModelQueues: new Map(),
+      onlineWorldEditorProjects: { projects: {} }, onlineWorldEditorFile: join(directory, "projects.json"),
+      assertToolLoggedIn: vi.fn(), assertOnlineWorldEditorOwner: vi.fn(), emit: vi.fn(), appendSessionLog: vi.fn(),
+      onlineWorldCard: () => card, onlineWorldEditorProject: () => project,
+      platformGoApi: async () => ({ data: { models: ["glm-5.3", "claude-opus-4.6", "gpt-5.6"].map(model => ({ provider_name: "test", model_id: model })) } }),
+      configureAutomaticModel: async (_id: string, model: any) => { models.push(model.model); },
+      requestEditorModelForWork: async (_id: string, query: string) => {
+        const request = JSON.parse(query.slice(query.indexOf("\n") + 1));
+        const id = request.input.role || "synthesizer";
+        const attempt = (attempts.get(id) || 0) + 1;
+        attempts.set(id, attempt);
+        if (attempt === 1) return { answer: "invalid JSON" };
+        queries.push(request);
+        return { answer: JSON.stringify(id === "synthesizer"
+          ? { summary: "reviewed", configurationPatch: { pre_prompt: "中枢已审查内容" }, validation: { approved, issues: [] } }
+          : { summary: id, facts: ["host protocol checked"] }) };
+      }
+    });
+    const result = await instance.runOnlineWorldEditorAgents({ goal: "检查提示词与通信节奏" });
+    const synthesisInput = queries.at(-1).input;
+    expect(synthesisInput.agentOutputs.map((item: any) => item.output.summary)).toEqual(DEFAULT_AGENT_COMPONENTS.map((item: any) => item.id));
+    expect(queries[1].input.instruction).toContain("host protocol checked");
+    expect(queries.every(request => request.input.instruction.includes("fyow-host/1"))).toBe(true);
+    expect(models).toEqual(Array.from({ length: DEFAULT_AGENT_COMPONENTS.length + 1 }, () => ["gpt-5.6", "claude-opus-4.6"]).flat());
+    expect(result.project.configuration.pre_prompt).toBe(approved ? "中枢已审查内容" : project.configuration.pre_prompt);
+    expect(result.project.program.html).toBe(project.program.html);
+    expect(synthesisInput.project.programReview).toMatchObject({ sourceIncluded: false, executed: false });
+    expect(instance.onlineWorldEditorJob.agents.every((agent: any) => agent.model)).toBe(true);
+    expect(instance.onlineWorldEditorJob.status).toBe("completed");
+    expect(instance.autoModelJobs.size).toBe(0);
   });
 });

@@ -130,19 +130,22 @@ function normalizeConfiguration(value, companion = {}) {
   const source = value && typeof value === "object" ? JSON.parse(JSON.stringify(value)) : {};
   const app = source.app && typeof source.app === "object" ? source.app : {};
   const workId = String(companion.workId || app.id || source.id || "");
+  const firstText = (...values) => {
+    return values.find(item => typeof item === "string") ?? "";
+  };
   return {
     ...source,
     app: {
       ...app,
       id: workId,
-      name: String(source.name ?? source.nm ?? source.ttl ?? source.title ?? source.app_name ?? app.name ?? companion.name ?? "在线游戏世界"),
-      description: String(source.desc ?? source.descr ?? source.dsc ?? source.intro ?? source.description ?? app.description ?? ""),
-      summary: String(source.summary ?? source.smry ?? source.abs_txt ?? source.sum_info ?? source.abstract ?? app.summary ?? companion.summary ?? ""),
+      name: String(app.name ?? source.name ?? source.nm ?? source.ttl ?? source.title ?? source.app_name ?? companion.name ?? "在线游戏世界"),
+      description: firstText(app.description, source.desc, source.descr, source.dsc, source.intro, source.description),
+      summary: firstText(app.summary, source.summary, source.smry, source.abs_txt, source.sum_info, source.abstract, companion.summary),
       language: String(source.lang ?? source.locale ?? source.lc ?? source.lng ?? source.language ?? app.language ?? companion.language ?? "zh-Hans")
     },
-    pre_text: String(source.pretxt ?? source.ptx ?? source.pre_tx ?? source.prefix_txt ?? source.pre_text ?? ""),
-    pre_prompt: String(source.prpt ?? source.ppt ?? source.pre_pt ?? source.prompt_pre ?? source.pre_prompt ?? ""),
-    post_text: String(source.posttxt ?? source.potx ?? source.post_tx ?? source.suffix_txt ?? source.post_text ?? ""),
+    pre_text: firstText(source.pre_text, source.pretxt, source.ptx, source.pre_tx, source.prefix_txt),
+    pre_prompt: firstText(source.pre_prompt, source.prpt, source.ppt, source.pre_pt, source.prompt_pre),
+    post_text: firstText(source.post_text, source.posttxt, source.potx, source.post_tx, source.suffix_txt),
     world_book: Array.isArray(source.world_book) ? source.world_book
       : (Array.isArray(source.wbook) ? source.wbook
         : (Array.isArray(source.lore_bk) ? source.lore_bk

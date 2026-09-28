@@ -14,6 +14,7 @@ const {
   normalizeProgramText,
   createExportedGameCard,
   createGameCardFromEditorProject,
+  createEditedGameCard,
   refreshGameCardProgram,
   validateGameCard,
   rebindGameCard,
@@ -39,6 +40,45 @@ describe("online world game cards", () => {
     expect(normalizeProgramText("界面\r\n样式\r脚本")).toBe("界面\n样式\n脚本");
     const card = createBundledGridCard();
     expect(parseProgram(card.companion.configuration.app.description, card.gameId).digest).toBe(card.program.digest);
+  });
+
+  it("keeps the bundled game playable after an editor save round trip", () => {
+    const original = createBundledGridCard();
+    const project = {
+      card: { title: "猎艳疆土编辑版" },
+      program: { html: parseProgram(original.companion.configuration.app.description, original.gameId).html },
+      configuration: JSON.parse(JSON.stringify(original.companion.configuration))
+    };
+    project.configuration.pre_prompt += "\n保存后仍保留世界观。";
+    const saved = validateGameCard(createEditedGameCard(original, {
+      title: project.card.title,
+      configuration: project.configuration,
+      programHtml: project.program.html
+    }));
+    const parsed = parseProgram(saved.companion.configuration.app.description, saved.gameId);
+    expect(parsed.html).toContain('const HOST_PROTOCOL = "fyow-host/1"');
+    expect(parsed.html).toContain("setInterval(() => {");
+    expect(saved.companion.configuration.pre_prompt).toContain("保存后仍保留世界观");
+    expect(saved.program.digest).toBe(parsed.digest);
+    expect(saved.packageSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("prefers canonical editor fields over stale platform aliases", () => {
+    const original = createBundledGridCard();
+    const configuration = JSON.parse(JSON.stringify(original.companion.configuration));
+    const replacement = packProgram({
+      gameId: original.gameId,
+      title: "编辑后的程序",
+      html: "<!doctype html><html><body><main>new program</main></body></html>"
+    });
+    configuration.desc = original.companion.configuration.app.description;
+    configuration.prpt = original.companion.configuration.pre_prompt;
+    configuration.app.description = replacement.envelope;
+    configuration.pre_prompt = "新的世界观提示词";
+    const saved = validateGameCard(createEditedGameCard(original, { configuration }));
+    expect(saved.companion.configuration.pre_prompt).toBe("新的世界观提示词");
+    expect(parseProgram(saved.companion.configuration.app.description, saved.gameId).manifest.title).toBe("编辑后的程序");
+    expect(saved.program.digest).toBe(parseProgram(saved.companion.configuration.app.description, saved.gameId).digest);
   });
 
   it("builds a valid card from a draft only after a work binding is supplied", () => {
@@ -77,6 +117,21 @@ describe("online world game cards", () => {
     const libraryId = gameCardLibraryKey(exported);
     saveGameCardLibrary(file, new Map([[libraryId, exported]]));
     expect(loadGameCardLibrary(file, null).get(libraryId)?.packageSha256).toBe(exported.packageSha256);
+  });
+
+  it("preserves deliberate prompt clearing and renamed canonical fields over aliases", () => {
+    const original = createBundledGridCard();
+    const configuration = JSON.parse(JSON.stringify(original.companion.configuration));
+    configuration.name = "old name";
+    configuration.summary = "old summary";
+    configuration.prpt = "old prompt";
+    configuration.app.name = "new name";
+    configuration.app.summary = "";
+    configuration.pre_prompt = "";
+    const saved = validateGameCard(createEditedGameCard(original, { configuration }));
+    expect(saved.companion.configuration.app.name).toBe("new name");
+    expect(saved.companion.configuration.app.summary).toBe("");
+    expect(saved.companion.configuration.pre_prompt).toBe("");
   });
 
   it("ships one fixed companion work and its complete creation-page snapshot", () => {

@@ -35,6 +35,7 @@
 .online-world-author-menu .online-world-card-remove{border-color:#7d4444!important;background:#482a2d!important;color:#ffd7d7!important}.online-world-author-menu .online-world-card-remove:hover{background:#683438!important}
 .online-world-detail{position:absolute;inset:0;z-index:5;display:grid;place-items:center;padding:28px;background:rgba(4,8,12,.76);backdrop-filter:blur(12px)}.online-world-detail-card{display:grid;width:min(420px,calc(100% - 40px));gap:18px;border:1px solid #40586b;border-radius:5px;background:linear-gradient(150deg,#213242,#121b24);padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.58)}.online-world-detail-card h1{margin:0;color:#f2f5f7;font-size:30px;font-weight:650;text-align:center}.online-world-detail-card label{display:grid;gap:8px;color:#aebfcb;font-size:10px}.online-world-detail-card select{width:100%;border:1px solid #506779!important;border-radius:3px!important;background:#101820!important;padding:11px;color:#f1f5f7!important}.online-world-detail-card .primary{min-height:42px;border:0!important;border-radius:3px!important;background:linear-gradient(90deg,#75b022,#588a1b)!important;color:#fff!important;font-weight:800}
 .online-world-frame{width:100%;height:100%;border:0;background:#0d1210}body.settings-overlay-mode #online-world-page{display:none!important}
+.online-world-floating-back{position:absolute;top:0;right:0;z-index:12;width:24px;height:24px;margin:0;border:0!important;border-radius:0 0 0 3px!important;background:transparent!important;padding:0!important;color:#dcecf4!important;opacity:0;pointer-events:none;transition:opacity .12s ease,background-color .12s ease}.online-world-page.game-active .online-world-floating-back{pointer-events:auto}.online-world-page.game-active .online-world-floating-back:hover,.online-world-page.game-active .online-world-floating-back:focus-visible{background:rgba(21,35,45,.72)!important;opacity:.86}.online-world-floating-back span{display:block;font-size:15px;line-height:24px;transform:translateY(-1px)}
 @media(max-width:1120px){.online-world-library-shell{grid-template-columns:205px minmax(0,1fr)}.online-world-library-grid{grid-template-columns:repeat(auto-fill,minmax(128px,1fr))}}
 @media(max-width:820px){.online-world-library-head{padding-inline:18px}.online-world-library-head p{display:none}.online-world-library-shell{grid-template-columns:180px minmax(0,1fr)}.online-world-library-content{padding:18px}.online-world-library-grid{gap:12px}}
 
@@ -103,7 +104,7 @@
 
 /* Editor workspace v2: vertical document flow with a fixed navigation rail. */
 .online-world-editor-page{display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden}
-.online-editor-header{flex:0 0 auto;align-items:flex-start}
+.online-editor-header{flex:0 0 auto;align-items:flex-start;padding-right:78px}
 .online-editor-header>div:first-child{min-width:0}
 .online-editor-header h1,.online-editor-header p{overflow-wrap:anywhere}
 .online-editor-actions{min-width:0;max-width:100%}
@@ -113,7 +114,7 @@
 .online-editor-project-menu span{color:#7f94a5;font-size:10px;text-transform:uppercase}
 .online-editor-project-menu b{overflow-wrap:anywhere;color:#eef5f8;font-size:13px}
 .online-editor-project-menu button{font-size:10px}
-.online-editor-sidebar .online-editor-tabs{display:grid;gap:4px;border:0;margin:0;padding:0;overflow:visible}
+.online-editor-sidebar .online-editor-tabs{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;border:0;margin:0;padding:0;overflow:visible}
 .online-editor-sidebar .online-editor-tabs button{border:1px solid transparent;border-radius:3px;padding:10px;text-align:left}
 .online-editor-sidebar .online-editor-tabs button.active{border-color:#75deb455;background:#75deb414}
 .online-editor-side-note{align-self:end}
@@ -137,6 +138,7 @@
 .online-editor-project-picker header>div{display:grid;gap:4px}
 .online-editor-project-picker header b{font-size:16px}
 .online-editor-project-picker header small{color:#7f94a5;font-size:10px}
+.online-editor-project-picker>form>button{min-height:36px;border-radius:3px!important;background:#1b2b38!important;color:#d8e5ed!important;font-size:11px;font-weight:700}.online-editor-project-picker>form>button.primary{border-color:#75deb466!important;background:#75deb41a!important;color:#9af0c7!important}
 .online-editor-project-list{display:grid;gap:6px;max-height:46vh;overflow:auto}
 .online-editor-project-item{display:grid;gap:4px;border-radius:3px;padding:10px;text-align:left}
 .online-editor-project-item b,.online-editor-project-item small{overflow-wrap:anywhere}

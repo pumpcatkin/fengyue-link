@@ -83,11 +83,12 @@ const { packProgram } = require("./online-world-runtime.cjs");
 const {
   editorProjectPath,
   normalizeEditorProject,
+  ONLINE_WORLD_EDITOR_PLAYBOOK,
   loadEditorProjects,
   saveEditorProjects,
   createEditorProject,
   createBlankEditorProject,
-  parseAgentAnswer,
+  parseStructuredAgentAnswer,
   normalizeAgentSynthesis,
   applyAgentSynthesis,
   agentJobId
@@ -4789,24 +4790,44 @@ class AccountBackend {
       prePrompt: currentProject.configuration?.pre_prompt || "",
       postText: currentProject.configuration?.post_text || "",
       worldBook: currentProject.configuration?.world_book || [],
-      programDigest: currentProject.validation?.programDigest || card.program.digest
+      programDigest: currentProject.validation?.programDigest || card.program.digest,
+      programReview: {
+        sourceIncluded: false,
+        executed: false,
+        htmlBytes: Buffer.byteLength(String(currentProject.program?.html || ""), "utf8")
+      }
     };
+    const playbook = JSON.stringify(ONLINE_WORLD_EDITOR_PLAYBOOK);
     const results = [];
     const agentInstruction = (item, priorOutputs) => {
       const schemas = {
-        architect: '{"summary":"...","coreLoop":["..."],"stateSchema":{},"eventSchema":{},"tasks":[{"id":"...","input":{},"output":{}}]}',
+        architect: '{"summary":"...","coreLoop":["..."],"stateSchema":{},"eventSchema":{},"tasks":[{"id":"...","input":{},"output":{}}],"invariants":["..."]}',
         "prompt-designer": '{"preText":"...","prePrompt":"...","postText":"...","worldBook":[{"group":"...","key":"...","key_region":2,"value":"...","enable":true,"probability":100,"sort":0,"depth":0}]}',
-        "ux-designer": '{"layout":"...","components":["..."],"interactions":["..."],"playerProgress":["..."]}',
-        verifier: '{"score":0,"issues":[{"severity":"P0|P1|P2","message":"...","fix":"..."}],"approved":false}'
+        "runtime-network-engineer": '{"protocol":"fyow-host/1","messagePlan":[{"type":"...","requestId":true,"idempotencyKey":true}],"cadence":{"uiClockMs":1000,"network":"on-demand"},"reconnectPlan":["..."],"issues":[{"severity":"P0|P1|P2","message":"...","fix":"..."}]}',
+        "ux-designer": '{"layout":"...","components":["..."],"interactions":["..."],"playerProgress":["..."],"failureFeedback":["..."]}',
+        verifier: '{"score":0,"issues":[{"severity":"P0|P1|P2","message":"...","fix":"..."}],"playabilityChecks":["..."],"approved":false}'
       };
       return `你是${item.label}，负责${item.role}。这是在线游戏卡编辑器的受信 Agent 协作步骤。
 目标：${goal}
 当前项目：${JSON.stringify(compactProject)}
+运行卡知识库（来自《猎艳疆土》）：${playbook}
 前序 Agent 输出（需要核对、补充或指出冲突）：${JSON.stringify(priorOutputs).slice(0, 30000)}
-只输出一个 JSON 对象，不要输出 Markdown 解释。建议输出结构：${schemas[item.id] || '{"result":"..."}'}。
+先检查前序输出中的冲突，再给出可执行建议；不要把猜测当成平台事实。只输出一个 JSON 对象，不要输出 Markdown 解释。建议输出结构：${schemas[item.id] || '{"result":"..."}'}。
+程序仅提供摘要与大小，未提供源码或执行记录；不得声称已运行或已验证完整玩法，相关结论必须标为待实测。
 不要生成账号、Token、Cookie、平台 HTTP、任意本地文件或主进程代码；所有规则必须可被宿主校验，程序只运行在受限卡片沙箱中。`;
     };
     try {
+      const requestStructuredAgentOutput = async (workId, query, label, { signal, model }, synthesis = false) => {
+        const modelName = model?.label || model?.model || null;
+        const active = synthesis ? this.onlineWorldEditorJob.synthesis
+          : this.onlineWorldEditorJob.agents.find(agent => agent.id === this.onlineWorldEditorJob.currentAgent);
+        if (active) active.model = modelName;
+        this.onlineWorldEditorJob.updatedAt = Date.now();
+        this.emit();
+        const response = await this.requestEditorModelForWork(workId, query, { signal, label });
+        const parsed = parseStructuredAgentAnswer(response?.answer, label, { synthesis });
+        return { ...response, model: response.model || modelName, parsed };
+      };
       for (const item of components) {
         const record = this.onlineWorldEditorJob.agents.find(agent => agent.id === item.id);
         this.onlineWorldEditorJob.currentAgent = item.id;
@@ -4822,10 +4843,10 @@ class AccountBackend {
           const result = await this.withAutoModel(
             targetWorkId,
             `编辑器 · ${item.label}`,
-            ({ signal }) => this.requestEditorModelForWork(targetWorkId, query, { signal, label: item.label }),
+            context => requestStructuredAgentOutput(targetWorkId, query, item.label, context),
             { scope: "online-world-editor" }
           );
-          const parsed = parseAgentAnswer(result.answer);
+          const parsed = result.parsed;
           results.push({ id: item.id, label: item.label, model: result.model || null, output: parsed });
           if (record) {
             record.status = "done";
@@ -4846,12 +4867,13 @@ class AccountBackend {
       synthesisRecord.status = "running";
       this.onlineWorldEditorJob.updatedAt = Date.now();
       this.emit();
-      const synthesisInstruction = `你是在线游戏编辑器的中枢审查模型。请综合多个 Agent 输出，判断冲突和可执行性，只把安全、明确、属于作品配置的数据写入 configurationPatch。
+      const synthesisInstruction = `你是在线游戏编辑器的中枢审查模型。请综合多个 Agent 输出，判断冲突和可执行性，并把结论返回给中枢调用方；只把安全、明确、属于作品配置的数据写入 configurationPatch。
 目标：${goal}
 当前项目：${JSON.stringify(compactProject)}
+运行卡知识库：${playbook}
 Agent 输出：${JSON.stringify(results).slice(0, 50000)}
-只输出一个 JSON 对象，格式为：{"summary":"判断与修改摘要","configurationPatch":{"app":{"name":"可选","summary":"可选"},"pre_text":"可选","pre_prompt":"可选","post_text":"可选","world_book":[]},"validation":{"approved":true,"issues":[]},"questions":[]}
-configurationPatch 只能包含 app.name、app.summary、pre_text、pre_prompt、post_text、world_book；不要改 app.id、程序代码、伴生作品编号、Agent 工具绑定或任何平台权限字段。若没有足够依据，返回空 configurationPatch，并在 questions 中说明。`;
+只输出一个 JSON 对象，格式为：{"summary":"判断与修改摘要","configurationPatch":{"app":{"name":"可选","summary":"可选"},"pre_text":"可选","pre_prompt":"可选","post_text":"可选","world_book":[]},"validation":{"approved":true,"issues":[],"playabilityChecks":[]},"questions":[]}
+configurationPatch 只能包含 app.name、app.summary、pre_text、pre_prompt、post_text、world_book；不要改 app.id、程序代码、伴生作品编号、Agent 工具绑定或任何平台权限字段。必须逐项判断运行时协议、请求节奏、程序可玩性和配置回读风险；未提供源码或运行记录，程序可玩性只可列为待实测，不能宣称已通过。若没有足够依据，返回空 configurationPatch，并在 questions 中说明。`;
       const synthesisQuery = `[[FYOW:EDITOR:synthesizer:v1]]\n${JSON.stringify({
         schema: "fyow.editor-synthesis-request/1",
         input: { goal, project: compactProject, agentOutputs: results, instruction: synthesisInstruction }
@@ -4861,13 +4883,16 @@ configurationPatch 只能包含 app.name、app.summary、pre_text、pre_prompt�
         const result = await this.withAutoModel(
           card.companion.workId,
           "编辑器 · 中枢审查与合并",
-          ({ signal }) => this.requestEditorModelForWork(card.companion.workId, synthesisQuery, {
-            signal,
-            label: "中枢审查与合并"
-          }),
+          context => requestStructuredAgentOutput(
+            card.companion.workId,
+            synthesisQuery,
+            "中枢审查与合并",
+            context,
+            true
+          ),
           { scope: "online-world-editor" }
         );
-        synthesis = normalizeAgentSynthesis(parseAgentAnswer(result.answer));
+        synthesis = normalizeAgentSynthesis(result.parsed);
         synthesisRecord.status = "done";
         synthesisRecord.model = result.model || null;
       } catch (error) {

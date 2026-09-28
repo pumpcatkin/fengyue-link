@@ -51,8 +51,6 @@
       <header class="online-editor-header">
         <div><small>在线游戏编辑器</small><h1>游戏卡工作区</h1><p>先保存本地草稿，保存并同步时才创建或更新伴生作品。</p></div>
         <div class="online-editor-actions">
-          <button id="online-editor-new" type="button">新建游戏卡</button>
-          <button id="online-editor-import" type="button">导入游戏卡</button>
           <button id="online-editor-save" type="button" class="primary">保存本地草稿</button>
           <button id="online-editor-publish" type="button">保存并同步作品</button>
           <button id="online-editor-back" type="button">返回主页</button>
@@ -72,7 +70,6 @@
             <button type="button" data-editor-tab="world-book">世界书</button>
             <button type="button" data-editor-tab="advanced">全部配置</button>
           </nav>
-          <div class="online-editor-side-note">只有游戏卡服主能在这里识别和保存本地项目。访客仍可在游戏库中打开别人分享的游戏卡，但不能通过编辑器上传或修改。</div>
         </aside>
         <main class="online-editor-main">
           <div id="online-editor-empty" class="online-editor-empty"><strong>新建或导入一张游戏卡</strong><span>新建时先保存为本地草稿，不会立即创建伴生作品。</span></div>
@@ -118,6 +115,7 @@
         <form method="dialog">
           <header><div><b>选择本地项目</b><small>仅显示当前账号作为服主的项目</small></div><button value="cancel" type="submit">关闭</button></header>
           <div id="online-editor-project-list" class="online-editor-project-list"></div>
+          <button id="online-editor-import" value="cancel" type="button">导入游戏卡</button>
           <button id="online-editor-create-blank" value="cancel" type="button" class="primary">从零新建游戏卡</button>
         </form>
       </dialog>
@@ -176,6 +174,7 @@
         <div><button id="online-world-unopened-back" type="button">返回游戏库</button><button id="online-world-unopened-start" type="button">开启此服务器</button></div>
       </section>
       <iframe id="online-world-frame" class="online-world-frame hidden" sandbox="allow-scripts" allow="autoplay" src="about:blank" title="在线游戏世界前端"></iframe>
+      <button id="online-world-floating-back" class="online-world-floating-back" type="button" aria-label="返回游戏库" title="返回游戏库"><span aria-hidden="true">↩</span></button>
     </section>
     <div class="app-shell hidden" id="multiplayer-page">
       <aside class="sidebar">

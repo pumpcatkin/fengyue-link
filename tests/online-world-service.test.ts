@@ -6,7 +6,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
-const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue } = require("../electron/online-world-service.cjs");
+const { OnlineWorldService, workReference, normalizeWorkDetail, bindWorldAuthority, recordPlatformOrder, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, compactDialogueReply, generalMemoryQualityIssue, modelConfigSavePayload, coreConfigMatches, coreConfigDifference } = require("../electron/online-world-service.cjs");
 const { generateOnlineWorldIdentity } = require("../electron/online-world-crypto.cjs");
 const { assembleCommentRecords, encodeCommentRecord, extractCommentItems, signRecord, canonicalJson, sha256 } = require("../electron/online-world-protocol.cjs");
 const { createWorld, createFallbackGeneral, applyIntent, battleCasualties, generatedGeneralPower, staticCell } = require("../electron/grid-world-game.cjs");
@@ -775,6 +775,7 @@ describe("online world platform service", () => {
       pre_text: card.companion.configuration.pre_text,
       post_text: card.companion.configuration.post_text,
       app: {
+        id: card.companion.workId,
         name: card.companion.configuration.app.name,
         description: card.companion.configuration.app.description
       }
@@ -787,6 +788,61 @@ describe("online world platform service", () => {
       `POST /apps/${card.companion.workId}/model-config`,
       `GET /apps/${card.companion.workId}/model-config/export`
     ]);
+  });
+
+  it("matches platform readback with aliases, normalized newlines, and server world-book metadata", () => {
+    const expected = modelConfigSavePayload({
+      app: { id: "old-id", name: "测试", description: "program" },
+      pre_prompt: "世界观\n规则",
+      pre_text: "前置",
+      post_text: "后置",
+      world_book: [{ id: "local", key: "task", value: "只返回 JSON", sort: 1 }]
+    }, "new-work-id", "测试", "program", { provider: "fixture", name: "fixture-model" });
+    const exported = {
+      app: { id: "new-work-id", description: "program" },
+      prpt: "世界观\r\n规则",
+      pretxt: "前置",
+      posttxt: "后置",
+      wbook: [{ id: "server", app_id: "new-work-id", key: "task", value: "只返回 JSON", sort: 1, updated_at: "now" }]
+    };
+    expect(coreConfigMatches(exported, expected)).toBe(true);
+    expect(coreConfigDifference(exported, expected)).toEqual([]);
+  });
+
+  it("synchronizes legacy configuration aliases so an editor save cannot restore an old program", () => {
+    const payload = modelConfigSavePayload({
+      desc: "旧程序",
+      prpt: "旧世界观",
+      pretxt: "旧前置",
+      posttxt: "旧后置",
+      wbook: [{ key: "old" }],
+      app: { description: "旧程序" },
+      pre_prompt: "新世界观",
+      pre_text: "新前置",
+      post_text: "新后置",
+      world_book: [{ key: "new" }]
+    }, "new-work-id", "测试", "新程序", { provider: "fixture", name: "fixture-model" }, { preserveExtras: true });
+    expect(payload).toMatchObject({
+      desc: "新程序",
+      prpt: "新世界观",
+      pretxt: "新前置",
+      posttxt: "新后置",
+      wbook: [{ key: "new" }],
+      app: { id: "new-work-id", description: "新程序" }
+    });
+  });
+
+  it("waits for delayed cloud configuration visibility without accepting lost content", async () => {
+    const expected = { pre_prompt: "latest", world_book: [{ key: "task", value: "contract" }] };
+    const requestConsole = vi.fn().mockResolvedValueOnce({ data: { ...expected, pre_prompt: "stale" } })
+      .mockResolvedValue({ data: expected });
+    const instance = service({ requestConsole });
+    expect(await instance.readBackModelConfig("work", expected, "readback mismatch")).toEqual(expected);
+    expect(requestConsole).toHaveBeenCalledTimes(2);
+    requestConsole.mockReset().mockResolvedValue({ data: { ...expected, world_book: [] } });
+    await expect(instance.readBackModelConfig("work", expected, "readback mismatch")).rejects.toThrow("worldBook");
+    expect(requestConsole).toHaveBeenCalledTimes(3);
+    expect(coreConfigMatches({ pre_prompt: "", prpt: "latest", world_book: expected.world_book }, expected)).toBe(false);
   });
 
   it("rejects a cloud configuration update when the platform author does not match the card", async () => {

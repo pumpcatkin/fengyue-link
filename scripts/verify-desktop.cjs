@@ -56,7 +56,7 @@ if (process.type === "renderer") {
     if (name === "listOnlineWorldCards") return { cards: [{ cardId: "cc.aiero.fyow.grid-conquest.official", gameId: "cc.aiero.fyow.grid-conquest", title: "猎艳疆土", version: 26, workId: "b27218e6-80f9-4c0d-91c7-4b8f87d47be8", workName: "猎艳疆土[b27218e680f94c0d]", authorAccountId: "39404f0e-7678-45a1-86c6-9a21116bacbd", isCurrentUserAuthor: true }], activeCardId: null };
     if (name === "getOnlineWorldState") return onlineWorldFixture || { status: "closed", initialized: false, revision: 0, work: null, program: { source: "builtin-preview", digest: "builtin-preview" } };
     if (name === "openOnlineWorld") return onlineWorldFixture;
-    if (name === "syncOnlineWorld") return { ...onlineWorldFixture, status: "ready", syncing: false };
+    if (name === "syncOnlineWorld" || name === "reconnectOnlineWorld") return { ...onlineWorldFixture, status: "ready", syncing: false };
     if (name === "closeOnlineWorld") return { ...onlineWorldFixture, status: "closed", syncing: false };
     if (name === "updateOnlineWorldPreferences") {
       onlineWorldFixture = {
@@ -126,7 +126,8 @@ if (process.type === "renderer") {
       await evaluate(`document.querySelector('[data-author-link="github"]').click()`);
       assert(calls.some(call => call.name === "openAuthorLink" && call.args[0] === "github"));
       assert.equal(await evaluate(`document.querySelector('#enter-multiplayer').nextElementSibling.id`), "enter-online-world");
-      assert.equal(await evaluate(`document.querySelector('#enter-online-world').nextElementSibling.id`), "edit-profiles");
+      assert.equal(await evaluate(`document.querySelector('#enter-online-world').nextElementSibling.id`), "enter-online-editor");
+      assert.equal(await evaluate(`document.querySelector('#enter-online-editor').nextElementSibling.id`), "edit-profiles");
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').getAttribute('sandbox')`), "allow-scripts");
       assert.equal(await evaluate(`document.querySelector('#online-world-frame').getAttribute('allow')`), "autoplay");
       await evaluate(`document.querySelector('#enter-online-world').click()`);
@@ -241,7 +242,7 @@ if (process.type === "renderer") {
         return document.querySelector('#connection-retry').textContent;
       })()`), "重试中");
       await settle();
-      assert.equal(calls.filter(call => call.name === "syncOnlineWorld").length, 1, "retry did not reach the host");
+      assert.equal(calls.filter(call => call.name === "reconnectOnlineWorld").length, 1, "retry did not reach the host");
       assert.equal(await embeddedGameFrame.executeJavaScript(`document.querySelector('#connection-notice').classList.contains('hidden')`), true);
       await embeddedGameFrame.executeJavaScript(`document.querySelector('#owner-command-toggle').click()`);
       await settle();

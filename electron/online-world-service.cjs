@@ -935,7 +935,7 @@ function modelConfigSavePayload(exported, workId, name, description, model, { pr
     const value = values.map(Number).find(Number.isFinite);
     return value == null ? fallback : value;
   };
-  const summary = String(source.summary ?? source.smry ?? source.abs_txt ?? source.sum_info ?? source.abstract ?? source.app?.summary ?? "在线游戏世界");
+  const summary = String(source.app?.summary ?? source.summary ?? source.smry ?? source.abs_txt ?? source.sum_info ?? source.abstract ?? "在线游戏世界");
   const language = [source.lang, source.locale, source.lc, source.lng, source.language, source.app?.language]
     .map(value => typeof value === "string" ? value.trim() : "")
     .find(Boolean) || "zh-Hans";
@@ -943,7 +943,7 @@ function modelConfigSavePayload(exported, workId, name, description, model, { pr
   const preText = String(source.pre_text ?? source.pretxt ?? source.ptx ?? source.pre_tx ?? source.prefix_txt ?? "");
   const postText = String(source.post_text ?? source.posttxt ?? source.potx ?? source.post_tx ?? source.suffix_txt ?? "");
   const worldBook = cloneJson(source.world_book || source.wbook || source.lore_bk || source.world_bk || source.wb || []);
-  return {
+  const payload = {
     ...(preserveExtras ? source : {}),
     pre_prompt: prePrompt,
     pre_prompt_sort: firstNumber(0, source.pre_prompt_sort),
@@ -990,6 +990,7 @@ function modelConfigSavePayload(exported, workId, name, description, model, { pr
     extend: cloneJson(source.extend || { ai_variable_enabled: false }),
     app: {
       ...(source.app && typeof source.app === "object" ? source.app : {}),
+      id: String(workId),
       name: String(name),
       description: String(description),
       summary,
@@ -1006,17 +1007,102 @@ function modelConfigSavePayload(exported, workId, name, description, model, { pr
       schedule_publish_or_not: false
     }
   };
+  const synchronizedAliases = {
+    name,
+    nm: name,
+    ttl: name,
+    title: name,
+    app_name: name,
+    summary,
+    smry: summary,
+    abs_txt: summary,
+    sum_info: summary,
+    abstract: summary,
+    desc: description,
+    descr: description,
+    dsc: description,
+    intro: description,
+    description,
+    prpt: prePrompt,
+    ppt: prePrompt,
+    pre_pt: prePrompt,
+    prompt_pre: prePrompt,
+    pretxt: preText,
+    ptx: preText,
+    pre_tx: preText,
+    prefix_txt: preText,
+    posttxt: postText,
+    potx: postText,
+    post_tx: postText,
+    suffix_txt: postText,
+    wbook: worldBook,
+    lore_bk: worldBook,
+    world_bk: worldBook,
+    wb: worldBook
+  };
+  if (preserveExtras) for (const [key, value] of Object.entries(synchronizedAliases)) {
+    if (Object.hasOwn(source, key)) payload[key] = cloneJson(value);
+  }
+  return payload;
+}
+
+const WORLD_BOOK_SERVER_KEYS = new Set(["id", "app_id", "appId", "created_at", "updated_at", "createdAt", "updatedAt"]);
+
+function normalizeConfigText(value) {
+  return String(value ?? "").replace(/\r\n?/g, "\n");
+}
+
+function comparableWorldBook(value, { sortEntries = false } = {}) {
+  if (!Array.isArray(value)) return value;
+  const entries = value.map(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const copy = {};
+    for (const [key, item] of Object.entries(entry)) {
+      if (!WORLD_BOOK_SERVER_KEYS.has(key)) copy[key] = item;
+    }
+    return copy;
+  });
+  if (!sortEntries) return entries;
+  return entries.sort((left, right) => canonicalJson([
+    Number(left?.sort ?? 0),
+    Number(left?.depth ?? 0),
+    String(left?.key ?? left?.keywords ?? ""),
+    String(left?.value ?? left?.content ?? "")
+  ]).localeCompare(canonicalJson([
+    Number(right?.sort ?? 0),
+    Number(right?.depth ?? 0),
+    String(right?.key ?? right?.keywords ?? ""),
+    String(right?.value ?? right?.content ?? "")
+  ])));
+}
+
+function coreConfigProjection(value) {
+  const firstText = (...values) => normalizeConfigText(values.find(value => value != null));
+  return {
+    description: firstText(value?.app?.description, value?.desc, value?.descr, value?.dsc, value?.intro, value?.description),
+    prePrompt: firstText(value?.pre_prompt, value?.prpt, value?.ppt, value?.pre_pt, value?.prompt_pre),
+    preText: firstText(value?.pre_text, value?.pretxt, value?.ptx, value?.pre_tx, value?.prefix_txt),
+    postText: firstText(value?.post_text, value?.posttxt, value?.potx, value?.post_tx, value?.suffix_txt),
+    worldBook: value?.world_book || value?.wbook || value?.lore_bk || value?.world_bk || value?.wb || []
+  };
+}
+
+function coreConfigDifference(exported, expected) {
+  const actual = coreConfigProjection(exported);
+  const target = coreConfigProjection(expected);
+  const differences = [];
+  for (const key of ["description", "prePrompt", "preText", "postText"]) {
+    if (actual[key] !== target[key]) differences.push(key);
+  }
+  const exactWorldBook = canonicalJson(comparableWorldBook(actual.worldBook)) === canonicalJson(comparableWorldBook(target.worldBook));
+  const normalizedWorldBook = canonicalJson(comparableWorldBook(actual.worldBook, { sortEntries: true }))
+    === canonicalJson(comparableWorldBook(target.worldBook, { sortEntries: true }));
+  if (!exactWorldBook && !normalizedWorldBook) differences.push("worldBook");
+  return differences;
 }
 
 function coreConfigMatches(exported, expected) {
-  const fields = value => ({
-    description: String(value?.desc ?? value?.descr ?? value?.dsc ?? value?.intro ?? value?.description ?? value?.app?.description ?? ""),
-    prePrompt: String(value?.prpt ?? value?.ppt ?? value?.pre_pt ?? value?.prompt_pre ?? value?.pre_prompt ?? ""),
-    preText: String(value?.pretxt ?? value?.ptx ?? value?.pre_tx ?? value?.prefix_txt ?? value?.pre_text ?? ""),
-    postText: String(value?.posttxt ?? value?.potx ?? value?.post_tx ?? value?.suffix_txt ?? value?.post_text ?? ""),
-    worldBook: value?.world_book || value?.wbook || value?.lore_bk || value?.world_bk || value?.wb || []
-  });
-  return canonicalJson(fields(exported)) === canonicalJson(fields(expected));
+  return coreConfigDifference(exported, expected).length === 0;
 }
 
 function validCasualtyRules(value) {
@@ -3031,11 +3117,7 @@ class OnlineWorldService {
       `/apps/${encodeURIComponent(workId)}/model-config`,
       { method: "POST", body: payload, timeout: 30000 }
     ));
-    const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
-      `/apps/${encodeURIComponent(workId)}/model-config/export`,
-      { timeout: 30000 }
-    )));
-    if (!coreConfigMatches(verified, payload)) throw new Error("云端配置保存后回读不一致");
+    const verified = await this.readBackModelConfig(workId, payload, "云端配置保存后回读不一致");
     return createExportedGameCard(card, verified);
   }
 
@@ -3063,11 +3145,7 @@ class OnlineWorldService {
       `/apps/${encodeURIComponent(workId)}/model-config`,
       { method: "POST", body: payload, timeout: 30000 }
     ));
-    const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
-      `/apps/${encodeURIComponent(workId)}/model-config/export`,
-      { timeout: 30000 }
-    )));
-    if (!coreConfigMatches(verified, payload)) throw new Error("新作品配置保存后回读不一致");
+    const verified = await this.readBackModelConfig(workId, payload, "新作品配置保存后回读不一致");
     const rebound = rebindGameCardWithAuthor(card, workId, this.getOrigin?.(), accountId);
     return createExportedGameCard(rebound, verified);
   }
@@ -3911,6 +3989,20 @@ class OnlineWorldService {
       }
     }
     throw lastError;
+  }
+
+  async readBackModelConfig(workId, expected, label) {
+    let lastDifferences = [];
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
+        `/apps/${encodeURIComponent(workId)}/model-config/export`,
+        { timeout: 30000 }
+      )));
+      lastDifferences = coreConfigDifference(verified, expected);
+      if (!lastDifferences.length) return verified;
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+    }
+    throw new Error(`${label}（字段：${lastDifferences.join(", ") || "未知"}）`);
   }
 
   async readHistoryPage(page, { fresh = false } = {}) {
@@ -7531,11 +7623,7 @@ class OnlineWorldService {
           body: targetPayload,
           timeout: 30000
         }));
-        const verifiedPayload = await this.retryPlatformWrite(() => this.requestConsole(
-          `/apps/${encodeURIComponent(newWork.id)}/model-config/export`,
-          { timeout: 30000 }
-        ));
-        if (!coreConfigMatches(exportedConfig(verifiedPayload), targetPayload)) throw new Error("新作品核心配置回读不一致");
+        await this.readBackModelConfig(newWork.id, targetPayload, "新作品核心配置回读不一致");
         draft.configurationImported = true;
         this.saveMigrationDraftForSource(oldWork, oldControl);
       } catch (error) {
@@ -7781,4 +7869,4 @@ class OnlineWorldService {
   }
 }
 
-module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, publicAccountName, isEmailLikeAccountName, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, exportedConfig, modelConfigSavePayload, coreConfigMatches, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };
+module.exports = { OnlineWorldService, workReference, normalizeWorkDetail, publicAccountName, isEmailLikeAccountName, bindWorldAuthority, commentAccountId, commentTimestamp, recordPlatformOrder, comparePlatformOrder, parseJsonAnswer, playerContextFromProfile, playerContextQualityIssue, generalGenerationQualityIssue, normalizeGeneratedGeneral, dialogueQualityIssue, combinedDialogueQualityIssue, letterQualityIssue, appearanceQualityIssue, compactDialogueReply, generalMemoryQualityIssue, exportedConfig, modelConfigSavePayload, coreConfigMatches, coreConfigDifference, HISTORY_PAGE_SIZE, MAX_HISTORY_PAGES };

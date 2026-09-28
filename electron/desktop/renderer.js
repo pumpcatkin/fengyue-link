@@ -1043,7 +1043,13 @@ function renderOnlineWorldEditorProject(){
   workspace.classList.toggle("hidden",!project);
   if(!project)return;
   const card=project.card||{};
-  const configuration=project.configuration||{};
+  const configuration=project.configuration&&typeof project.configuration==="object"?project.configuration:{};
+  configuration.app=configuration.app&&typeof configuration.app==="object"?configuration.app:{};
+  configuration.pre_text=String(configuration.pre_text??"");
+  configuration.pre_prompt=String(configuration.pre_prompt??"");
+  configuration.post_text=String(configuration.post_text??"");
+  configuration.world_book=Array.isArray(configuration.world_book)?configuration.world_book:[];
+  project.configuration=configuration;
   const app=configuration.app||{};
   document.querySelector("#online-editor-project-label").textContent=project.card?.title||"未命名游戏";
   document.querySelector("#online-editor-project-menu-title").textContent=project.card?.title||"未命名游戏";
@@ -1056,10 +1062,10 @@ function renderOnlineWorldEditorProject(){
   setEditorValue("online-editor-game-id",card.gameId||"");
   setEditorValue("online-editor-work-id",card.companion?.workId||"");
   setEditorValue("online-editor-program",project.program?.html||"");
-  setEditorValue("online-editor-pre-text",configuration.pre_text||"");
-  setEditorValue("online-editor-pre-prompt",configuration.pre_prompt||"");
-  setEditorValue("online-editor-post-text",configuration.post_text||"");
-  setEditorValue("online-editor-world-book",editorJson(configuration.world_book||[]));
+  setEditorValue("online-editor-pre-text",configuration.pre_text);
+  setEditorValue("online-editor-pre-prompt",configuration.pre_prompt);
+  setEditorValue("online-editor-post-text",configuration.post_text);
+  setEditorValue("online-editor-world-book",editorJson(configuration.world_book));
   setEditorValue("online-editor-config-json",editorJson(configuration));
   renderOnlineWorldEditorAgents();
   renderOnlineWorldEditorProjects();
@@ -1638,7 +1644,6 @@ async function openOnlineWorldEditorProjects(){
     if(picker?.showModal)picker.showModal();
   }catch(error){toast(friendlyError(error))}
 }
-document.querySelector("#online-editor-new").addEventListener("click",openOnlineWorldEditorProjects);
 document.querySelector("#online-editor-open-projects").addEventListener("click",openOnlineWorldEditorProjects);
 document.querySelector("#online-editor-create-blank").addEventListener("click",()=>invoke(async()=>{
   const result=await api.createOnlineWorldCardEditor();
@@ -1651,6 +1656,7 @@ document.querySelector("#online-editor-create-blank").addEventListener("click",(
   toast("已创建本地草稿，保存并同步时才会创建伴生作品");
 }).catch(()=>{}));
 document.querySelector("#online-editor-import").addEventListener("click",()=>invoke(async()=>{
+  document.querySelector("#online-editor-project-picker")?.close();
   const result=await api.importOnlineWorldEditorCard();
   if(result?.canceled)return;
   onlineWorldEditorProjects=Array.isArray(result?.editorProjects)?result.editorProjects:onlineWorldEditorProjects;
@@ -1756,6 +1762,12 @@ document.querySelector("#online-world-profile").addEventListener("change",render
 document.querySelector("#online-world-back").addEventListener("click",async()=>{
   try{await returnToOnlineWorldLibrary()}catch(error){toast(friendlyError(error))}
   showPage("home");
+});
+document.querySelector("#online-world-floating-back").addEventListener("click",async()=>{
+  try{
+    await returnToOnlineWorldLibrary();
+    renderOnlineWorldCards(await api.listOnlineWorldCards());
+  }catch(error){toast(friendlyError(error))}
 });
 document.querySelector("#online-world-open-form").addEventListener("submit",async event=>{
   event.preventDefault();

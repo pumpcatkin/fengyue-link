@@ -7,6 +7,7 @@ const { rankEditorModels, editorModelTier, assertActive } = require("./auto-mode
 const { saveEditorProjects } = require("./online-game-editor.cjs");
 const { modelConfigSavePayload } = require("./online-world-service.cjs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
+const { createBudget } = require("./harness-budget.cjs");
 
 async function ensureHarnessWork(backend) {
   const file = `${backend.onlineWorldEditorFile}.harness-work.json`;
@@ -42,6 +43,10 @@ async function runEditorHarness(backend, payload = {}) {
   if (backend.onlineWorldEditorSessionKey) throw new Error("已有开发任务运行中，请等待或停止当前任务");
   const key = String(payload.libraryId || payload.cardId || "");
   const original = backend.onlineWorldEditorProject(key);
+  const budget = createBudget(payload.budgetPoints === undefined ? original.developmentSettings?.budgetPoints : payload.budgetPoints);
+  original.developmentSettings = { ...original.developmentSettings, budgetPoints: budget.snapshot().limit };
+  backend.onlineWorldEditorProjects.projects[key] = original;
+  saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
   const baseFingerprint = fingerprint(projectFiles(original));
   const goal = String(payload.goal || "").trim().slice(0, 4000);
   if (!goal) throw new Error("请输入游戏开发目标");
@@ -56,7 +61,7 @@ async function runEditorHarness(backend, payload = {}) {
   };
   const cancel = () => backend.cancelAutoModels("online-world-editor");
   controller.signal.addEventListener("abort", cancel, { once: true });
-  const job = backend.onlineWorldEditorJob = { id, libraryId: key, status: "running", goal, currentAgent: "准备开发环境", agents: [], events: [], startedAt: Date.now() };
+  const job = backend.onlineWorldEditorJob = { id, libraryId: key, status: "running", goal, budget: budget.snapshot(), currentAgent: "准备开发环境", agents: [], events: [], startedAt: Date.now() };
   backend.emit();
   let checkpoint = null;
   try {
@@ -68,10 +73,10 @@ async function runEditorHarness(backend, payload = {}) {
       working.program.html = candidate.files["program.html"];
       const config = JSON.parse(candidate.files["configuration.json"]);
       working.configuration = { ...working.configuration, ...config, app: { ...working.configuration.app, ...config.app } };
-      working.harness = { ...working.harness, tests: JSON.parse(candidate.files["tests.json"]), failures: candidate.failures };
+      working.harness = { ...working.harness, tests: JSON.parse(candidate.files["tests.json"]), failures: candidate.failures, coordinator: candidate.coordinator };
     }
     const next = await runGameHarness({ project: working, goal, signal: controller.signal,
-      testGame: testGameInBrowser,
+      testGame: testGameInBrowser, getBudget: budget.snapshot,
       checkpoint: async value => {
         check();
         const current = backend.onlineWorldEditorProject(key);
@@ -82,22 +87,41 @@ async function runEditorHarness(backend, payload = {}) {
         saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
         job.events = value.events.map(({ result, ...event }) => ({ ...event, result: result && !result.content ? result : undefined })).slice(-24);
         job.currentAgent = value.events.at(-1)?.tool;
-        job.models = value.models; job.updatedAt = Date.now(); backend.emit();
+        job.models = value.models; job.coordinator = value.coordinator; job.budget = budget.snapshot(); job.updatedAt = Date.now(); backend.emit();
       },
-      request: async ({ query, kind, excludeModel, signal, parse }) => {
+      request: async ({ query, kind, excludeModel, preferredModel, signal, parse }) => {
         check(); assertActive(signal);
+        budget.check();
         const stop = () => backend.cancelAutoModels("online-world-editor");
         signal.addEventListener("abort", stop, { once: true });
         try {
-          return await backend.withAutoModel(workId, kind === "review" ? "Harness 独立评审" : "Harness 自主开发", async ({ model, signal: modelSignal }) => {
+          return await backend.withAutoModel(workId, kind === "review" ? "Harness 独立评审" : kind === "consult" ? "Harness 技术顾问" : "Harness 主轴开发", async ({ model, signal: modelSignal }) => {
             assertActive(signal);
-            const response = await backend.requestEditorModelForWork(workId, query, { signal: modelSignal, label: "游戏 Harness" });
-            return { ...response, parsed: parse(response.answer), modelKey: String(model.model).toLowerCase(), modelLabel: model.label };
+            budget.check();
+            let charged = false;
+            const record = usage => {
+              charged = true;
+              job.budget = budget.record(usage);
+              job.updatedAt = Date.now(); backend.emit();
+              backend.appendSessionLog?.("harness-billing", { kind, model: model.label, points: usage, budget: job.budget });
+            };
+            try {
+              const response = await backend.requestEditorModelForWork(workId, query, { signal: modelSignal, label: "游戏 Harness" });
+              record(response.points);
+              if (job.budget.unknownCharges) budget.check();
+              return { ...response, parsed: parse(response.answer), modelKey: String(model.model).toLowerCase(), modelLabel: model.label };
+            } catch (error) {
+              if (!charged && error.modelUsage) record(error.modelUsage.points);
+              // Failed/invalid replies also cost points. Check before router retries.
+              budget.check();
+              throw error;
+            }
           }, { scope: "online-world-editor", maxAttempts: 3,
             rank: items => {
               const seen = new Set();
-              return rankEditorModels(items.filter(item => editorModelTier(item) < 3 && String(item.model).toLowerCase() !== excludeModel))
-                .filter(item => { const tier = editorModelTier(item); if (seen.has(tier)) return false; seen.add(tier); return true; });
+              const ranked = rankEditorModels(items.filter(item => editorModelTier(item) < 3 && String(item.model).toLowerCase() !== excludeModel));
+              if (kind === "develop" && preferredModel) ranked.sort((a, b) => Number(String(b.model).toLowerCase() === preferredModel) - Number(String(a.model).toLowerCase() === preferredModel));
+              return ranked.filter(item => { const tier = editorModelTier(item); if (seen.has(tier)) return false; seen.add(tier); return true; });
             } });
         } finally { signal.removeEventListener("abort", stop); }
       }
@@ -111,10 +135,10 @@ async function runEditorHarness(backend, payload = {}) {
     job.status = "completed"; job.result = next.harness; job.currentAgent = null;
     return { project: next, draft: next.harness };
   } catch (error) {
-    job.status = error.name === "AbortError" ? "cancelled" : "failed";
+    job.status = /^HARNESS_(BUDGET|BILLING)/.test(error.code || "") ? "paused" : error.name === "AbortError" ? "cancelled" : "failed";
     job.error = error.message;
     if (checkpoint) {
-      checkpoint.status = job.status; checkpoint.error = error.message;
+      checkpoint.status = job.status; checkpoint.error = error.message; checkpoint.budget = budget.snapshot();
       const current = backend.onlineWorldEditorProjects.projects[key];
       if (current?.harnessCandidate?.baseFingerprint === baseFingerprint) {
         current.harnessCandidate = checkpoint;

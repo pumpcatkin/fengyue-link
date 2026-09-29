@@ -189,6 +189,16 @@ app.whenReady().then(async () => {
       ["前置保留", "主提示词保留", "后置保留"]);
     assert.equal(await win.webContents.executeJavaScript(`document.querySelectorAll(".online-editor-header #online-editor-import,.online-editor-header #online-editor-new,.online-editor-side-note").length`), 0);
     assert.equal(await win.webContents.executeJavaScript(`document.querySelector("#online-editor-import").closest("dialog").id`), "online-editor-project-picker");
+    const budgetControls = await win.webContents.executeJavaScript(`(() => {
+      const input=document.querySelector("#online-editor-budget-points"),unlimited=document.querySelector("#online-editor-budget-unlimited");
+      input.value="79999";let rejected=false;try{syncOnlineWorldEditorFromForm()}catch(error){rejected=error.message.includes("80000")}
+      input.value="120000";const finite=syncOnlineWorldEditorFromForm().developmentSettings.budgetPoints;
+      unlimited.checked=true;unlimited.dispatchEvent(new Event("change"));renderOnlineWorldEditorProgress(null);
+      const disabled=input.disabled,unbounded=syncOnlineWorldEditorFromForm().developmentSettings.budgetPoints;
+      renderOnlineWorldEditorProject();
+      return {rejected,finite,disabled,unbounded,restored:unlimited.checked};
+    })()`);
+    assert.deepEqual(budgetControls,{rejected:true,finite:120000,disabled:true,unbounded:null,restored:true});
     for (const [width, height] of [[1280, 900], [420, 820]]) {
       win.setContentSize(width, height);
       await new Promise(resolve => setTimeout(resolve, 200));
@@ -201,6 +211,8 @@ app.whenReady().then(async () => {
         });
       })()`), false, "editor command overlaps settings");
       fs.writeFileSync(path.join(output, `editor-${width}.png`), (await win.webContents.capturePage()).toPNG());
+      await win.webContents.executeJavaScript(`document.querySelector(".online-editor-budget").scrollIntoView({block:"center"})`);
+      fs.writeFileSync(path.join(output, `editor-budget-${width}.png`), (await win.webContents.capturePage()).toPNG());
     }
     win.webContents.debugger.detach();
     fs.writeFileSync(path.join(output, "interaction-result.json"), JSON.stringify({

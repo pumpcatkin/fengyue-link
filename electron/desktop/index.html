@@ -105,6 +105,7 @@
             </section>
             <section class="online-editor-agent-dock" aria-label="游戏开发 Harness">
               <div class="online-editor-agent-dock-head"><div><b>游戏开发</b><small>源码 · 运行记录 · 独立评审</small></div><span id="online-editor-agent-progress" class="online-editor-agent-progress"><span>输入目标后开始开发</span></span></div>
+              <div class="online-editor-budget"><label>本轮开发预算（积分）<input id="online-editor-budget-points" type="number" min="80000" step="1000" value="80000" inputmode="numeric"></label><label class="online-editor-budget-unlimited"><input id="online-editor-budget-unlimited" type="checkbox">无上限</label><output id="online-editor-budget-usage">已结算 0 积分</output><small>每次请求结算后检查，最后一次请求可能超过设定值。主模型、顾问、评审及失败重试共用预算。</small></div>
               <div class="online-editor-agent-dock-body"><textarea id="online-editor-agent-goal" maxlength="4000" placeholder="描述玩法、玩家选择与胜负目标…"></textarea><button id="online-editor-run-agents" type="button" class="primary" aria-label="发送编辑目标">发送</button><button id="online-editor-stop" type="button" aria-label="停止开发">停止</button></div>
               <pre id="online-editor-agent-result" class="online-editor-agent-result"></pre>
             </section>

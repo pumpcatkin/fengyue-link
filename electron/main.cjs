@@ -3184,6 +3184,7 @@ class AccountBackend {
         }
       }
       if (force || previousLoggedIn !== this.loggedIn || previous !== accountSignature(this.account)) this.emit();
+      return snapshot.authenticated === true ? this.account : null;
     })().finally(() => { this.accountRefreshPromise = null; });
     return this.accountRefreshPromise;
   }
@@ -4695,7 +4696,8 @@ class AccountBackend {
     this.assertToolLoggedIn();
     const targetWorkId = String(workId || "").trim();
     if (!targetWorkId) throw new Error("编辑器 Agent 缺少提示词作品编号");
-    const pointsBefore = this.account.points;
+    const beforeAccount = await this.refreshOnlineWorldPoints(label, "before");
+    const pointsBefore = beforeAccount ? this.account.points : null;
     let anchor = null;
     let token = "";
     let tokenError = null;
@@ -4758,17 +4760,15 @@ class AccountBackend {
       }
       const result = await consumeModelEventStream(response.body);
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
-      await this.refreshOnlineWorldPoints(label, "after");
-      const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, this.account.points);
+      const afterAccount = await this.refreshOnlineWorldPoints(label, "after");
+      const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, afterAccount ? this.account.points : null);
       this.recordAutomaticModelUsage(signal, { points });
       return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
       const normalized = signal?.aborted ? abortError() : error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
-      if (normalized !== error || error?.name !== "AbortError") {
-        await this.refreshOnlineWorldPoints(label, "after").catch(() => null);
-      }
+      const afterAccount = await this.refreshOnlineWorldPoints(label, "after").catch(() => null);
       normalized.modelUsage = {
-        points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, this.account.points),
+        points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, afterAccount ? this.account.points : null),
         remainingPoints: this.account.points
       };
       this.recordAutomaticModelUsage(signal, normalized.modelUsage);

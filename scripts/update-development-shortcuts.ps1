@@ -1,9 +1,10 @@
+param([string]$RuntimeDirectory = "release\win-unpacked")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $package = Get-Content -LiteralPath (Join-Path $root "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $appName = [string]$package.build.productName
 $version = [string]$package.version
-$appDirectory = (Resolve-Path -LiteralPath (Join-Path $root "release\win-unpacked")).Path
+$appDirectory = (Resolve-Path -LiteralPath (Join-Path $root $RuntimeDirectory)).Path
 $executable = (Resolve-Path -LiteralPath (Join-Path $appDirectory "$appName.exe")).Path
 $shortcutPaths = @(
   (Join-Path ([Environment]::GetFolderPath("Desktop")) "$appName.lnk"),

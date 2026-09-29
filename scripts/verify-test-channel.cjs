@@ -15,7 +15,7 @@ if (packageJson.fengyueReleaseChannel !== "test") {
 
 const projectRoot = path.resolve(__dirname, "..");
 const releaseRoot = path.join(projectRoot, "release");
-const runtimeRoot = path.join(releaseRoot, "win-unpacked");
+const runtimeRoot = path.resolve(projectRoot, process.argv.find(arg => arg.startsWith("--runtime="))?.slice(10) || path.join(releaseRoot, "win-unpacked"));
 const runtimeProofRoot = path.join(runtimeRoot, "resources", RUNTIME_PROOF_DIRECTORY);
 const manifestPath = path.join(runtimeProofRoot, RUNTIME_PROOF_MANIFEST_ASSET);
 if (!fs.existsSync(manifestPath)) {

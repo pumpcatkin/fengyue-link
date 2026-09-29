@@ -17,7 +17,13 @@ loaded._compile(source.slice(0, source.indexOf("let mainWindow;")) + "\nmodule.e
 app.whenReady().then(async () => {
   let backend, window, resultCode = 0;
   const report = { discovered: [], models: [] };
-  const timeout = setTimeout(() => { console.error("Probe deadline reached"); process.exit(1); }, process.argv.includes("--live") ? 1000000 : 180000);
+  const liveProbe = process.argv.includes("--live") || process.argv.some(arg => arg.startsWith("--repair-candidate="));
+  const timeout = setTimeout(() => {
+    resultCode = 1;
+    console.error("Probe deadline reached; cancelling active requests");
+    if (backend?.editorHarnessController) backend.editorHarnessController.abort();
+    else { backend?.destroy(); app.exit(1); }
+  }, liveProbe ? 1200000 : 180000);
   try {
     const profile = process.env.FYMP_QA_PROFILE || "default";
     const credentialFile = path.join(originalData, "credentials", `${profile}.json`);
@@ -67,17 +73,31 @@ app.whenReady().then(async () => {
       console.log(JSON.stringify({ stage: "attachment-result", ...evidence }));
       resultCode = passed ? 0 : 1; return;
     }
-    if (process.argv.includes("--live")) {
+    const repairKey = process.argv.find(a => a.startsWith("--repair-candidate="))?.slice("--repair-candidate=".length);
+    if (process.argv.includes("--live") || repairKey) {
       let last = "";
       backend.emit = () => {
         const job = backend.onlineWorldEditorJob;
         const event = job?.events?.at(-1);
-        const status = JSON.stringify({ stage: "harness", status: job?.status, tool: event?.tool, summary: event?.summary, error: event?.error, model: event?.model });
+        const status = JSON.stringify({ stage: "harness", status: job?.status, tool: event?.tool, summary: event?.summary, error: event?.error, model: event?.model, budget: job?.budget, primaryModel: job?.coordinator?.primaryModel });
         if (status !== last) { console.log(status); last = status; }
       };
-      const draft = await backend.createOnlineWorldCardEditor();
+      let draft, repairGoal;
+      if (repairKey) {
+        const source = path.join(process.env.APPDATA, "风月联机工具/online-world/editor-projects/default.json");
+        const project = JSON.parse(fs.readFileSync(source, "utf8")).projects[repairKey];
+        if (!project?.harnessCandidate?.goal) throw new Error("没有可续接的失败候选");
+        repairGoal = project.harnessCandidate.goal;
+        backend.onlineWorldEditorProjects.projects[repairKey] = JSON.parse(JSON.stringify(project));
+        draft = { libraryId: repairKey };
+      } else draft = await backend.createOnlineWorldCardEditor();
       const result = await backend.runOnlineWorldEditorAgents({ libraryId: draft.libraryId,
-        goal: "把当前独立探索样例改成《星港维修》：保持三个操作进度、体力、胜利失败、重开和存档玩法，但将遗迹房间改为气闸、控制室、通讯舱、指挥台，把探索行动改为维修，胜利表现为通讯恢复。同步修改所有玩家可见文案和对应的 DOM 测试断言。完成真实浏览器测试并请求另一模型审查。保持程序精简，不添加额外网络或图片。" });
+        budgetPoints: 80000, goal: repairGoal || "把当前独立探索样例改成《星港维修》：保持三个操作进度、体力、胜利失败、重开和存档玩法，但将遗迹房间改为气闸、控制室、通讯舱、指挥台，把探索行动改为维修，胜利表现为通讯恢复。同步修改所有玩家可见文案和对应的 DOM 测试断言。完成真实浏览器测试并请求另一模型审查。保持程序精简，不添加额外网络或图片。" });
+      if (repairKey) {
+        fs.writeFileSync(path.join(output, "repaired-candidate.json"), JSON.stringify(result.project, null, 2));
+        console.log(JSON.stringify({ stage: "candidate-repaired-in-isolated-profile", models: result.project.harness.models, budget: result.project.harness.budget, passed: result.project.harness.evidence.passed }));
+        return;
+      }
       fs.writeFileSync(path.join(output, "live-project.json"), JSON.stringify(result.project, null, 2));
       console.log(JSON.stringify({ stage: "live-complete", models: result.project.harness.models, evidence: result.project.harness.evidence.passed }));
       const saved = await backend.saveOnlineWorldCardEditor(draft.libraryId, result.project, { publish: true });

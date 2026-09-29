@@ -122,6 +122,12 @@
 .online-editor-workspace{display:grid;gap:18px;min-width:0}
 .online-editor-pane{max-width:none}
 .online-editor-agent-dock{display:grid;gap:12px;border-top:1px solid #33495a;background:#111b25;padding:16px 0 0}
+.online-editor-budget{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-width:0;font-size:12px;color:#b6c7d4}
+.online-editor-budget>label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.online-editor-budget input[type=number]{width:140px;max-width:100%}
+.online-editor-budget input[type=checkbox]{width:16px;height:16px;min-height:0;accent-color:#74c7a6}
+.online-editor-budget small{flex-basis:100%;line-height:1.5;color:#91a7b7}
+.online-editor-budget output{overflow-wrap:anywhere}
 .online-editor-agent-dock-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
 .online-editor-agent-dock-head>div{display:grid;gap:4px;min-width:0}
 .online-editor-agent-dock-head b{color:#bff5da;font-size:13px}

@@ -15,7 +15,9 @@ if (packageJson.fengyueReleaseChannel !== "test") {
 }
 
 const projectRoot = path.resolve(__dirname, "..");
-const runtimeRoot = path.join(projectRoot, "release", "win-unpacked");
+const runtimeRoot = path.resolve(projectRoot, process.argv.find(arg => arg.startsWith("--runtime="))?.slice(10) || "release/win-unpacked");
+const relativeRuntime = path.relative(path.join(projectRoot, "release"), runtimeRoot);
+if (!relativeRuntime || relativeRuntime.startsWith("..") || path.isAbsolute(relativeRuntime)) throw new Error("测试运行目录必须位于本项目 release 子目录中");
 const resourcesPath = path.join(runtimeRoot, "resources");
 const outputDirectory = path.join(resourcesPath, RUNTIME_PROOF_DIRECTORY);
 const appAsarPath = path.join(resourcesPath, "app.asar");

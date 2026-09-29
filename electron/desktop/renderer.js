@@ -1042,6 +1042,10 @@ function renderOnlineWorldEditorProject(){
   empty.classList.toggle("hidden",Boolean(project));
   workspace.classList.toggle("hidden",!project);
   if(!project)return;
+  const budgetPoints=project.developmentSettings?.budgetPoints;
+  document.querySelector("#online-editor-budget-unlimited").checked=budgetPoints===null;
+  setEditorValue("online-editor-budget-points",budgetPoints??80000);
+  document.querySelector("#online-editor-budget-points").disabled=budgetPoints===null;
   const card=project.card||{};
   const configuration=project.configuration&&typeof project.configuration==="object"?project.configuration:{};
   configuration.app=configuration.app&&typeof configuration.app==="object"?configuration.app:{};
@@ -1067,30 +1071,41 @@ function renderOnlineWorldEditorProject(){
   setEditorValue("online-editor-post-text",configuration.post_text);
   setEditorValue("online-editor-world-book",editorJson(configuration.world_book));
   setEditorValue("online-editor-config-json",editorJson(configuration));
+  if(!editorValue("online-editor-agent-goal").trim())setEditorValue("online-editor-agent-goal",project.harnessCandidate?.goal||project.harness?.goal||"");
   renderOnlineWorldEditorAgents();
   renderOnlineWorldEditorProjects();
   onlineWorldEditorDirty=false;
 }
 
 function renderOnlineWorldEditorAgents(){
-  const draft=onlineWorldEditorProject?.harness||onlineWorldEditorProject?.harnessCandidate;
+  const draft=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
   document.querySelector("#online-editor-agent-result").textContent=draft?JSON.stringify(draft,null,2):"";
+  renderOnlineWorldEditorProgress(state?.onlineWorldEditor);
 }
 
 function renderOnlineWorldEditorProgress(job){
   const mount=document.querySelector("#online-editor-agent-progress");
   const busy=job?.status==="running";
+  if(!busy&&(!job||job.libraryId!==selectedOnlineWorldEditorId)){
+    const saved=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
+    job=saved?.budget?{...saved,status:saved.status==="running"?"paused":saved.status,error:saved.status==="running"?"上次开发中断，发送同一目标可继续":saved.error}:null;
+  }
   document.querySelector("#online-editor-run-agents").disabled=busy;
   document.querySelector("#online-editor-stop").disabled=!busy;
+  document.querySelector("#online-editor-budget-unlimited").disabled=busy;
+  document.querySelector("#online-editor-budget-points").disabled=busy||document.querySelector("#online-editor-budget-unlimited").checked;
+  const budget=job?.budget;
+  document.querySelector("#online-editor-budget-usage").textContent=budget?`已结算 ${Number(budget.spent).toLocaleString()} / ${budget.limit===null?"无上限":Number(budget.limit).toLocaleString()} 积分 · ${budget.requests} 次请求${budget.unknownCharges?" · 有待确认费用":""}${budget.exceeded?" · 最后一次请求超额":""}`:"已结算 0 积分";
   for(const id of ["online-editor-save","online-editor-publish","online-editor-open-projects"])document.querySelector(`#${id}`).disabled=busy;
   document.querySelectorAll("#online-editor-workspace input,#online-editor-workspace textarea").forEach(el=>{el.disabled=busy});
+  document.querySelector("#online-editor-budget-points").disabled=busy||document.querySelector("#online-editor-budget-unlimited").checked;
   if(!job){mount.innerHTML="<span>等待开发目标</span>";return}
-  const status=job.status==="running"?"运行中":job.status==="completed"?"已完成":job.status==="cancelled"?"已取消":"失败";
-  const head=document.createElement("strong");head.textContent=`${status}${job.currentAgent?` · ${job.currentAgent}`:""}`;
+  const status=job.status==="running"?"运行中":job.status==="completed"?"已完成":job.status==="cancelled"?"已取消":job.status==="paused"?"已暂停":"失败";
+  const head=document.createElement("strong");head.textContent=`${status}${job.coordinator?.primaryModel?` · 主轴 ${job.coordinator.primaryModel}`:""}${job.currentAgent?` · ${job.currentAgent}`:""}`;
   const list=document.createElement("div");list.className="online-editor-agent-status-list";
   for(const item of job.events||[]){
     const row=document.createElement("span");
-    row.textContent=`${item.tool||"开发"}${item.model?` · ${item.model}`:""}：${item.error||item.summary||(item.result?.passed===false?"运行失败，返回模型修复":item.result?.passed===true?"浏览器验收通过":"工具执行完成")}`;
+    row.textContent=`${item.tool||"开发"}${item.model?` · ${item.model}`:""}：${item.error||item.summary||item.result?.summary||(item.result?.passed===false?`运行失败：${(item.result.errors||[]).join("；").slice(0,500)||"已返回模型修复"}`:item.result?.passed===true?"浏览器验收通过":item.result?.approved===false?`评审需修改：${(item.result.issues||[]).join("；").slice(0,500)}`:"工具执行完成")}`;
     list.append(row);
   }
   if(job.error){const row=document.createElement("span");row.textContent=job.error;list.append(row)}
@@ -1138,6 +1153,9 @@ function syncOnlineWorldEditorFromForm(){
   project.card.title=editorValue("online-editor-title").trim()||configuration.app.name||project.card.title;
   project.configuration=configuration;
   project.program={...(project.program||{}),html:editorValue("online-editor-program")};
+  const budgetPoints=document.querySelector("#online-editor-budget-unlimited").checked?null:Number(editorValue("online-editor-budget-points"));
+  if(budgetPoints!==null&&(!Number.isSafeInteger(budgetPoints)||budgetPoints<80000))throw new Error("开发预算至少为 80000 积分，或选择无上限");
+  project.developmentSettings={...project.developmentSettings,budgetPoints};
   project.updatedAt=Date.now();
   onlineWorldEditorDirty=false;
   return project;
@@ -1720,12 +1738,14 @@ document.querySelector("#online-editor-run-agents").addEventListener("click",()=
   onlineWorldEditorCards=saved.cards||onlineWorldEditorCards;
   onlineWorldEditorProjects=saved.editorProjects||onlineWorldEditorProjects;
   renderOnlineWorldEditorProject();
-  const result=await api.runOnlineWorldEditorAgents({libraryId:selectedOnlineWorldEditorId,goal});
+  const result=await api.runOnlineWorldEditorAgents({libraryId:selectedOnlineWorldEditorId,goal,budgetPoints:project.developmentSettings.budgetPoints});
   onlineWorldEditorProject=result.project;
   renderOnlineWorldEditorProject();
   toast("开发与独立评审完成，已验证的草稿已回到编辑器；保存并同步后可从大厅进入");
 }).catch(()=>{}));
 document.querySelector("#online-editor-stop").addEventListener("click",()=>api.cancelModelRequests());
+document.querySelector("#online-editor-budget-unlimited").addEventListener("change",event=>{document.querySelector("#online-editor-budget-points").disabled=event.target.checked;onlineWorldEditorDirty=true});
+document.querySelector("#online-editor-budget-points").addEventListener("input",()=>{onlineWorldEditorDirty=true});
 function finishOnlineWorldCardImport(result){
   renderOnlineWorldCards(result);
   if(result.canceled)return;

@@ -24,6 +24,32 @@ function modelHarness(decisions: any[], review: any = { approved: true, issues: 
 const step = (tool: string, args = {}) => ({ tool, args, summary: tool });
 
 describe("autonomous game harness", () => {
+  it("keeps the primary model and expert feedback beyond the rolling history and 24 turns", async () => {
+    const project = createBlankEditorProject();
+    project.configuration.app = { ...project.configuration.app, name: "预算回归", summary: "持续协作验证" };
+    const decisions = [step("update_plan", { notes: "先验证能量，再实现奖励；保留顾问指出的状态恢复问题" }), step("consult", { question: "检查存档恢复问题" }),
+      ...Array.from({ length: 25 }, () => step("read_file", { path: "configuration.json" })), step("test_game"), step("review"), step("finish")];
+    const queries: any[] = [];
+    const request = vi.fn(async (input: any) => {
+      queries.push(input);
+      if (input.kind === "consult") return { parsed: { summary: "核查事件顺序", issues: ["先读存档再开启操作"], suggestions: ["等待宿主 state"] }, modelKey: "claude-opus-4-6" };
+      if (input.kind === "review") return { parsed: { approved: true, issues: [] }, modelKey: "claude-opus-4-6" };
+      const decision = decisions.shift();
+      return { parsed: decision, modelKey: "gpt-5.6" };
+    });
+    const next = await runGameHarness({ project, goal: "回归", request, testGame: async () => ({ passed: true }) });
+    expect(queries.filter(q => q.kind === "develop").length).toBeGreaterThan(24);
+    expect(queries.filter(q => q.kind === "develop").slice(1).every(q => q.preferredModel === "gpt-5.6")).toBe(true);
+    expect(queries.at(-1).query).toContain("等待宿主 state");
+    expect(queries.at(-1).query).toContain("先验证能量");
+    expect(next.harness.coordinator.primaryModel).toBe("gpt-5.6");
+  });
+  it("propagates budget pauses from an expert without treating them as retryable tool errors", async () => {
+    const budgetError = Object.assign(new Error("积分预算已用完"), { code: "HARNESS_BUDGET_EXHAUSTED", retryable: false });
+    const request = vi.fn(async ({ kind }: any) => { if (kind === "consult") throw budgetError; return { parsed: step("consult", { question: "检查玩法" }), modelKey: "gpt-5.6" }; });
+    await expect(runGameHarness({ project: createBlankEditorProject(), goal: "x", request, testGame: vi.fn() })).rejects.toBe(budgetError);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
   it("feeds failed execution to the model, repairs source, and requires independent review", async () => {
     const project = createBlankEditorProject();
     project.configuration.app.name = "测试探索";

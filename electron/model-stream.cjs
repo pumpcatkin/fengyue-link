@@ -1,6 +1,8 @@
-function modelStreamError(message) {
+const { abortable, assertActive } = require("./auto-model-router.cjs");
+function modelStreamError(message, retryable = false) {
   const error = new Error(message);
   error.name = "ModelStreamError";
+  error.retryable = retryable;
   return error;
 }
 
@@ -74,7 +76,8 @@ function normalizeModelPoints(value) {
   };
 }
 
-async function consumeModelEventStream(body) {
+async function consumeModelEventStream(body, { signal, onEvent = () => {} } = {}) {
+  assertActive(signal);
   if (!body || typeof body.getReader !== "function") throw modelStreamError("模型响应缺少数据流");
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -105,10 +108,11 @@ async function consumeModelEventStream(body) {
     let data;
     try { data = JSON.parse(payloadText); } catch { throw modelStreamError("模型数据流包含无效事件"); }
     const event = String(data?.event || data?.type || "");
-    if (event === "error") throw modelStreamError(data?.message || data?.error || "模型流返回错误");
+    if (event === "error") throw modelStreamError(data?.message || data?.error || "模型流返回错误", true);
     taskId ||= data?.task_id || data?.taskId || null;
     messageId ||= data?.message_id || data?.messageId || null;
     conversationId ||= data?.conversation_id || data?.conversationId || null;
+    onEvent({ event, taskId, messageId, conversationId });
     const text = answerText(data);
     if (text) {
       if (["message_replace", "text_replace"].includes(event)) answer = text;
@@ -125,7 +129,7 @@ async function consumeModelEventStream(body) {
 
   try {
     while (!finished) {
-      const chunk = await reader.read();
+      const chunk = await abortable(() => reader.read(), signal);
       buffer = `${buffer}${decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })}`.replace(/\r\n/g, "\n");
       const blocks = buffer.split("\n\n");
       buffer = blocks.pop() || "";
@@ -139,7 +143,7 @@ async function consumeModelEventStream(body) {
       }
     }
   } finally {
-    await reader.cancel().catch(() => {});
+    void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
   if (!finished) throw modelStreamError("模型响应在完成标记前提前结束");

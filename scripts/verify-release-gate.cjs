@@ -5,7 +5,7 @@ const path = require("node:path");
 const { ReleaseSecurityGate } = require("../electron/release-security.cjs");
 
 const projectRoot = path.resolve(__dirname, "..");
-const releaseRoot = path.join(projectRoot, "release");
+const releaseRoot = path.resolve(process.argv.find(value => value.startsWith("--release-root="))?.slice("--release-root=".length) || path.join(projectRoot, "release"));
 const runtimeProofRoot = path.join(releaseRoot, "win-unpacked", "resources", "release-proof");
 const manifest = JSON.parse(fs.readFileSync(path.join(runtimeProofRoot, "runtime-manifest.json"), "utf8"));
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fengyue-release-gate-"));

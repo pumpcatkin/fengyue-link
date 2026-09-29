@@ -1415,7 +1415,13 @@ async function refreshDomains(force=false){
   }
 }
 
-document.querySelector("#model-loading-cancel").addEventListener("click",()=>api.cancelModelRequests().catch(error=>toast(error.message)));
+document.querySelector("#model-loading-cancel").addEventListener("click",async event=>{
+  const button=event.currentTarget,jobId=button.dataset.jobId;
+  if(!jobId||button.disabled)return;
+  button.disabled=true;button.textContent="取消中…";
+  try{await api.cancelModelRequests({jobId})}
+  catch(error){toast(friendlyError(error));if(button.dataset.jobId===jobId){button.disabled=false;button.textContent="取消"}}
+});
 function renderLoginProgress(next){
   const active=automaticLoginActive||Boolean(next.loginInProgress);
   const progress=next.loginProgress||{};
@@ -1437,12 +1443,14 @@ function renderLoginProgress(next){
 }
 function render(next){
   const modelJobs=next.modelOperations||[];
-  const modelJob=modelJobs.find(job=>job.stage!=="queued")||modelJobs[0];
+  const modelJob=modelJobs.find(job=>job.stage!=="queued")||modelJobs[0]||(next.prefixAdapter?.status==="adapting"?{id:"prefix-adapter",label:"联机前置词适配器",stage:next.prefixAdapter.stage}:null);
   document.querySelector("#model-loading").classList.toggle("hidden",!modelJob);
   if(modelJob){
-    const stage=modelJob.stage==="queued"?"排队中":"请稍候";
+    const stage=modelJob.stage==="cancelling"?"正在取消":modelJob.stage==="queued"?"排队中":modelJob.stage==="collecting"?"读取会话":"请稍候";
     document.querySelector("#model-loading-title").textContent=`${modelJob.label} · ${stage}`;
     document.querySelector("#model-loading-detail").textContent=[modelJob.points!=null?`已消耗 ${modelJob.points} 积分`:null,"完成后自动显示结果，可随时取消"].filter(Boolean).join(" · ");
+    const cancel=document.querySelector("#model-loading-cancel");
+    cancel.dataset.jobId=modelJob.id;cancel.disabled=modelJob.stage==="cancelling";cancel.textContent=cancel.disabled?"取消中…":"取消";
   }
   state=next;
   renderReleaseVerificationResult(next);
@@ -1553,7 +1561,7 @@ function render(next){
   adapterButton.disabled=!next.work||Boolean(next.room)||Boolean(next.conversationBusy)||adapter?.status==="adapting";
   adapterButton.title=!next.work?"选择作品后即可使用":next.room?"请在创建或加入房间之前完成适配":"";
   adapterSummaryState.className=!next.work?"":adapter?.status==="error"?"error":adapter?.status==="adapting"?"running":adapter?.status==="ready"?"active":"";
-  adapterSummaryState.textContent=!next.work?"等待选择作品":adapter?.status==="adapting"?"适配中":adapter?.status==="ready"?"当前对话已适配":adapter?.status==="error"?"适配失败":adapter?.needsUpdate?"需重新适配":"待适配";
+  adapterSummaryState.textContent=!next.work?"等待选择作品":adapter?.status==="adapting"?"适配中":adapter?.status==="cancelled"?"已取消":adapter?.status==="ready"?"当前对话已适配":adapter?.status==="error"?"适配失败":adapter?.needsUpdate?"需重新适配":"待适配";
   if(next.work&&["adapting","error"].includes(adapter?.status))adapterCard.open=true;
   adapterButton.textContent=!next.work?"请先选择作品":adapter?.status==="adapting"?"正在进行适配":adapter?.status==="ready"?"重新适配并替换":"一键适配联机前置词";
   if(!next.work){
@@ -1562,6 +1570,9 @@ function render(next){
   }else if(adapter?.status==="adapting"){
     adapterStatus.textContent="正在进行适配";
     adapterNote.textContent="";
+  }else if(adapter?.status==="cancelled"){
+    adapterStatus.textContent="本次适配已取消";
+    adapterNote.textContent="原有适配结果保持不变。已发出的请求是否计费以平台结算为准。";
   }else if(adapter?.status==="ready"){
     adapterStatus.textContent="当前对话已适配";
     adapterNote.textContent="适配前置词写入会话配置，不修改作品的全局前置词。";
@@ -2218,7 +2229,7 @@ document.querySelector("#adapt-work-prefix").addEventListener("click",async()=>{
   if(state?.room){toast("请在创建或加入房间之前完成适配");return}
   const confirmed=await confirmAction("这将为当前对话生成专属适配前置词，写入会话配置，不修改作品的全局前置词。将消耗少量积分，重复使用会替换旧的适配规则，是否继续？",{title:"多人格式适配",acceptText:"继续"});
   if(!confirmed)return;
-  invoke(async()=>{const result=await api.adaptWorkPrefix();toast(`联机前置词适配完成：分析 ${result.sampleCount} 个会话，消耗 ${result.points?.total??0} 积分`)}).catch(()=>{});
+  invoke(async()=>{const result=await api.adaptWorkPrefix();toast(`联机前置词适配完成：分析 ${result.sampleCount} 个会话，积分 ${result.points?.total??"待平台确认"}`)}).catch(()=>{});
 });
 for(const id of ["#effect-judge-context","#effect-judge-degrees","#effect-judge-faces","#effect-judge-style-preset","#effect-judge-style"]){
   document.querySelector(id).addEventListener("input",()=>{pluginEditorDirty=true});

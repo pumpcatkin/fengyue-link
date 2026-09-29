@@ -79,7 +79,8 @@ const {
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { installHostOutputCapture } = require("./round-output-capture.cjs");
-const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive } = require("./auto-model-router.cjs");
+const { requestFreshModel } = require("./fresh-model-request.cjs");
+const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive, abortable } = require("./auto-model-router.cjs");
 const { packProgram, injectSandboxCsp } = require("./online-world-runtime.cjs");
 const { runEditorHarness } = require("./editor-harness-backend.cjs");
 const { testGameInBrowser } = require("./game-harness-browser.cjs");
@@ -874,7 +875,7 @@ class AccountBackend {
       prefixAdapter: this.work ? {
         appId: this.currentWorkAppId(),
         needsUpdate: Boolean(this.prefixAdapters?.adapters?.[this.currentWorkAppId()]) && !prefixAdapter,
-        status: this.prefixAdapterBusy ? "adapting" : this.prefixAdapterOperation?.error ? "error" : prefixAdapter ? "ready" : "missing",
+        status: this.prefixAdapterBusy ? "adapting" : this.prefixAdapterOperation?.stage === "cancelled" ? "cancelled" : this.prefixAdapterOperation?.error ? "error" : prefixAdapter ? "ready" : "missing",
         stage: this.prefixAdapterOperation?.stage || null,
         current: Number(this.prefixAdapterOperation?.current || 0),
         total: Number(this.prefixAdapterOperation?.total || 0),
@@ -4508,10 +4509,23 @@ class AccountBackend {
     return result;
   }
 
-  cancelAutoModels(scope = null) {
-    if ((!scope || scope === "online-world-editor") && !this.editorHarnessController?.signal.aborted) this.editorHarnessController?.abort();
-    for (const job of this.autoModelJobs?.values() || []) if (!scope || job.scope === scope) job.controller.abort();
-    return { canceled: true };
+  cancelAutoModels(scope = null, { jobId = null } = {}) {
+    if (!jobId && (!scope || scope === "online-world-editor")) this.editorHarnessController?.abort();
+    let count = 0;
+    for (const job of this.autoModelJobs?.values() || []) {
+      if ((jobId && job.state.id !== jobId) || (scope && job.scope !== scope)) continue;
+      job.state.stage = "cancelling";
+      job.controller.abort();
+      if (job.scope === "online-world-editor") this.editorHarnessController?.abort();
+      if (job.state.label === "联机前置词适配器") this.prefixAdapterController?.abort();
+      count++;
+    }
+    if (jobId === "prefix-adapter" || (!jobId && (!scope || scope === "platform"))) {
+      if (this.prefixAdapterController && !this.prefixAdapterController.signal.aborted) { this.prefixAdapterController.abort(); count++; }
+    }
+    this.appendSessionLog("auto-model", { event: "cancel-requested", scope, jobId, count });
+    this.emit();
+    return { canceled: count > 0 };
   }
 
   recordAutomaticModelUsage(signal, result) {
@@ -4527,7 +4541,7 @@ class AccountBackend {
     for (const scope of scopes) {
       assertActive(signal);
       const query = `/apps/config?app_id=${encodeURIComponent(appId)}${scope ? `&conversation_id=${encodeURIComponent(scope)}` : ""}`;
-      const current = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000 }));
+      const current = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000, signal }));
       assertActive(signal);
       const nextModel = { ...(current.model || {}), provider: target.provider, name: target.model };
       if (Object.hasOwn(nextModel, "model")) nextModel.model = target.model;
@@ -4541,10 +4555,10 @@ class AccountBackend {
       }
       nextModel.completion_params = params;
       await this.platformGoApi("/apps/config", {
-        method: "POST", body: { app_id: appId, ...(scope ? { conversation_id: scope } : {}), model: nextModel }, timeout: 15000
+        method: "POST", body: { app_id: appId, ...(scope ? { conversation_id: scope } : {}), model: nextModel }, timeout: 15000, signal
       });
       assertActive(signal);
-      const saved = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000 }));
+      const saved = this.normalizeModelPayload(await this.platformGoApi(query, { timeout: 15000, signal }));
       if (saved?.model?.provider !== target.provider || (saved?.model?.name || saved?.model?.model) !== target.model) throw new Error("平台尚未保存自动选择的模型");
       if (!scope && this.currentWorkAppId() === appId && this.platformModels) {
         this.platformModels.selected = this.modelPublicValue({ ...target, priceCoefficient: target.price, averageLatency: target.latency });
@@ -4555,10 +4569,13 @@ class AccountBackend {
     }
   }
 
-  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null, maxAttempts = null, rank = null } = {}) {
+  async withAutoModel(appId, label, execute, { scope = "platform", conversationId = null, reload = null, maxAttempts = null, rank = null, signal: parentSignal = null } = {}) {
     this.assertToolLoggedIn();
     if (!appId) throw new Error("尚未选择模型请求的作品");
     const controller = new AbortController();
+    const cancelParent = () => controller.abort();
+    parentSignal?.addEventListener("abort", cancelParent, { once: true });
+    if (parentSignal?.aborted) controller.abort();
     const jobId = crypto.randomUUID();
     const authRevision = this.authSessionRevision;
     const room = this.room;
@@ -4578,7 +4595,7 @@ class AccountBackend {
     const previous = this.autoModelQueues.get(appId) || Promise.resolve();
     const run = previous.catch(() => {}).then(() => runAutoModel({
       signal: controller.signal,
-      loadModels: async () => normalizeCatalog(await this.platformGoApi("/workspaces/model-list", { timeout: 15000 })),
+      loadModels: async () => normalizeCatalog(await this.platformGoApi("/workspaces/model-list", { timeout: 15000, signal: controller.signal })),
       onState: progress => {
         checkContext();
         job.state = { ...job.state, ...progress };
@@ -4602,11 +4619,12 @@ class AccountBackend {
     }));
     const settled = run.catch(() => {});
     this.autoModelQueues.set(appId, settled);
-    try { return await run; }
+    void settled.then(() => { if (this.autoModelQueues.get(appId) === settled) this.autoModelQueues.delete(appId); });
+    try { return await abortable(() => run, controller.signal); }
     finally {
       clearInterval(watcher);
+      parentSignal?.removeEventListener("abort", cancelParent);
       this.autoModelJobs.delete(jobId);
-      if (this.autoModelQueues.get(appId) === settled) this.autoModelQueues.delete(appId);
       if (!this.destroying) this.emit();
     }
   }
@@ -4714,86 +4732,52 @@ class AccountBackend {
 
   async requestEditorModelForWork(workId, query, { signal, label = "在线游戏编辑器 Harness", files = [] } = {}) {
     this.assertToolLoggedIn();
+    assertActive(signal);
     const targetWorkId = String(workId || "").trim();
     if (!targetWorkId) throw new Error("编辑器 Agent 缺少提示词作品编号");
-    const beforeAccount = await this.refreshOnlineWorldPoints(label, "before");
+    const beforeAccount = await abortable(() => this.refreshOnlineWorldPoints(label, "before"), signal);
+    assertActive(signal);
     const pointsBefore = beforeAccount ? this.account.points : null;
     let anchor = null;
     let token = "";
     let tokenError = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        anchor = await this.ensureAnchor();
-        if (anchor.webContents.isLoading()) await Promise.race([
+        anchor = await abortable(() => this.ensureAnchor(), signal);
+        if (anchor.webContents.isLoading()) await abortable(() => Promise.race([
           new Promise(resolve => anchor.webContents.once("did-finish-load", resolve)),
           new Promise((_, reject) => setTimeout(() => reject(new Error("后台账号页面载入超时")), 12000))
-        ]);
-        token = String(await anchor.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true) || "");
+        ]), signal);
+        token = String(await abortable(() => anchor.webContents.executeJavaScript("localStorage.getItem('console_token') || ''", true), signal) || "");
         break;
       } catch (error) {
+        assertActive(signal);
         tokenError = error;
         await new Promise(resolve => setTimeout(resolve, attempt * 250));
       }
     }
     if (!anchor) throw new Error(`读取账号会话失败：${tokenError?.message || "登录状态尚未就绪"}`);
-    const controller = new AbortController();
-    const cancel = () => controller.abort();
     assertActive(signal);
-    signal?.addEventListener("abort", cancel, { once: true });
     try {
       const requestHeaders = { "Content-Type": "application/json", "X-Language": "zh-Hans" };
       if (token) requestHeaders.Authorization = `Bearer ${token}`;
-      const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
-        method: "POST",
-        credentials: "include",
-        cache: "no-store",
-        signal: controller.signal,
-        headers: requestHeaders,
-        body: JSON.stringify(createModelRequestPayload({ workId: targetWorkId, query: String(query || ""), files }))
-      });
-      if (!response.ok) {
-        const failure = await response.json().catch(() => ({}));
-        const message = String(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
-        const rateLimited = response.status === 429 || isRateLimitMessage(`${message} ${failure?.code || ""}`);
-        const error = rateLimited
-          ? platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
-            status: 429,
-            httpStatus: response.status,
-            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
-          })
-          : new Error(message);
-        if ([401, 402, 403].includes(response.status)) error.retryable = false;
-        throw error;
-      }
-      if (/json/i.test(String(response.headers.get("content-type") || ""))) {
-        const failure = await response.json().catch(() => ({}));
-        const message = String(failure?.message || failure?.msg || "模型接口返回了业务错误");
-        if (isRateLimitMessage(`${message} ${failure?.code || ""}`)) {
-          throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
-            status: 429,
-            httpStatus: response.status,
-            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
-          });
-        }
-        throw new Error(message);
-      }
-      const result = await consumeModelEventStream(response.body);
-      if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
-      const afterAccount = await this.refreshOnlineWorldPoints(label, "after");
+      const result = await requestFreshModel({ fetch: (url, options) => anchor.webContents.session.fetch(url, options),
+        origin: this.origin, workId: targetWorkId, query: String(query || ""), files, headers: requestHeaders, signal,
+        onEvent: detail => this.appendSessionLog("model-request", { label, appId: targetWorkId, ...detail }) });
+      const afterAccount = await abortable(() => this.refreshOnlineWorldPoints(label, "after"), signal);
+      assertActive(signal);
       const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, afterAccount ? this.account.points : null);
       this.recordAutomaticModelUsage(signal, { points });
       return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
       const normalized = signal?.aborted ? abortError() : error;
-      const afterAccount = await this.refreshOnlineWorldPoints(label, "after").catch(() => null);
+      const afterAccount = signal?.aborted ? null : await abortable(() => this.refreshOnlineWorldPoints(label, "after"), signal).catch(() => null);
       normalized.modelUsage = {
         points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, afterAccount ? this.account.points : null),
         remainingPoints: this.account.points
       };
       this.recordAutomaticModelUsage(signal, normalized.modelUsage);
       throw normalized;
-    } finally {
-      signal?.removeEventListener("abort", cancel);
     }
   }
 
@@ -5301,13 +5285,14 @@ class AccountBackend {
     }
   }
 
-  async readLastConversationAnswer(appId, conversation, maxAttempts = 3) {
+  async readLastConversationAnswer(appId, conversation, maxAttempts = 3, { signal } = {}) {
     let lastError = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
+        assertActive(signal);
         const payload = await this.platformChatApi(
           `/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(conversation.id)}&limit=12&page=1&paging_query_sort=desc`,
-          { timeout: 12000 }
+          { timeout: 12000, signal }
         );
         const records = this.platformMessageRecords(payload);
         const record = records.find(item => typeof item?.answer === "string" && item.answer.trim()) || null;
@@ -5317,6 +5302,7 @@ class AccountBackend {
           last_ai_reply: String(record.answer)
         } : null;
       } catch (error) {
+        assertActive(signal);
         lastError = error;
         if (attempt < maxAttempts) await new Promise(resolve => setTimeout(resolve, attempt * 350));
       }
@@ -5324,12 +5310,14 @@ class AccountBackend {
     throw new Error(`读取会话“${conversation.name || conversation.id}”最后一段 AI 回复失败：${lastError?.message || String(lastError)}`);
   }
 
-  async collectPrefixAdapterSamples(appId) {
+  async collectPrefixAdapterSamples(appId, { signal } = {}) {
+    assertActive(signal);
     const conversation = await this.refreshConversations({
       bindHost: !this.room || this.room.role === "host",
       keepSessionKey: Boolean(this.conversation.sessionKey),
       mountTimeoutMs: 3000
     });
+    assertActive(signal);
     const items = (conversation.items || []).filter(item => item?.id);
     if (!items.length) throw new Error("当前作品没有可供分析的已有会话");
     const samples = [];
@@ -5337,7 +5325,8 @@ class AccountBackend {
     let scannedCount = 0;
     for (let offset = 0; offset < items.length && samples.length < PREFIX_ADAPTER_MAX_SAMPLES; offset += PREFIX_ADAPTER_MAX_SAMPLES) {
       const batch = items.slice(offset, offset + PREFIX_ADAPTER_MAX_SAMPLES);
-      const results = await Promise.all(batch.map(item => this.readLastConversationAnswer(appId, item)));
+      const results = await abortable(() => Promise.all(batch.map(item => this.readLastConversationAnswer(appId, item, 3, { signal }))), signal);
+      assertActive(signal);
       scannedCount += batch.length;
       for (const sample of results) {
         if (!sample) continue;
@@ -5379,231 +5368,54 @@ class AccountBackend {
     return samples;
   }
 
-  async runPlatformAutomationModel(appId, modelInput, label = "平台插件", { timeoutMs = 180000, validate = null } = {}) {
+  async runPlatformAutomationModel(appId, modelInput, label = "平台插件", { validate = null, signal: parentSignal = null } = {}) {
     const totalPoints = { input: 0, output: 0, total: 0 };
+    let hasObservedPoints = false;
     let pointsIncomplete = false;
     const attempts = [];
     let attemptCount = 0;
     let model = "";
     try {
-      return await this.withAutoModel(appId, label, async ({ signal, attempt }) => {
+      return await this.withAutoModel(appId, label, async ({ signal, attempt, model: selectedModel }) => {
         attemptCount = attempt;
         let result;
         let failure;
         try {
-          result = await this.runPlatformAutomationAttempt(appId, modelInput, label, { timeoutMs: timeoutMs || 180000, signal });
+          result = await this.runPlatformAutomationAttempt(appId, modelInput, label, { signal });
+          result.model ||= selectedModel?.label || selectedModel?.model || "";
           model = result.model || model;
           if (validate) await validate(result);
         } catch (error) { failure = error; }
         const observed = result?.points || failure?.modelUsage?.points;
         for (const field of ["input", "output", "total"]) {
           if (observed?.[field] == null) pointsIncomplete = true;
-          else totalPoints[field] += Number(observed[field]) || 0;
+          else { totalPoints[field] += Number(observed[field]) || 0; hasObservedPoints = true; }
         }
         attempts.push({ attempt, status: failure ? "error" : "completed", error: failure?.message || null });
         if (attempts.length > 30) attempts.shift();
         this.recordAutomaticModelUsage(signal, { points: observed });
         this.appendSessionLog("auto-model-usage", { label, attempt, points: observed || null, model });
         if (failure) throw failure;
-        return { ...result, points: totalPoints, pointsIncomplete, attemptCount, attempts };
-      });
+        return { ...result, points: hasObservedPoints ? totalPoints : null, pointsIncomplete, attemptCount, attempts };
+      }, { signal: parentSignal });
     } catch (error) {
       error.pluginRun = { model, points: totalPoints, pointsIncomplete, attemptCount, attempts, maxAttempts: null };
       throw error;
     }
   }
 
-  async runPlatformAutomationAttempt(appId, modelInput, label = "平台插件", { timeoutMs = 180000, signal } = {}) {
+  async runPlatformAutomationAttempt(appId, modelInput, label = "平台插件", { signal } = {}) {
     assertActive(signal);
-    const automationWindow = new BrowserWindow({
-      show: false,
-      frame: false,
-      skipTaskbar: true,
-      focusable: false,
-      x: -32000,
-      y: -32000,
-      width: 1080,
-      height: 760,
-      backgroundColor: "#10151d",
-      webPreferences: {
-        partition: this.partition,
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        backgroundThrottling: false
-      }
-    });
-    const adapterUrl = `${this.origin}/zh/explore/installed/${appId}`;
-    const cancel = () => { if (!automationWindow.isDestroyed()) automationWindow.destroy(); };
-    signal?.addEventListener("abort", cancel, { once: true });
-    const perform = async () => {
-      await this.loadSurfaceUrl(automationWindow, adapterUrl, label, 25000);
-      const reset = await automationWindow.webContents.executeJavaScript(`(async () => {
-        try {
-          const appId = ${JSON.stringify(appId)};
-          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-          const normalize = value => String(value || '').replace(/[\\s\\u00a0\\u200b]+/g, '');
-          const isNewConversation = value => /^(新对话|新建对话|创建新对话|新的对话|NewChat|NewConversation)$/i.test(normalize(value));
-          const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-          const previous = typeof map?.[appId] === 'string'
-            ? map[appId]
-            : map?.[appId]?.conversationId || map?.[appId]?.conversation_id || map?.[appId]?.id || '';
-          const newButton = [...document.querySelectorAll('button,[role="button"]')]
-            .find(button => isNewConversation(button.textContent) || isNewConversation(button.getAttribute('aria-label')) || isNewConversation(button.getAttribute('title')));
-          if (newButton) {
-            HTMLElement.prototype.click.call(newButton);
-            await sleep(250);
-          }
-          map[appId] = '';
-          localStorage.setItem('conversationIdInfo', JSON.stringify(map));
-          return { reset: map[appId] === '', previousConversationId: String(previous || ''), clickedNewButton: Boolean(newButton) };
-        } catch (error) { return { reset:false, error:error?.message || String(error) }; }
-      })()`, true);
-      if (!reset?.reset) throw new Error(`无法为${label}建立新会话：${reset?.error || "平台会话状态重置失败"}`);
-      await this.loadSurfaceUrl(automationWindow, adapterUrl, label, 25000);
-      const cleanState = await automationWindow.webContents.executeJavaScript(`(async () => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const appId = ${JSON.stringify(appId)};
-        const readConversationId = () => {
-          try {
-            const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-            const value = map?.[appId];
-            return typeof value === 'string' ? value : value?.conversationId || value?.conversation_id || value?.id || '';
-          } catch { return ''; }
-        };
-        for (let attempt = 0; attempt < 160 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(125);
-        const questionCount = document.querySelectorAll('#customized-question-content').length;
-        const answerCount = document.querySelectorAll('#ai-chat-answer').length;
-        const conversationId = String(readConversationId() || '');
-        return {
-          ready: Boolean(document.querySelector('#ai-chat-input')) && !conversationId && questionCount === 0 && answerCount === 0,
-          conversationId,
-          questionCount,
-          answerCount,
-          hasInput: Boolean(document.querySelector('#ai-chat-input'))
-        };
-      })()`, true);
-      if (!cleanState?.ready) {
-        throw new Error(`${label}的新会话不是纯净状态（会话=${cleanState?.conversationId || "空"}，输入=${cleanState?.questionCount || 0}，回复=${cleanState?.answerCount || 0}）`);
-      }
-      this.appendSessionLog("platform-plugin", {
-        event: "clean-conversation-ready",
-        appId,
-        label,
-        previousConversationId: reset.previousConversationId || null,
-        clickedNewButton: Boolean(reset.clickedNewButton)
-      });
-      const generated = await automationWindow.webContents.executeJavaScript(`(async () => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const modelInput = ${JSON.stringify(modelInput)};
-        for (let attempt = 0; attempt < 160 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(125);
-        const input = document.querySelector('#ai-chat-input');
-        const send = document.querySelector('#ai-send-button');
-        if (!input || !send) throw new Error('适配器作品没有出现平台输入栈');
-        const beforeAnswers = document.querySelectorAll('#ai-chat-answer').length;
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-        setter?.call(input, modelInput);
-        input.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:null }));
-        input.dispatchEvent(new Event('change', { bubbles:true }));
-        await sleep(220);
-        if (input.value !== modelInput) throw new Error('会话样本没有完整写入适配器输入框');
-        const readySend = document.querySelector('#ai-send-button');
-        if (!readySend || readySend.disabled || readySend.getAttribute('aria-disabled') === 'true') throw new Error('适配器发送按钮尚未就绪');
-        HTMLElement.prototype.click.call(readySend);
-        let answer = null;
-        for (let attempt = 0; attempt < 1800; attempt += 1) {
-          const answers = [...document.querySelectorAll('#ai-chat-answer')];
-          const candidate = answers.at(-1) || null;
-          const model = candidate?.querySelector('#customized-answer-content-model-name')?.textContent?.trim() || '';
-          const inputPoints = candidate?.querySelector('#customized-answer-content-model-input-points')?.textContent?.trim() || '';
-          const outputPoints = candidate?.querySelector('#customized-answer-content-model-output-points')?.textContent?.trim() || '';
-          if (answers.length > beforeAnswers && candidate && model && inputPoints && outputPoints) { answer = candidate; break; }
-          await sleep(250);
-        }
-        if (!answer) throw new Error('等待适配器模型输出完成超时');
-        const modelText = answer.querySelector('#customized-answer-content-model-name')?.textContent?.trim() || '';
-        const inputPointsText = answer.querySelector('#customized-answer-content-model-input-points')?.textContent?.trim() || '';
-        const outputPointsText = answer.querySelector('#customized-answer-content-model-output-points')?.textContent?.trim() || '';
-        const renderedAnswer = answer.cloneNode(true);
-        renderedAnswer.querySelectorAll('button,#customized-answer-content-model-name,#customized-answer-content-model-input-points,#customized-answer-content-model-output-points').forEach(item => item.remove());
-        const renderedOutput = String(renderedAnswer.textContent || '');
-        const edit = answer.querySelector('#customized-edit-button');
-        if (!edit) throw new Error('无法读取适配器的原始格式建议');
-        HTMLElement.prototype.click.call(edit);
-        const visible = element => {
-          if (!element || !element.isConnected) return false;
-          const style = getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        let editor = null;
-        let dialog = null;
-        let editorOutput = '';
-        let previousEditorOutput = '';
-        let stableReads = 0;
-        for (let attempt = 0; attempt < 120; attempt += 1) {
-          dialog = [...document.querySelectorAll('[role="dialog"]')]
-            .filter(item => item.getAttribute('data-state') !== 'closed' && visible(item))
-            .find(item => item.querySelector('textarea')) || null;
-          editor = dialog?.querySelector('textarea') || null;
-          const currentOutput = String(editor?.value || '');
-          stableReads = currentOutput && currentOutput === previousEditorOutput ? stableReads + 1 : 0;
-          previousEditorOutput = currentOutput;
-          if (editor && currentOutput && stableReads >= 2) { editorOutput = currentOutput; break; }
-          await sleep(50);
-        }
-        if (!editorOutput && editor) editorOutput = String(editor.value || '');
-        const cancel = [...(dialog || document).querySelectorAll('button')].find(button => /^(取消|Cancel)$/i.test((button.textContent || '').trim()));
-        if (cancel) HTMLElement.prototype.click.call(cancel);
-        const output = editorOutput.trim() ? editorOutput : renderedOutput;
-        if (!output.trim()) throw new Error('适配器作品已生成回复，但编辑框和已渲染回复均为空');
-        const parsePoints = value => Number((String(value || '').match(/[\\d,]+/)?.[0] || '0').replaceAll(',', '')) || 0;
-        const readConversationId = () => {
-          try {
-            const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-            const value = map?.[${JSON.stringify(appId)}];
-            return typeof value === 'string' ? value : value?.conversationId || value?.conversation_id || value?.id || '';
-          } catch { return ''; }
-        };
-        let conversationId = String(readConversationId() || '');
-        for (let attempt = 0; attempt < 120 && !conversationId; attempt += 1) {
-          await sleep(50);
-          conversationId = String(readConversationId() || '');
-        }
-        if (!conversationId) throw new Error('适配器输出完成，但平台没有建立新的会话');
-        return {
-          output,
-          outputSource: editorOutput.trim() ? 'editor' : 'rendered',
-          conversationId,
-          model: modelText.replace(/^模型\\s*/, '').trim(),
-          points: {
-            input: parsePoints(inputPointsText),
-            output: parsePoints(outputPointsText),
-            total: parsePoints(inputPointsText) + parsePoints(outputPointsText)
-          }
-        };
-      })()`, true);
-      if (generated.conversationId === reset.previousConversationId) throw new Error(`${label}未建立新的独立会话`);
-      return generated;
-    };
-    let timer = null;
-    try {
-      if (!(timeoutMs > 0)) return await perform();
-      return await Promise.race([
-        perform(),
-        new Promise((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error(`${label}后台请求超时`)), timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-      signal?.removeEventListener("abort", cancel);
-      if (!automationWindow.isDestroyed()) automationWindow.destroy();
-    }
+    // The same API-backed fresh-conversation transport used by the editor
+    // returns server text directly, without DOM, billing labels or deadlines.
+    const generated = await abortable(() => this.requestEditorModelForWork(appId, modelInput, { signal, label }), signal);
+    assertActive(signal);
+    this.appendSessionLog("platform-plugin", { event: "stream-completed", appId, label, conversationId: generated.conversationId, messageId: generated.messageId, finishEvent: generated.finishEvent, outputCharacters: generated.answer.length });
+    return { ...generated, output: generated.answer, outputSource: "stream" };
   }
 
-  async runPrefixAdapterModel(modelInput) {
-    return this.runPlatformAutomationModel(PREFIX_ADAPTER_APP_ID, modelInput, "联机前置词适配器", { validate: result => parsePrefixAdapterSuggestion(result.output) });
+  async runPrefixAdapterModel(modelInput, { signal } = {}) {
+    return this.runPlatformAutomationModel(PREFIX_ADAPTER_APP_ID, modelInput, "联机前置词适配器", { signal, validate: result => parsePrefixAdapterSuggestion(result.output) });
   }
 
   async adaptCurrentWorkPrefix() {
@@ -5616,10 +5428,16 @@ class AccountBackend {
     if (!appId) throw new Error("无法识别当前作品编号");
     if (appId === PREFIX_ADAPTER_APP_ID) throw new Error("不能对联机前置词适配器作品自身进行适配");
     this.prefixAdapterBusy = true;
+    const controller = new AbortController();
+    this.prefixAdapterController = controller;
+    const signal = controller.signal;
+    const work = this.work, revision = this.authSessionRevision;
+    const check = () => { assertActive(signal); if (this.work !== work || this.authSessionRevision !== revision) throw abortError(); };
     this.prefixAdapterOperation = { stage: "collecting", current: 0, total: 0, error: null };
     this.emit({ prefixAdapterStarted: true });
     try {
-      const samples = await this.collectPrefixAdapterSamples(appId);
+      const samples = await abortable(() => this.collectPrefixAdapterSamples(appId, { signal }), signal);
+      check();
       const request = formatPrefixAdapterRequest({
         title: String(this.work.title || "未命名作品"),
         suffix: String(this.work.suffix || "")
@@ -5632,7 +5450,8 @@ class AccountBackend {
         sampleCount: samples.length,
         content: request
       });
-      const generated = await this.runPrefixAdapterModel(request);
+      const generated = await this.runPrefixAdapterModel(request, { signal });
+      check();
       this.appendSessionLog("prefix-adapter", {
         event: "response-received",
         appId,
@@ -5656,7 +5475,7 @@ class AccountBackend {
         sourceConversationIds: samples.map(sample => sample.conversation_id),
         adapterConversationId: String(generated?.conversationId || ""),
         model: String(generated?.model || ""),
-        points: generated?.points || { input: 0, output: 0, total: 0 }
+        points: generated?.points || null
       };
       const latest = loadPrefixAdapters();
       latest.adapters[appId] = record;
@@ -5677,14 +5496,15 @@ class AccountBackend {
     } catch (error) {
       this.prefixAdapterOperation = {
         ...(this.prefixAdapterOperation || {}),
-        stage: "error",
-        error: error?.message || String(error)
+        stage: signal.aborted || error?.name === "AbortError" ? "cancelled" : "error",
+        error: signal.aborted || error?.name === "AbortError" ? null : error?.message || String(error)
       };
-      this.appendSessionLog("prefix-adapter", { event: "failed", appId, error: this.prefixAdapterOperation.error });
+      this.appendSessionLog("prefix-adapter", { event: this.prefixAdapterOperation.stage === "cancelled" ? "cancelled" : "failed", appId, error: this.prefixAdapterOperation.error });
       this.emit({ prefixAdapterError: this.prefixAdapterOperation.error });
       throw error;
     } finally {
       this.prefixAdapterBusy = false;
+      if (this.prefixAdapterController === controller) this.prefixAdapterController = null;
       this.emit();
     }
   }
@@ -10462,7 +10282,13 @@ handleLocalIpc("backend:update-plugin-settings", (_event, pluginId, settings) =>
 handleLocalIpc("backend:refresh-work-settings", () => backend.refreshWorkSettings());
 handleLocalIpc("backend:update-work-settings", (_event, settings) => backend.updateWorkSettings(settings || {}));
 handleLocalIpc("backend:refresh-models", () => backend.refreshPlatformModels());
-handleLocalIpc("backend:cancel-model-requests", (_event, scope) => backend.cancelAutoModels(scope === "online-world-editor" ? scope : null));
+handleLocalIpc("backend:cancel-model-requests", (_event, target) => {
+  if (target && typeof target === "object") {
+    if (typeof target.jobId !== "string" || !target.jobId) throw new Error("缺少待取消任务编号");
+    return backend.cancelAutoModels(null, { jobId: target.jobId });
+  }
+  return backend.cancelAutoModels(target === "online-world-editor" ? target : null);
+});
 handleLocalIpc("backend:set-model", (_event, model) => backend.setPlatformModel(model || {}));
 handleLocalIpc("backend:message-operation", (_event, action, value) => backend.runHostMessageOperation(action, value));
 handleLocalIpc("backend:inject-prototype-tool-card", () => backend.injectPrototypeToolCard());

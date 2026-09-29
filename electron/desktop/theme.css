@@ -692,6 +692,22 @@ body.settings-overlay-mode .settings-popover {
 }
 
 /* Branded startup and official-version result dialog. */
+.model-loading {
+  z-index: 14000;
+  width: min(420px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface-raised) !important;
+  color: var(--text-flat) !important;
+  text-shadow: none;
+}
+.model-loading > div { flex: 1; flex-direction: column; align-items: flex-start; gap: 2px; overflow: hidden; }
+.model-loading strong, .model-loading small { display: block; width: 100%; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.model-loading button { flex: 0 0 64px; min-height: 34px; color: var(--text-flat); white-space: nowrap; }
+body.settings-overlay-mode .model-loading { bottom: 12px; }
+
 .official-notice-overlay {
   position: fixed;
   inset: 0;

@@ -20,7 +20,7 @@ function argument(name) {
 }
 
 const projectRoot = path.resolve(__dirname, "..");
-const runtimeRoot = path.join(projectRoot, "release", "win-unpacked");
+const runtimeRoot = path.resolve(argument("runtime") || path.join(projectRoot, "release", "win-unpacked"));
 const resourcesPath = path.join(runtimeRoot, "resources");
 const outputDirectory = path.join(resourcesPath, RUNTIME_PROOF_DIRECTORY);
 const keyPath = path.resolve(argument("key") || process.env.FENGYUE_RELEASE_SIGNING_KEY || "");

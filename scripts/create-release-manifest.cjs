@@ -17,7 +17,7 @@ function argument(name) {
 }
 
 const projectRoot = path.resolve(__dirname, "..");
-const releaseRoot = path.join(projectRoot, "release");
+const releaseRoot = path.resolve(argument("release-root") || path.join(projectRoot, "release"));
 const outputDirectory = path.join(releaseRoot, "github");
 const keyPath = path.resolve(argument("key") || process.env.FENGYUE_RELEASE_SIGNING_KEY || "");
 const appAsarPath = path.join(releaseRoot, "win-unpacked", "resources", "app.asar");

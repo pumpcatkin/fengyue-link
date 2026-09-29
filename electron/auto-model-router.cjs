@@ -74,6 +74,17 @@ function rankEditorModels(items) {
 }
 function abortError() { const error = new Error("已取消模型请求"); error.name = "AbortError"; return error; }
 function assertActive(signal) { if (signal?.aborted) throw abortError(); }
+function abortable(operation, signal) {
+  assertActive(signal);
+  if (!signal) return Promise.resolve().then(operation);
+  return new Promise((resolve, reject) => {
+    const finish = (callback, value) => { signal.removeEventListener("abort", cancel); callback(value); };
+    const cancel = () => finish(reject, abortError());
+    signal.addEventListener("abort", cancel, { once: true });
+    Promise.resolve().then(() => { assertActive(signal); return operation(); })
+      .then(value => finish(resolve, value), error => finish(reject, error));
+  });
+}
 function retryable(error) {
   if (error?.name === "AbortError" || error?.retryable === false) return false;
   return !/积分不足|余额不足|insufficient.*(?:credit|balance|point)|未登录|登录已过期|请先.*登录|unauthenticated|unauthorized|没有权限/i.test(error?.message || "");
@@ -103,7 +114,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
     onState({ stage: "selecting", attempt, cycle });
     let candidates;
     try {
-      candidates = rank(await loadModels());
+      candidates = rank(await abortable(loadModels, signal));
       assertActive(signal);
       if (!candidates.length) throw new Error("平台暂未返回可用文本模型");
     } catch (error) {
@@ -120,7 +131,7 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
       attempt += 1;
       onState({ stage: "generating", attempt, cycle, model: model.label, provider: model.provider });
       try {
-        const result = await execute({ model, attempt, signal });
+        const result = await abortable(() => execute({ model, attempt, signal }), signal);
         assertActive(signal);
         return result;
       } catch (error) {
@@ -135,4 +146,4 @@ async function runAutoModel({ loadModels, execute, signal, onState = () => {}, w
   }
 }
 
-module.exports = { normalizeCatalog, rankModels, rankEditorModels, editorModelTier, priority, runAutoModel, abortError, assertActive, retryable, retryDelay };
+module.exports = { normalizeCatalog, rankModels, rankEditorModels, editorModelTier, priority, runAutoModel, abortError, assertActive, abortable, retryable, retryDelay };

@@ -405,38 +405,11 @@ describe("perspective partition and reconstruction", () => {
   });
 });
 
-describe("perspective retries use fresh background work sessions", () => {
+describe("perspective retries use fresh API work sessions", () => {
   function automation(outcomes: string[]) {
-    const windows: any[] = [];
+    const requests: any[] = [];
     const sequence: string[] = [];
-    class AutomationWindow {
-      destroyed = false;
-      index = windows.length;
-      webContents = { executeJavaScript: vi.fn(async (script: string) => {
-        if (script.includes("previousConversationId: String(previous")) {
-          sequence.push(`reset:${this.index}`);
-          return { reset: true, previousConversationId: `old-${this.index}`, clickedNewButton: true };
-        }
-        if (script.includes("ready: Boolean(document.querySelector('#ai-chat-input'))")) {
-          sequence.push(`clean:${this.index}`);
-          return { ready: outcomes[this.index] !== "dirty", questionCount: 0, answerCount: 0 };
-        }
-        if (script.includes("const modelInput =")) {
-          sequence.push(`send:${this.index}`);
-          if (outcomes[this.index] === "timeout") throw new Error("等待模型输出完成超时");
-          return { output: outcomes[this.index] === "invalid" ? "bad json" : JSON.stringify(fixture()), model: "M", conversationId: `new-${this.index}`, points: { input: 2, output: 3, total: 5 } };
-        }
-        throw new Error("Unexpected automation script");
-      }) };
-      constructor(_options: any) {
-        expect(windows.every(window => window.destroyed)).toBe(true);
-        windows.push(this);
-        sequence.push(`create:${this.index}`);
-      }
-      isDestroyed() { return this.destroyed; }
-      destroy() { this.destroyed = true; sequence.push(`destroy:${this.index}`); }
-    }
-    const instance = backend({ BrowserWindow: AutomationWindow });
+    const instance = backend();
     instance.origin = "https://test.example";
     instance.room = { members, role: "host" };
     instance.account = { accountId: "a" };
@@ -444,6 +417,14 @@ describe("perspective retries use fresh background work sessions", () => {
     instance.appendSessionLog = vi.fn();
     instance.emit = vi.fn();
     instance.recordAutomaticModelUsage = vi.fn();
+    instance.requestEditorModelForWork = vi.fn(async (appId: string, input: string) => {
+      const index = requests.length;
+      requests.push({ appId, input });
+      sequence.push(`send:${index}`);
+      if (outcomes[index] === "failure") throw Object.assign(new Error("provider rejected"), { retryable: true });
+      if (outcomes[index] === "interrupted") throw Object.assign(new Error("stream interrupted"), { retryable: false });
+      return { answer: outcomes[index] === "invalid" ? "bad json" : JSON.stringify(fixture()), model: "M", conversationId: `new-${index}`, points: { input: 2, output: 3, total: 5 } };
+    });
     instance.withAutoModel = async (_appId: string, _label: string, execute: any) => {
       const controller = new AbortController();
       return autoModels.runAutoModel({
@@ -453,7 +434,7 @@ describe("perspective retries use fresh background work sessions", () => {
           { provider_name: "p", model_id: "gemini-3.5-flash" }
         ] }),
         execute: (context: any) => { sequence.push(`model:${context.attempt}:${context.model.model}`); return execute(context); },
-        wait: async () => { if (windows.length >= outcomes.length && outcomes.at(-1) !== "success") controller.abort(); }
+        wait: async () => { if (requests.length >= outcomes.length && outcomes.at(-1) !== "success") controller.abort(); }
       });
     };
     instance.preparePerspectiveRetryModels = vi.fn(async () => {
@@ -467,50 +448,43 @@ describe("perspective retries use fresh background work sessions", () => {
       sequence.push(`model:${attempt}:${target.model}`);
       return target;
     });
-    instance.loadSurfaceUrl = vi.fn(async (window: any, url: string) => {
-      expect(url).toBe(`https://test.example/zh/explore/installed/${split.PERSPECTIVE_APP_ID}`);
-      sequence.push(`load:${window.index}`);
-    });
-    return { instance, windows, sequence };
+    return { instance, requests, sequence };
   }
-  it("reloads and creates a clean conversation after timeout and invalid JSON, then stops on success", async () => {
-    const { instance, windows, sequence } = automation(["timeout", "invalid", "success"]);
+  it("uses a fresh request after explicit failure and invalid JSON, then stops on success", async () => {
+    const { instance, requests, sequence } = automation(["failure", "invalid", "success"]);
     const round: any = { number: 1 };
     const output = sourceOf(fixture());
     const result = await instance.runPerspectivePlugin(output, round);
     expect(result.run).toMatchObject({ attemptCount: 3, points: { input: 4, output: 6, total: 10 }, pointsIncomplete: true });
     expect(result.run.attempts.map((item: any) => item.status)).toEqual(["error", "error", "completed"]);
     expect(sequence).toEqual([
-      "model:1:deepseek-v4-flash", "create:0", "load:0", "reset:0", "load:0", "clean:0", "send:0", "destroy:0",
-      "model:2:gemini-3.5-flash", "create:1", "load:1", "reset:1", "load:1", "clean:1", "send:1", "destroy:1",
-      "model:3:deepseek-v4-flash", "create:2", "load:2", "reset:2", "load:2", "clean:2", "send:2", "destroy:2"
+      "model:1:deepseek-v4-flash", "send:0",
+      "model:2:gemini-3.5-flash", "send:1",
+      "model:3:deepseek-v4-flash", "send:2"
     ]);
-    const sendScripts = windows.map(window => window.webContents.executeJavaScript.mock.calls.find(([script]: string[]) => script!.includes("const modelInput ="))[0]);
-    expect(new Set(sendScripts).size).toBe(1);
+    expect(new Set(requests.map(item => item.input)).size).toBe(1);
+    expect(requests.every(item => item.appId === split.PERSPECTIVE_APP_ID)).toBe(true);
     expect(result.value).toContain("小丽吃苹果");
     expect(result.value).not.toContain("小花玩游戏");
     expect(round.perspectiveOutputs.b).not.toContain("小丽吃苹果");
     expect(instance.perspectiveProgress).toBeNull();
   });
   it.each([1, 2])("stops immediately when attempt %i succeeds", async count => {
-    const { instance, windows } = automation(count === 1 ? ["success"] : ["invalid", "success"]);
+    const { instance, requests } = automation(count === 1 ? ["success"] : ["invalid", "success"]);
     const result = await instance.runPerspectivePlugin(sourceOf(fixture()), {});
-    expect(windows).toHaveLength(count);
+    expect(requests).toHaveLength(count);
     expect(result.run).toMatchObject({ attemptCount: count, points: { total: 5 * count }, pointsIncomplete: false });
-    expect(windows.every(window => window.destroyed)).toBe(true);
   });
-  it("does not send into a dirty session and retries in a different window", async () => {
-    const { instance, windows, sequence } = automation(["dirty", "success"]);
-    const result = await instance.runPerspectivePlugin(sourceOf(fixture()), {});
-    expect(windows).toHaveLength(2);
-    expect(sequence).not.toContain("send:0");
-    expect(result.run.attemptCount).toBe(2);
+  it("does not automatically resend an ambiguous interrupted request", async () => {
+    const { instance, requests } = automation(["interrupted", "success"]);
+    await expect(instance.runPerspectivePlugin(sourceOf(fixture()), {})).rejects.toThrow("stream interrupted");
+    expect(requests).toHaveLength(1);
   });
   it("cancels repeated failures without exposing the source through the output pipeline", async () => {
-    const { instance, windows } = automation(["timeout", "invalid", "invalid"]);
+    const { instance, requests } = automation(["failure", "invalid", "invalid"]);
     const round: any = { number: 1 };
     await instance.runConversationPluginStack(pipeline.PLUGIN_PHASES.OUTPUT, "ALL PRIVATE SOURCE", round);
-    expect(windows).toHaveLength(3);
+    expect(requests).toHaveLength(3);
     expect(round.pluginRuns[0]).toMatchObject({ status: "error", withheld: true, attemptCount: 3 });
     expect(Object.keys(round.perspectiveOutputs)).toHaveLength(0);
     for (const member of members) {
@@ -518,12 +492,13 @@ describe("perspective retries use fresh background work sessions", () => {
     }
     expect(instance.pluginPipelineBusy).toBe(false);
   });
-  it("destroys a stalled window when its hard deadline expires", async () => {
-    const { instance, windows } = automation(["success"]);
-    instance.loadSurfaceUrl = () => new Promise(() => {});
-    await expect(instance.runPlatformAutomationAttempt(split.PERSPECTIVE_APP_ID, "input", "独立视角", { timeoutMs: 15 })).rejects.toThrow("后台请求超时");
-    expect(windows).toHaveLength(1);
-    expect(windows[0].destroyed).toBe(true);
+  it("cancels a stalled operation without waiting for a deadline", async () => {
+    const { instance } = automation(["success"]);
+    const controller = new AbortController();
+    instance.requestEditorModelForWork = () => new Promise(() => {});
+    const result = instance.runPlatformAutomationAttempt(split.PERSPECTIVE_APP_ID, "input", "独立视角", { signal: controller.signal });
+    controller.abort();
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 

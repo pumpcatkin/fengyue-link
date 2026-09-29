@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const { minimumSaveInterval } = require("./desktop/game-bridge.cjs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { isTransientPlatformError, platformRequestError } = require("./platform-transport.cjs");
 const { PlatformCommentOperations } = require("./platform-comment-operations.cjs");
@@ -1081,6 +1082,9 @@ function coreConfigProjection(value) {
   const firstText = (...values) => normalizeConfigText(values.find(value => value != null));
   return {
     description: firstText(value?.app?.description, value?.desc, value?.descr, value?.dsc, value?.intro, value?.description),
+    name: firstText(value?.app?.name, value?.name, value?.nm, value?.ttl, value?.title, value?.app_name),
+    summary: firstText(value?.app?.summary, value?.summary, value?.smry, value?.abs_txt, value?.sum_info, value?.abstract),
+    promptSort: JSON.stringify(value?.pre_prompt_sort ?? value?.prompt_sort ?? null),
     prePrompt: firstText(value?.pre_prompt, value?.prpt, value?.ppt, value?.pre_pt, value?.prompt_pre),
     preText: firstText(value?.pre_text, value?.pretxt, value?.ptx, value?.pre_tx, value?.prefix_txt),
     postText: firstText(value?.post_text, value?.posttxt, value?.potx, value?.post_tx, value?.suffix_txt),
@@ -1088,11 +1092,11 @@ function coreConfigProjection(value) {
   };
 }
 
-function coreConfigDifference(exported, expected) {
+function coreConfigDifference(exported, expected, { metadata = false } = {}) {
   const actual = coreConfigProjection(exported);
   const target = coreConfigProjection(expected);
   const differences = [];
-  for (const key of ["description", "prePrompt", "preText", "postText"]) {
+  for (const key of ["description", "prePrompt", "preText", "postText", ...(metadata ? ["name", "summary", "promptSort"] : [])]) {
     if (actual[key] !== target[key]) differences.push(key);
   }
   const exactWorldBook = canonicalJson(comparableWorldBook(actual.worldBook)) === canonicalJson(comparableWorldBook(target.worldBook));
@@ -1545,7 +1549,7 @@ class OnlineWorldService {
     if (this.standalone.accountId !== this.account().accountId || this.standalone.origin !== this.getOrigin?.()) throw new Error("账号或节点已经变化，请重新打开游戏");
     if (workId !== this.work.id || gameId !== this.card.gameId) throw new Error("存档请求来自已关闭或其他游戏");
     const now = Date.now();
-    if (now - (this.standalone.lastWriteAt || 0) < 100) throw new Error("存档过于频繁，请合并变更后重试");
+    if (now - (this.standalone.lastWriteAt || 0) < minimumSaveInterval) throw new Error("存档过于频繁，请合并变更后重试");
     this.standalone.data = writeSave(this.standalone.file, data);
     this.standalone.lastWriteAt = now;
     return { saved: true };
@@ -2622,7 +2626,7 @@ class OnlineWorldService {
       syncRetryAt: Math.max(0, Number(this.syncRetryAt || 0)),
       publicMarketOrders: this.publicMarketOrders,
       publicMarketSaleOrders: this.publicMarketSaleOrders,
-      marketSettledSales: [...this.marketSettledSales].slice(-1000),
+      marketSettledSales: [...this.marketSettledSales],
       publicParticipantOrders: this.publicParticipantOrders,
       publicAuthorityOrders: this.publicAuthorityOrders,
       publicTreasureSources: this.publicTreasureSources,
@@ -2750,7 +2754,7 @@ class OnlineWorldService {
   async pause() {
     this.loadProgress = null;
     this.close();
-    await Promise.allSettled([this.syncInFlight, this.intentInFlight, this.joinInFlight, this.migrationInFlight].filter(Boolean));
+    await Promise.allSettled([this.syncInFlight, this.intentInFlight, this.joinInFlight, this.migrationInFlight, this.cloudUploadInFlight].filter(Boolean));
     this.saveCache();
     this.status = "closed";
     this.loadProgress = null;
@@ -2827,6 +2831,7 @@ class OnlineWorldService {
   }
 
   async open({ card, workUrl, orientation, displayName, migrationProof = null } = {}) {
+    if (this.work) await this.pause();
     const previousWorkId = String(this.work?.id || "");
     await this.pause();
     this.standalone = null;
@@ -2998,7 +3003,7 @@ class OnlineWorldService {
     this.syncFailureKey = "";
     this.publicMarketOrders = cached?.publicMarketOrders && typeof cached.publicMarketOrders === "object" ? cached.publicMarketOrders : {};
     this.publicMarketSaleOrders = cached?.publicMarketSaleOrders && typeof cached.publicMarketSaleOrders === "object" ? cached.publicMarketSaleOrders : {};
-    this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.slice(-1000).map(String) : []);
+    this.marketSettledSales = new Set(Array.isArray(cached?.marketSettledSales) ? cached.marketSettledSales.map(String) : []);
     this.publicParticipantOrders = cached?.publicParticipantOrders && typeof cached.publicParticipantOrders === "object" ? cached.publicParticipantOrders : {};
     this.publicAuthorityOrders = cached?.publicAuthorityOrders && typeof cached.publicAuthorityOrders === "object" ? cached.publicAuthorityOrders : {};
     this.publicTreasureSources = cached?.publicTreasureSources && typeof cached.publicTreasureSources === "object" ? cached.publicTreasureSources : {};
@@ -3031,7 +3036,7 @@ class OnlineWorldService {
       this.publicGeneralRecalls = {};
       this.publicMarketOrders = {};
       this.publicMarketSaleOrders = {};
-      this.marketSettledSales.clear();
+      // Keep settlement receipts with the cached balances during public replay.
       this.publicParticipantOrders = {};
       this.publicAuthorityOrders = {};
       this.publicTreasureSources = {};
@@ -3157,11 +3162,11 @@ class OnlineWorldService {
       `/apps/${encodeURIComponent(workId)}/model-config`,
       { method: "POST", body: payload, timeout: 30000 }
     ));
-    const verified = await this.readBackModelConfig(workId, payload, "云端配置保存后回读不一致");
+    const verified = await this.readBackModelConfig(workId, payload, "云端配置保存后回读不一致", { metadata: true });
     return createExportedGameCard(card, verified);
   }
 
-  async createGameCardCloud(selectedCard, { name = "" } = {}) {
+  async createGameCardCloud(selectedCard, { name = "", resumeWorkId = "", onCreated = async () => {} } = {}) {
     if (!selectedCard) throw new Error("请先选择一张游戏卡");
     const card = validateGameCard(selectedCard);
     const accountId = this.account().accountId;
@@ -3169,13 +3174,14 @@ class OnlineWorldService {
     const configuration = cloneJson(card.companion.configuration);
     const description = String(configuration.app?.description || "");
     const title = String(name || configuration.app?.name || card.title || "在线游戏世界").slice(0, 80);
-    const created = await this.retryPlatformWrite(() => this.requestConsole("/apps", {
+    const created = resumeWorkId ? { id: resumeWorkId } : await this.retryPlatformWrite(() => this.requestConsole("/apps", {
       method: "POST",
       body: { name: title, description, icon: "", icon_background: "", mode: "chat", type: 1 },
       timeout: 30000
     }));
     const workId = String(created?.data?.app?.id || created?.app?.id || created?.data?.id || created?.id || "");
     if (!workId) throw new Error("平台没有返回新作品编号");
+    await onCreated(workId);
     const modelPayload = await this.requestGo(`/apps/config?app_id=${encodeURIComponent(workId)}`, { timeout: 15000 });
     const model = firstObject(modelPayload, item => typeof item.provider === "string"
       && typeof (item.name || item.model) === "string");
@@ -3185,7 +3191,7 @@ class OnlineWorldService {
       `/apps/${encodeURIComponent(workId)}/model-config`,
       { method: "POST", body: payload, timeout: 30000 }
     ));
-    const verified = await this.readBackModelConfig(workId, payload, "新作品配置保存后回读不一致");
+    const verified = await this.readBackModelConfig(workId, payload, "新作品配置保存后回读不一致", { metadata: true });
     const rebound = rebindGameCardWithAuthor(card, workId, this.getOrigin?.(), accountId);
     return createExportedGameCard(rebound, verified);
   }
@@ -3448,6 +3454,30 @@ class OnlineWorldService {
     return waiting;
   }
 
+  async publishDirectOutbox(item) {
+    if (String(item.wake.workId) !== String(this.work?.id) || String(item.wake.fromAccountId) !== String(this.account().accountId)) throw Object.assign(new Error("发件箱属于其他作品或账号，已保留并停止发送"), { code: "FYOW_SCOPE_CHANGED" });
+    if (!item.chatId) { item.chatId = String((await this.ensurePrivateChat(item.toAccountId)).id); this.saveCache(); }
+    while (item.contents.length) {
+      const content = item.contents[0];
+      if (!item.inFlightContent || !await this.chatContainsContent(item.chatId, content)) {
+        item.inFlightContent = content; this.saveCache();
+        await this.retryPlatformWrite(() => this.requestConsole("/chats/messages", { method: "POST", body: { chat_id: item.chatId, content } }));
+      }
+      item.contents.shift(); item.inFlightContent = ""; this.saveCache();
+    }
+    if (!item.wakeSources?.length) {
+      item.wakeSources = await this.findPublishedRecordSources(item.wake);
+      if (!item.wakeSources?.length) item.wakeSources = await this.postRecordNow(item.wake, { parentId: item.parentId, toAccountId: item.toAccountId });
+      this.saveCache();
+    }
+    if (!this.directHistory.some(message => message.messageId === item.messageId)) {
+      this.directHistory.push({ ...item.history, sentAt: this.now() });
+      if (this.directHistory.length > 200) this.directHistory.splice(0, this.directHistory.length - 200);
+      this.saveCache();
+    }
+    return { messageId: item.messageId, announced: true, sent: true };
+  }
+
   async processCloudUploadQueue() {
     if (this.cloudUploadInFlight) return this.cloudUploadInFlight;
     const running = (async () => {
@@ -3458,7 +3488,9 @@ class OnlineWorldService {
         if (waitUntil > this.now()) return;
         try {
           let result;
-          if (item.kind === "balance-retire") {
+          if (item.kind === "direct-outbox") {
+            result = await this.publishDirectOutbox(item);
+          } else if (item.kind === "balance-retire") {
             result = await this.deleteSupersededBalanceDirectives(item.record, item.snapshot);
           } else if (item.kind === "self-reset-cleanup") {
             result = await this.deleteCommentSources({
@@ -3951,6 +3983,9 @@ class OnlineWorldService {
   }
 
   async postRecordNow(record, options = {}) {
+    const targetWorkId = String(record.workId || options.workId || this.work?.id || "");
+    if (targetWorkId !== String(this.work?.id || "")) throw Object.assign(new Error("旧作品上传已暂停，未转投当前作品"), { code: "FYOW_SCOPE_CHANGED" });
+    options = { ...options, workId: targetWorkId };
     const responses = [];
     const chunks = encodeCommentRecord(record);
     const publication = options.publication;
@@ -4032,14 +4067,14 @@ class OnlineWorldService {
     throw lastError;
   }
 
-  async readBackModelConfig(workId, expected, label) {
+  async readBackModelConfig(workId, expected, label, options = {}) {
     let lastDifferences = [];
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const verified = exportedConfig(await this.retryPlatformWrite(() => this.requestConsole(
         `/apps/${encodeURIComponent(workId)}/model-config/export`,
         { timeout: 30000 }
       )));
-      lastDifferences = coreConfigDifference(verified, expected);
+      lastDifferences = coreConfigDifference(verified, expected, options);
       if (!lastDifferences.length) return verified;
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * attempt));
     }
@@ -5437,7 +5472,6 @@ class OnlineWorldService {
       player.gold = Math.max(0, Math.trunc(Number(player.gold || 0)) + Math.max(0, Math.trunc(Number(sale.price || 0))));
     }
     this.marketSettledSales.add(transactionId);
-    if (this.marketSettledSales.size > 1000) this.marketSettledSales = new Set([...this.marketSettledSales].slice(-1000));
     return removed || !alreadySettled;
   }
 
@@ -5756,10 +5790,17 @@ class OnlineWorldService {
     if (this.syncPaused || !this.work || this.intentInFlight || this.migrationActive) return this.state();
     if (respectRetryGate && !force && Number(this.syncRetryAt || 0) > this.now()) return this.state();
     if (this.syncInFlight) return this.syncInFlight;
-    const running = this.syncNow(fullScan);
+    const running = this.syncWithUploads(fullScan);
     this.syncInFlight = running;
     try {
-      await running;
+      return await running;
+    } finally {
+      if (this.syncInFlight === running) this.syncInFlight = null;
+    }
+  }
+
+  async syncWithUploads(fullScan) {
+      await this.syncNow(fullScan);
       this.clearSyncFailure();
       const recoveringDailySpawn = this.cloudUploadQueue.some(item => item.record?.type === "daily-red-spawn");
       // Drain durable platform writes only after the cloud read has completed;
@@ -5779,9 +5820,6 @@ class OnlineWorldService {
       }
       await this.ensureOwnPlayerAccessAfterSync();
       return this.state();
-    } finally {
-      if (this.syncInFlight === running) this.syncInFlight = null;
-    }
   }
 
   async ensureOwnPlayerAccessAfterSync() {
@@ -6189,6 +6227,8 @@ class OnlineWorldService {
   }
 
   async submitIntent(intent = {}) {
+    const publicActions = new Set(["join", "prepare-join", "world-chat", "generate-general-letter", "march-quote", "quote-march", "march", "cancel-march", "gather-march", "deploy-soldiers", "mining", "start-mining", "stop-mining", "train", "training", "power-train", "power-training", "cultivate-player", "cultivate-general", "general-cultivation", "deploy-general", "recall-general", "take-general", "list-general", "buy-market-general", "cancel-market-listing", "confirm-general-discovery", "decline-general-discovery", "dismiss-battle-report", "talk-general", "edit-general-appearance", "execute-captive", "reorder-carried-generals", "recover-defeated-player"]);
+    if (!publicActions.has(String(intent.type || ""))) throw new Error("该行动不是游戏卡可调用的公开操作");
     this.diagnostic({
       event: "player-behavior-attempt",
       source: "local",
@@ -7185,6 +7225,11 @@ class OnlineWorldService {
   }
 
   async generateGeneralLetter(intent, actorAccountId) {
+    const queued = this.cloudUploadQueue.find(item => item.kind === "direct-outbox" && item.history?.payload?.generalId === String(intent.generalId || ""));
+    if (queued) {
+      await this.processCloudUploadQueue();
+      return { queued: this.cloudUploadQueue.includes(queued), messageId: queued.messageId, state: this.state() };
+    }
     const general = this.world?.generals?.[String(intent.generalId || "")];
     const player = this.world?.players?.[actorAccountId];
     if (!general || !player || general.holderAccountId !== actorAccountId) throw new Error("将领当前不归本机玩家保管");
@@ -7440,25 +7485,20 @@ class OnlineWorldService {
     const context = `${this.work.id}/${this.control.seasonId}/${messageId}`;
     const direct = signRecord({ schema: FYOW_SCHEMAS.direct, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, ...(controlId ? { controlId } : {}), fromAccountId: sender.accountId, toAccountId: recipient, type: messageType, box: sealJson(normalizedPayload, target.deviceEncryptionPublicKey, context), createdAt: this.now() }, identity.signingPrivateKey);
     const wake = signRecord({ schema: FYOW_SCHEMAS.directWake, messageId, gameId: GRID_GAME_ID, workId: this.work.id, seasonId: this.control.seasonId, ...(controlId ? { controlId } : {}), fromAccountId: sender.accountId, toAccountId: recipient, createdAt: this.now() }, identity.signingPrivateKey);
-    await this.postRecord(wake, { parentId: target.commentRootId, toAccountId: String(toAccountId) });
-    const chat = await this.ensurePrivateChat(toAccountId);
     const chunks = encodeCommentRecord(direct);
-    await this.enqueueCloudUpload({
-      kind: "chat-messages",
-      key: this.cloudUploadKey("chat-messages", { chatId: chat.id, messageId }),
-      chatId: String(chat.id),
-      messageId,
-      contents: cloneJson(chunks)
-    });
     const sentItem = {
       messageId, direction: "out", gameId: GRID_GAME_ID, workId: this.work.id,
       seasonId: this.control.seasonId, controlId, toAccountId: recipient, type: messageType,
       payload: cloneJson(normalizedPayload), createdAt: direct.createdAt, sentAt: this.now()
     };
-    this.directHistory.push(sentItem);
-    if (this.directHistory.length > 200) this.directHistory.splice(0, this.directHistory.length - 200);
-    this.diagnostic({ event: "player-behavior", source: "local-direct", behavior: cloneJson(sentItem) });
-    this.saveCache();
+    try {
+      await this.enqueueCloudUpload({ kind: "direct-outbox", key: `direct:${messageId}`, messageId,
+        toAccountId: String(toAccountId), parentId: target.commentRootId, wake, contents: cloneJson(chunks), history: sentItem });
+    } catch (error) {
+      error.errorCode = "DIRECT_DELIVERY_PENDING"; error.retryable = false;
+      error.userMessage = "书信已生成并保存在发件箱，恢复连接后继续发送，无需重新生成";
+      throw error;
+    }
     return { messageId, announced: true, sent: true, chunks: chunks.length };
   }
 

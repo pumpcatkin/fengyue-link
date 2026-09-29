@@ -1,0 +1,26 @@
+#online-world-editor-page{height:100%;min-width:0;overflow-y:auto;overflow-x:hidden}
+#online-world-editor-page .online-editor-layout{grid-template-columns:180px minmax(0,1fr);width:100%;min-width:0}
+#online-world-editor-page .online-editor-main{min-width:0;padding:20px 24px 0}
+#online-editor-workspace:not(.hidden){display:flex;flex-direction:column;min-width:0;min-height:calc(100vh - 160px)}
+#online-editor-workspace .online-editor-pane.active{flex:1;min-width:0}
+#online-editor-workspace textarea{width:100%;max-width:100%;resize:vertical;overflow:auto;box-sizing:border-box}
+#online-editor-workspace .code-editor{min-height:340px;font:13px/1.65 Consolas,monospace;tab-size:2}
+#online-editor-workspace .online-editor-agent-dock{position:sticky;bottom:0;margin-top:20px;flex:none;border-radius:0;border-width:1px 0 0;background:var(--panel-bg,#16222c);z-index:2}
+#online-editor-workspace .online-editor-agent-dock-head{align-items:flex-start}
+#online-editor-agent-progress{max-height:120px;overflow:auto;min-width:0;white-space:normal;overflow-wrap:anywhere}
+#online-editor-agent-result{max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+#online-editor-save-state{font-size:12px;color:#aac5bc;overflow-wrap:anywhere}
+#online-editor-workspace details{padding:8px 0;font-size:12px}
+#online-editor-workspace .online-editor-budget{flex-wrap:wrap;min-width:0}
+#online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto auto}
+#online-editor-workspace .online-editor-agent-dock-body textarea{min-height:76px;max-height:220px}
+@media(max-width:720px){
+ #online-world-editor-page .online-editor-layout{display:block}
+ #online-world-editor-page .online-editor-sidebar{position:static;min-height:0;max-height:none}
+ #online-world-editor-page .online-editor-tabs{display:flex;flex-wrap:wrap;gap:6px}
+ #online-world-editor-page .online-editor-tabs button{flex:1 0 28%;min-width:0}
+ #online-world-editor-page .online-editor-main{padding:12px 12px 0}
+ #online-editor-workspace .online-editor-agent-dock{position:static}
+ #online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto}
+ #online-editor-workspace .online-editor-agent-dock-body textarea{grid-column:1/-1}
+}

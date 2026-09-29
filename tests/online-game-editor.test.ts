@@ -119,7 +119,7 @@ describe("online game editor projects", () => {
     expect(project.program.html).toContain("standalone/1");
     expect(project.harness.tests.scenarios).toHaveLength(2);
     expect(project.program.html).toContain("fyow-host/1");
-    expect(project.program.html).toContain('send("ready")');
+    expect(project.program.html).toContain('send("ready",{capabilities:["flush-save/1"]})');
     expect(project.agents.every((item: any) => item.workId === "")).toBe(true);
   });
 
@@ -135,7 +135,7 @@ describe("online game editor projects", () => {
       }
     });
     expect(project.program.html).toContain("fyow-host/1");
-    expect(project.program.html).toContain('send("ready")');
+    expect(project.program.html).toContain('send("ready",{capabilities:["flush-save/1"]})');
     const customHtml = html.replace("</main>", "<button>玩家自定义内容</button></main>");
     expect(normalizeEditorProject({ program: { html: customHtml } }).program.html).toBe(customHtml);
   });

@@ -170,9 +170,14 @@ app.whenReady().then(async () => {
       assert(Number(hoverState.opacity) > 0, JSON.stringify(hoverState));
       fs.writeFileSync(path.join(output, `return-${width}.png`), (await win.webContents.capturePage()).toPNG());
     }
+    if (standalone) {
+      const embedded = win.webContents.mainFrame.frames.find(frame => frame.url.startsWith("blob:"));
+      await embedded.executeJavaScript(`document.querySelector("#advance").click()`);
+    }
     await win.webContents.executeJavaScript(`document.querySelector("#online-world-floating-back").click()`);
-    for (let attempt = 0; attempt < 20 && !closeCalls; attempt += 1) await new Promise(resolve => setTimeout(resolve, 100));
+    for (let attempt = 0; attempt < 20 && closeCalls < (standalone ? 2 : 1); attempt += 1) await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(closeCalls, standalone ? 2 : 1);
+    if (standalone) assert.equal(world.gameSave.step, 2, "immediate host return must flush the last interaction");
     assert.equal(await win.webContents.executeJavaScript(`onlineWorldInLibrary && onlineWorldFrame.src==="about:blank"`), true);
 
     await win.webContents.executeJavaScript(`onlineWorldEditorProject=${JSON.stringify(createEditorProject(card))};
@@ -198,7 +203,7 @@ app.whenReady().then(async () => {
       renderOnlineWorldEditorProject();
       return {rejected,finite,disabled,unbounded,restored:unlimited.checked};
     })()`);
-    assert.deepEqual(budgetControls,{rejected:true,finite:120000,disabled:true,unbounded:null,restored:true});
+    assert.deepEqual(budgetControls,{rejected:false,finite:120000,disabled:true,unbounded:null,restored:false});
     for (const [width, height] of [[1280, 900], [420, 820]]) {
       win.setContentSize(width, height);
       await new Promise(resolve => setTimeout(resolve, 200));

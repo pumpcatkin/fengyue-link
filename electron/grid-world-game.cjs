@@ -1350,7 +1350,8 @@ function modelCaptivityHistory(state, general) {
 }
 
 function modelRecentInteractions(general) {
-  return (general?.interactionHistory || []).map(item => ({
+  // The complete archive stays local; requests use a bounded recent window.
+  return (general?.interactionHistory || []).slice(-12).map(item => ({
     year: Number(item.year || 1),
     speakerName: String(item.speakerName || "某位主公").slice(0, 40),
     kind: item.kind === "captive" ? "captive" : "ordinary",

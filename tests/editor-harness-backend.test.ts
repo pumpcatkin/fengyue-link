@@ -13,7 +13,7 @@ function setup(request: any) {
   const save = vi.fn();
   vm.runInNewContext(source, { module, console, AbortController, Date, require: (id: string) => {
     if (id === "node:fs") return { existsSync: () => true };
-    if (id === "./runtime-utils.cjs") return { readJsonWithBackupSync: () => ({ value: { "https://example.org|owner": { ready: true, version: 2, workId: "work" } } }) };
+    if (id === "./runtime-utils.cjs") return { atomicWriteJsonSync: vi.fn(), readJsonWithBackupSync: () => ({ value: { "https://example.org|owner": { ready: true, version: 2, workId: "work" } } }) };
     if (id === "./online-game-editor.cjs") return { saveEditorProjects: save };
     if (id === "./game-harness-browser.cjs") return { testGameInBrowser: async () => ({ passed: true }) };
     return require(id.startsWith("./") ? `../electron/${id.slice(2)}` : id);
@@ -22,6 +22,8 @@ function setup(request: any) {
   const backend: any = { account: { accountId: "owner" }, origin: "https://example.org", onlineWorldEditorFile: "fixture.json", onlineWorldEditorProjects: { projects: { draft: project } },
     onlineWorldEditorProject: () => backend.onlineWorldEditorProjects.projects.draft, assertToolLoggedIn: vi.fn(), emit: vi.fn(), cancelAutoModels: vi.fn(), appendSessionLog: vi.fn(),
     requestEditorModelForWork: request,
+    normalizeModelPayload: (value: any) => value, platformGoApi: async () => ({ model: { name: "gpt-5.6", provider: "a" } }),
+    platformChatApi: vi.fn(async () => ({})), onlineWorldService: { readBackModelConfig: vi.fn(async () => ({})) },
     withAutoModel: (_id: any, _label: any, execute: any, options: any) => runAutoModel({ loadModels: async () => models, execute, ...options, wait: async () => {}, signal: new AbortController().signal }) };
   return { backend, run: module.exports.runEditorHarness, save };
 }

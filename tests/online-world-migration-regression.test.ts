@@ -362,7 +362,7 @@ describe("online world migration regressions", () => {
     let releaseSync!: () => void;
     instance.syncInFlight = new Promise<void>(resolve => { releaseSync = resolve; });
     instance.submitIntentNow = vi.fn(async () => ({ ok: true }));
-    const action = instance.submitIntent({ type: "fixture", idempotencyKey: "fixture" });
+    const action = instance.submitIntent({ type: "train", idempotencyKey: "fixture" });
     instance.migrationActive = true;
     releaseSync();
     try {

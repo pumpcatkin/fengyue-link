@@ -8,6 +8,7 @@ const { injectSandboxCsp } = require("./online-world-runtime.cjs");
 const { validateTests } = require("./game-harness.cjs");
 const { isStandalone, validateSave } = require("./standalone-game.cjs");
 const { assertActive } = require("./auto-model-router.cjs");
+const bridge = require("./desktop/game-bridge.cjs");
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function testGameInBrowser(html, tests, signal, { timeoutMs = 45000 } = {}) {
@@ -44,7 +45,8 @@ async function testGameInBrowser(html, tests, signal, { timeoutMs = 45000 } = {}
     const fixture = `<!doctype html><html><head><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}iframe{display:block;border:0;width:100%;height:100%}</style></head><body><iframe sandbox="allow-scripts"></iframe><script>
       const frame=document.querySelector('iframe');let saved=null;let ready=0;let writes=0;let closed=false;let returns=0;const errors=[];
       const valid=${validateSave.toString().replace('Buffer.byteLength(text)', 'new TextEncoder().encode(text).byteLength')};
-      const source='fengyue-host',protocol='fyow-host/1';
+      const source='fengyue-host',protocol='fyow-host/1';let lastWriteAt=0;
+      const validRequestId=${String(bridge.validRequestId).replace(/^validRequestId/, 'function')};
       const program=${JSON.stringify(program).replace(/</g, "\\u003c")};
       window.fixture={get saved(){return saved},get ready(){return ready},get writes(){return writes},get closed(){return closed},get returns(){return returns},errors,reopen(){if(!closed)throw Error('游戏尚未返回大厅');closed=false;frame.srcdoc=program;}};
       addEventListener('message',e=>{if(e.source!==frame.contentWindow)return;if(e.data?.harnessError){errors.push(e.data.harnessError);return;}
@@ -52,7 +54,7 @@ async function testGameInBrowser(html, tests, signal, { timeoutMs = 45000 } = {}
         if(closed)return;
         if(d.type==='library'){closed=true;returns++;frame.srcdoc='';return;}
         if(d.type==='ready'){ready++;frame.contentWindow.postMessage({source,protocol,type:'state',state:{runtime:'standalone/1',initialized:true,status:'ready',gameSave:saved,card:{title:'测试游戏'}}},'*');}
-        if(d.type==='game-save'&&/^[0-9a-f-]{36}$/i.test(d.requestId||'')){try{saved=valid(d.data);writes++;frame.contentWindow.postMessage({source,protocol,type:'result',requestId:d.requestId,result:{saved:true}},'*');}catch(error){errors.push(error.message);frame.contentWindow.postMessage({source,protocol,type:'error',requestId:d.requestId,message:error.message},'*');}}
+        if(d.type==='game-save'){if(!validRequestId(d.requestId)){errors.push('存档 requestId 不符合真实宿主协议');return;}try{if(Date.now()-lastWriteAt<${bridge.minimumSaveInterval})throw Error('存档过于频繁，请合并变更后重试');saved=valid(d.data);lastWriteAt=Date.now();writes++;frame.contentWindow.postMessage({source,protocol,type:'result',requestId:d.requestId,result:{saved:true}},'*');}catch(error){errors.push(error.message);frame.contentWindow.postMessage({source,protocol,type:'error',requestId:d.requestId,message:error.message},'*');}}
       });frame.srcdoc=program;</script></body></html>`;
     const evaluateHost = code => win.webContents.executeJavaScript(code);
     const getFrame = () => win.webContents.mainFrame.frames.find(frame => frame.url === "about:srcdoc");

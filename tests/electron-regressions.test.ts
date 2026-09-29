@@ -652,7 +652,7 @@ describe("Electron platform API regressions", () => {
     const styles = readFileSync(new URL("../electron/desktop/styles.css", import.meta.url), "utf8");
     const theme = readFileSync(new URL("../electron/desktop/theme.css", import.meta.url), "utf8");
     expect(html).toMatch(/id="round-flow-status"[^>]*role="status"/);
-    expect(html).toMatch(/id="submit-round"[^>]*>[^<]*<\/button><small id="round-flow-status"/);
+    expect(html).toMatch(/id="submit-round"[^>]*>[^<]*<\/button><button id="recover-round"[^>]*>[^<]*<\/button><small id="round-flow-status"/);
     expect(renderer).toContain("function activeConversationFlow(next)");
     expect(renderer).toContain('"正在准备本轮回复"');
     expect(renderer).toContain('"正在生成对话内容"');

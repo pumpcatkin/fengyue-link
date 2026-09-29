@@ -27,7 +27,7 @@ app.whenReady().then(async () => {
     const stalePage = await testGameInBrowser(p.program.html, staleTests);
     assert.equal(stalePage.passed, false);
     assert(stalePage.errors.some(error => error.includes("已返回大厅")));
-    const exception = await testGameInBrowser(p.program.html.replace('send("ready");', 'throw Error("intentional-runtime-failure");send("ready");'), p.harness.tests);
+    const exception = await testGameInBrowser(p.program.html.replace('send("ready",', 'throw Error("intentional-runtime-failure");send("ready",'), p.harness.tests);
     assert.equal(exception.passed, false);
     fs.mkdirSync(output, { recursive: true });
     fs.writeFileSync(path.join(output, "result.json"), JSON.stringify({ playable: result, broken, exception, exitReopen, stalePage }, null, 2));

@@ -2220,14 +2220,14 @@ describe("online world platform service", () => {
     const gate = new Promise<void>(resolve => { release = resolve; });
     const instance = service({ getAccount: () => ({ accountId: "player", username: "玩家" }) });
     instance.submitIntentNow = async (intent: any) => {
-      if (intent.type === "first") await gate;
+      if (intent.type === "train") await gate;
       return { type: intent.type };
     };
-    const first = instance.submitIntent({ type: "first", idempotencyKey: "first" });
+    const first = instance.submitIntent({ type: "train", idempotencyKey: "first" });
     await new Promise(resolve => setTimeout(resolve, 0));
-    await expect(instance.submitIntent({ type: "second", idempotencyKey: "second" })).rejects.toThrow(/上一项行动/);
+    await expect(instance.submitIntent({ type: "start-mining", idempotencyKey: "second" })).rejects.toThrow(/上一项行动/);
     release();
-    await expect(first).resolves.toEqual({ type: "first" });
+    await expect(first).resolves.toEqual({ type: "train" });
   });
 
   it("calibrates rule time from the platform response clock", async () => {

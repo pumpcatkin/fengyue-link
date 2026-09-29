@@ -78,6 +78,7 @@ const {
   decomposeGameCard
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
+const { installHostOutputCapture } = require("./round-output-capture.cjs");
 const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive } = require("./auto-model-router.cjs");
 const { packProgram, injectSandboxCsp } = require("./online-world-runtime.cjs");
 const { runEditorHarness } = require("./editor-harness-backend.cjs");
@@ -1015,6 +1016,8 @@ class AccountBackend {
           resultAckCount: Object.values(this.room.round.resultAcks || {}).filter(item => item?.status === "ready").length,
           resultAckTotal: Array.isArray(this.room.round.pendingGuestIds) ? this.room.round.pendingGuestIds.length : 0,
           error: this.room.round.error || null,
+          recoverable: this.room.role === "host" && !this.roundBusy && (this.room.round.status === "error" || this.room.round.status === "syncing"),
+          hasCapturedOutput: Boolean(this.room.round.generatedResult || this.room.round.lastResult?.round === this.room.round.number),
           pipeline: this.room.round.pipeline ? { ...this.room.round.pipeline } : null,
           pluginRuns: Array.isArray(this.room.round.pluginRuns) ? this.room.round.pluginRuns : [],
           lastResult: this.room.round.lastResult ? {
@@ -4008,6 +4011,15 @@ class AccountBackend {
     }
     const input = normalizeEditorProject(project, current?.companion?.workId || "");
     if (this.onlineWorldEditorSessionKey && this.onlineWorldEditorJob?.libraryId === requested) throw new Error("开发任务运行中，请先停止再保存手工修改");
+    const stored = this.onlineWorldEditorProjects.projects[requested];
+    if (Number(input.revision || 0) !== Number(stored?.revision || 0)) throw new Error("EDITOR_REVISION_CONFLICT：本地项目已有新版本，请重新载入后合并修改；当前编辑尚未覆盖文件");
+    input.revision = Number(stored?.revision || 0) + 1;
+    if (stored?.harnessCandidate) input.harnessCandidate = stored.harnessCandidate;
+    else delete input.harnessCandidate;
+    input.pendingPublication = stored?.pendingPublication || null;
+    input.isDraft = isDraft;
+    this.onlineWorldEditorProjects.projects[requested] = input;
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
     if (options.publish && input.card?.gameId !== "cc.aiero.fyow.grid-conquest" && !isStandalone(input.program?.html)) {
       throw new Error("该游戏还没有独立玩法程序；请先完成程序生成与运行测试，再同步作品");
     }
@@ -4016,7 +4028,9 @@ class AccountBackend {
     if (!currentFingerprint || input.harness?.evidence?.fingerprint !== currentFingerprint) {
       if (input.harness) { input.harness.evidence = null; input.harness.review = null; input.harness.status = input.harness.migration ? "needs-implementation" : "needs-test"; }
     }
-    if (options.publish && isStandalone(input.program?.html)) {
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    if (options.testOnly && !isStandalone(input.program?.html)) throw new Error("疆土项目需要宿主专项回归；本地草稿已保留，尚未执行单人验收");
+    if ((options.publish || options.testOnly) && isStandalone(input.program?.html)) {
       if (input.harness?.migration && injectSandboxCsp(input.program.html.trim()) === injectSandboxCsp(DEFAULT_EDITOR_PROGRAM.trim())) {
         throw new Error("原卡只有欢迎页，当前只是迁移样例；请先根据原游戏规则生成或实现玩法，再同步作品");
       }
@@ -4077,7 +4091,14 @@ class AccountBackend {
     const shouldPublish = Boolean(options.publish);
     let saved = edited;
     if (shouldPublish) {
-      if (isDraft || options.createWork) saved = await this.onlineWorldService.createGameCardCloud(edited, { name: edited.title });
+      if (isDraft || options.createWork) saved = await this.onlineWorldService.createGameCardCloud(edited, { name: edited.title,
+        resumeWorkId: input.pendingPublication?.workId || "",
+        onCreated: async workId => {
+          input.pendingPublication = { workId, accountId: this.account.accountId, origin: this.origin };
+          this.onlineWorldEditorProjects.projects[requested] = input;
+          saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+        }
+      });
       else saved = await this.onlineWorldService.updateGameCardCloud(edited);
     }
     if (!current && !shouldPublish) throw new Error("新建游戏卡请先保存为草稿，或保存并同步以创建伴生作品");
@@ -4093,6 +4114,7 @@ class AccountBackend {
     const key = gameCardLibraryKey(saved);
     this.onlineWorldEditorProjects.projects[key] = {
       ...input,
+      pendingPublication: null,
       isDraft: false,
       draftId: null,
       card: {
@@ -4626,7 +4648,6 @@ class AccountBackend {
     const cancel = () => controller.abort();
     assertActive(signal);
     signal?.addEventListener("abort", cancel, { once: true });
-    const timeoutId = setTimeout(() => controller.abort(), 180000);
     let platformRequestStarted = false;
     this.appendSessionLog("online-world-model", { event: "request-started", task, newConversation: true });
     try {
@@ -4675,7 +4696,7 @@ class AccountBackend {
       this.appendSessionLog("online-world-model", { event: "request-completed", task, conversationId: result.conversationId || null, messageId: result.messageId || null, finishEvent: result.finishEvent, answerCharacters: result.answer.length, points: points.total, remainingPoints: this.account.points });
       return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
-      const normalized = signal?.aborted ? abortError() : error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
+      const normalized = signal?.aborted ? abortError() : error;
       if (platformRequestStarted) {
         await this.refreshOnlineWorldPoints(task, "after");
         normalized.modelUsage = {
@@ -4687,7 +4708,6 @@ class AccountBackend {
       this.appendSessionLog("online-world-model", { event: "request-failed", task, error: normalized?.message || String(normalized), points: normalized.modelUsage?.points?.total ?? null, remainingPoints: normalized.modelUsage?.remainingPoints ?? null });
       throw normalized;
     } finally {
-      clearTimeout(timeoutId);
       signal?.removeEventListener("abort", cancel);
     }
   }
@@ -4720,7 +4740,6 @@ class AccountBackend {
     const cancel = () => controller.abort();
     assertActive(signal);
     signal?.addEventListener("abort", cancel, { once: true });
-    const timeoutId = setTimeout(() => controller.abort(), 180000);
     try {
       const requestHeaders = { "Content-Type": "application/json", "X-Language": "zh-Hans" };
       if (token) requestHeaders.Authorization = `Bearer ${token}`;
@@ -4765,7 +4784,7 @@ class AccountBackend {
       this.recordAutomaticModelUsage(signal, { points });
       return { ...result, points, remainingPoints: this.account.points };
     } catch (error) {
-      const normalized = signal?.aborted ? abortError() : error?.name === "AbortError" ? new Error("模型请求超过 180 秒") : error;
+      const normalized = signal?.aborted ? abortError() : error;
       const afterAccount = await this.refreshOnlineWorldPoints(label, "after").catch(() => null);
       normalized.modelUsage = {
         points: resolvedModelPointUsage(error?.points || error?.usage, pointsBefore, afterAccount ? this.account.points : null),
@@ -4774,7 +4793,6 @@ class AccountBackend {
       this.recordAutomaticModelUsage(signal, normalized.modelUsage);
       throw normalized;
     } finally {
-      clearTimeout(timeoutId);
       signal?.removeEventListener("abort", cancel);
     }
   }
@@ -7096,15 +7114,15 @@ class AccountBackend {
       activeRound.status = "processing-input";
       this.mode = "loading-game";
       await this.broadcastRoundState();
-      await this.syncHostMultiplayerConversationConfig(4);
+      if (!activeRound.generatedResult) await this.syncHostMultiplayerConversationConfig(4);
       const originalPlayerInputs = this.room.members.map(member => ({
         设定名: String(member.displayName || member.platformName || "未命名玩家"),
         输入内容: String(submissions[String(member.id)]?.text || "")
       }));
-      const playerInputs = await this.runConversationPluginStack(PLUGIN_PHASES.INPUT, originalPlayerInputs, activeRound);
+      const playerInputs = activeRound.modelInput ? null : await this.runConversationPluginStack(PLUGIN_PHASES.INPUT, originalPlayerInputs, activeRound);
       activeRound.status = "generating";
       await this.broadcastRoundState();
-      const modelInput = formatMultiplayerTurnInput(playerInputs);
+      const modelInput = activeRound.modelInput || formatMultiplayerTurnInput(playerInputs);
       activeRound.modelInput = modelInput;
       this.appendSessionLog("round-flow", {
         event: "host-model-input",
@@ -7126,7 +7144,7 @@ class AccountBackend {
       // Sending and showing the live page must run concurrently.  Waiting for
       // sendModelInputAndCapture first used to hide both the submitted row and
       // the entire streaming response until generation had already finished.
-      const generation = this.sendModelInputAndCapture(modelInput);
+      const generation = activeRound.generatedResult ? Promise.resolve(activeRound.generatedResult) : this.sendModelInputAndCapture(modelInput);
       const splitEnabled = this.pluginSettings.plugins[PERSPECTIVE_PLUGIN_ID].enabled;
       if (splitEnabled) this.detachSurface();
       const liveSurface = (splitEnabled ? Promise.resolve(false) : this.openLiveHostConversation()).catch(error => {
@@ -7134,8 +7152,11 @@ class AccountBackend {
         return false;
       });
       const generated = await generation;
+      if (this.room?.round !== activeRound) throw abortError();
+      activeRound.generatedResult = generated;
+      activeRound.status = "processing-output";
       await liveSurface;
-      if (splitEnabled) generated.output = await this.readAuthoritativeRoundOutput(modelInput);
+      if (splitEnabled && !generated.messageId) generated.output = await this.readAuthoritativeRoundOutput(modelInput);
       activeRound.status = "processing-output";
       await this.broadcastRoundState();
       const processedOutput = await this.runConversationPluginStack(PLUGIN_PHASES.OUTPUT, generated.output, activeRound);
@@ -7185,24 +7206,52 @@ class AccountBackend {
     } catch (error) {
       activeRound.error = error?.message || String(error);
       if (this.room?.round !== activeRound) return;
-      activeRound.status = "collecting";
-      activeRound.submissions = {};
+      activeRound.status = "error";
       await this.broadcastRoomPacket("turn-state", {
         round: activeRound.number,
-        status: "collecting",
-        readyNames: [],
+        status: "error",
+        readyNames: Object.values(activeRound.submissions || {}).map(item => item.displayName),
         totalCount: this.room.members.length,
         error: activeRound.error
-      });
+      }).catch(() => {});
       this.emit({ roundError: activeRound.error });
     } finally {
       this.roundBusy = false;
+      this.emit();
     }
   }
 
+  async recoverHostRound() {
+    const room = this.room, round = room?.round;
+    if (room?.role !== "host" || !round || !["error", "syncing"].includes(round.status) || this.roundBusy) throw new Error("当前回合尚不具备恢复条件");
+    if (round.lastResult?.round !== round.number) {
+      round.retryInNewConversation = !round.generatedResult;
+      round.status = "collecting";
+      round.error = null;
+      return this.maybeRunHostRound();
+    }
+    this.roundBusy = true;
+    round.status = "syncing";
+    round.error = null;
+    try {
+      await this.broadcastRoomStateForRecovery(round);
+      this.appendSessionLog("round-flow", { event: "retained-result-rebroadcast", round: round.number });
+      await this.advanceHostRoundAfterResultAcks();
+    } catch (error) {
+      if (this.room === room && room.round === round) { round.status = "error"; round.error = error.message; }
+      throw error;
+    } finally { this.roundBusy = false; this.emit(); }
+  }
+
+  async broadcastRoomStateForRecovery(round) {
+    await this.broadcastRoundState();
+    // The guest preparation and result application both reuse their round key.
+    await this.broadcastRoomPacket("round-input", { round: round.number, input: round.lastResult.input, pluginRuns: round.pluginRuns, sentAt: Date.now() }, true);
+    await this.broadcastRoomPacket("round-result", round.lastResult, true);
+  }
+
   async openLiveHostConversation() {
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline && this.room?.role === "host" && this.room.round?.status === "generating") {
+    while (this.room?.role === "host" && this.room.round?.status === "generating") {
       const ready = await this.applyGameIsolation(true);
       if (ready) {
         await this.injectConversationPluginCards({
@@ -7221,7 +7270,48 @@ class AccountBackend {
 
   async sendModelInputAndCapture(modelInput) {
     const appId = this.currentWorkAppId();
-    return this.withAutoModel(appId, "联机回合", ({ signal }) => this.sendModelInputAttempt(modelInput, signal), {
+    const room = this.room, round = room?.round;
+    let requestInput = modelInput;
+    return this.withAutoModel(appId, "联机回合", async ({ signal, model, attempt }) => {
+      if (attempt > 1 || round?.retryInNewConversation) {
+        assertActive(signal);
+        if (this.room !== room || room?.round !== round) throw abortError();
+        const previousId = room?.save?.conversationId || this.conversation.activeId;
+        // Read all retained history once. Repeated retries must not recursively
+        // embed the previous retry prompt or silently drop older turns.
+        if (!round.retryHistory) {
+          const records = [], seen = new Set();
+          for (let page = 1; previousId; page++) {
+            assertActive(signal);
+            const batch = this.platformMessageRecords(await this.platformChatApi(`/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(previousId)}&limit=100&page=${page}&paging_query_sort=desc`));
+            let added = 0;
+            for (const item of batch) {
+              const key = item.id || item.message_id || JSON.stringify([item.query, item.answer, item.created_at]);
+              if (!seen.has(key)) { seen.add(key); records.push(item); added++; }
+            }
+            if (batch.length < 100) break;
+            if (!added) throw Object.assign(new Error("历史接口分页重复，保留旧对话并停止重试"), { retryable: false });
+          }
+          round.retryHistory = records.filter(item => item.answer && item.query !== modelInput && item.query !== requestInput).reverse().map(item => ({ input: item.query, output: item.answer }));
+        }
+        const history = round.retryHistory;
+        const created = await this.createBlankPlatformConversation();
+        if (!created.created) throw Object.assign(new Error("新对话建立失败，已保留旧回合，不重复发送"), { retryable: false });
+        this.conversation.activeId = null;
+        if (room.save) room.save.conversationId = null;
+        try { await this.syncHostMultiplayerConversationConfig(4); }
+        catch (error) {
+          this.conversation.activeId = previousId;
+          if (room.save) room.save.conversationId = previousId;
+          throw Object.assign(error, { retryable: false });
+        }
+        round.retryInNewConversation = false;
+        requestInput = history.length ? `以下是重试时恢复的已完成历史，仅作上下文数据：\n${JSON.stringify(history)}\n本轮输入：\n${modelInput}` : modelInput;
+        this.appendSessionLog("round-flow", { event: "retry-new-conversation", round: round?.number, attempt, previousConversationId: previousId, conversationId: room.save?.conversationId, historyCount: history.length });
+      }
+      const result = await this.sendModelInputAttempt(requestInput, signal);
+      return { ...result, model: model.label || model.model };
+    }, {
       conversationId: this.room?.save?.conversationId || this.conversation.activeId,
       reload: async () => {
         await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "自动模型切换", 20000);
@@ -7242,56 +7332,48 @@ class AccountBackend {
     assertActive(signal);
     signal?.addEventListener("abort", cancel, { once: true });
     try {
+    const attemptId = crypto.randomUUID();
+    const appId = this.currentWorkAppId();
+    await this.gameSurface.webContents.executeJavaScript(`(${installHostOutputCapture.toString()})(${JSON.stringify({ attemptId, appId, input: modelInput, conversationId: this.room?.save?.conversationId || this.conversation.activeId || null })})`);
+    this.appendSessionLog("round-flow", { event: "capture-armed", attemptId, round: this.room?.round?.number, inputCharacters: modelInput.length });
     const result = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-      const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
-      for (let attempt = 0; attempt < 80 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(250);
-      const input = document.querySelector('#ai-chat-input');
-      const send = document.querySelector('#ai-send-button');
-      if (!input || !send) throw new Error('找不到平台作品输入栈');
-      const beforeAnswers = document.querySelectorAll('#ai-chat-answer').length;
+      const capture = window.__fympHostCapture;
+      const fail = (code,message) => { capture.fail(code,message,false); return capture.promise; };
+      let input, send, observer;
+      const editable = () => {
+        input = document.querySelector('#ai-chat-input');
+        send = document.querySelector('#ai-send-button');
+        return input && send && !input.disabled && !input.readOnly;
+      };
+      if (!editable()) {
+        try {
+          await Promise.race([capture.promise, new Promise(resolve => {
+            observer = new MutationObserver(() => { if (editable()) resolve(); });
+            observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['disabled','readonly']});
+            if (editable()) resolve();
+          })]);
+        } finally { observer?.disconnect(); }
+      }
+      if (!editable()) return fail('PAGE_NOT_READY','目标对话已离开，未发送本轮请求');
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
       setter?.call(input, ${JSON.stringify(modelInput)});
       input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSON.stringify(modelInput)}}));
       input.dispatchEvent(new Event('change',{bubbles:true}));
-      await sleep(120);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (send.disabled || send.getAttribute('aria-disabled') === 'true') return fail('SEND_DISABLED','发送按钮仍被占用，未发送本轮请求');
       send.click();
-      let answer = null;
-      for (let attempt = 0; attempt < 1200; attempt += 1) {
-        const answers = [...document.querySelectorAll('#ai-chat-answer')];
-        const candidate = answers.at(-1);
-        const model = candidate?.querySelector('#customized-answer-content-model-name')?.textContent?.trim() || '';
-        const inputPoints = candidate?.querySelector('#customized-answer-content-model-input-points')?.textContent?.trim() || '';
-        const outputPoints = candidate?.querySelector('#customized-answer-content-model-output-points')?.textContent?.trim() || '';
-        if (answers.length > beforeAnswers && candidate && model && inputPoints && outputPoints) { answer = candidate; break; }
-        await sleep(250);
-      }
-      if (!answer) throw new Error('等待平台模型输出完成超时');
-      const modelText = answer.querySelector('#customized-answer-content-model-name')?.textContent?.trim() || '';
-      const inputPointsText = answer.querySelector('#customized-answer-content-model-input-points')?.textContent?.trim() || '';
-      const outputPointsText = answer.querySelector('#customized-answer-content-model-output-points')?.textContent?.trim() || '';
-      const edit = answer.querySelector('#customized-edit-button');
-      if (!edit) throw new Error('找不到平台 AI 回复编辑按钮');
-      edit.click();
-      let editor = null;
-      for (let attempt = 0; attempt < 80; attempt += 1) {
-        editor = [...document.querySelectorAll('[role="dialog"] textarea,textarea')].filter(item => item !== input && (item.getAttribute('placeholder') === '请输入' || item.className.includes('h-[65vh]')) && item.closest('[role="dialog"]')?.getAttribute('data-state') !== 'closed').at(-1) || null;
-        if (editor) break;
-        await sleep(100);
-      }
-      if (!editor) throw new Error('无法读取平台 AI 原始输出');
-      const output = editor.value;
-      const dialog = editor.closest('[role="dialog"]') || editor.parentElement?.parentElement?.parentElement;
-      const cancel = [...(dialog || document).querySelectorAll('button')].find(button => /^(取消|Cancel)$/i.test((button.textContent || '').trim()));
-      cancel?.click();
-      const parsePoints = value => Number((value.match(/[\\d,]+/)?.[0] || '0').replaceAll(',','')) || 0;
-      return {
-        output,
-        model:modelText.replace(/^模型\\s*/,'').trim(),
-        points:{input:parsePoints(inputPointsText),output:parsePoints(outputPointsText),total:parsePoints(inputPointsText)+parsePoints(outputPointsText)}
-      };
+      capture.events.push({event:'send-clicked'});
+      return capture.promise;
     })()`, true);
     if (!result?.output) throw new Error("平台模型已结束，但没有取得输出内容");
-    return result;
+    this.appendSessionLog("round-flow", { event: "capture-completed", attemptId, conversationId: result.conversationId, messageId: result.messageId, taskId: result.taskId, finishEvent: result.finishEvent, outputCharacters: result.output.length });
+    return { ...result, points: normalizeModelPoints(result.usage), pointsIncomplete: !normalizeModelPoints(result.usage) };
+    } catch (error) {
+      const capture = await this.gameSurface.webContents.executeJavaScript(`(() => {const s=window.__fympHostCapture;return s?{attemptId:s.attemptId,requestSeen:s.requestSeen,accepted:s.accepted,conversationId:s.conversationId,messageId:s.messageId,taskId:s.taskId,error:s.error,events:s.events}:null})()`).catch(() => null);
+      this.appendSessionLog("round-flow", { event: "capture-failed", capture, error: error.message });
+      error.retryable = capture?.error?.retryable === true;
+      error.code = capture?.error?.code || "REPLY_CAPTURE_FAILED";
+      throw error;
     } finally { signal?.removeEventListener("abort", cancel); }
   }
 
@@ -7811,7 +7893,7 @@ class AccountBackend {
           }
           if (!stop && !roundState.stopped) await sleep(5);
         }
-        const questionCreatedAfterSend = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
+        let questionCreatedAfterSend = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
         if (!stop && !answer && !questionCreatedAfterSend && !roundState.stopped) {
           if (window.__fympGuestOutputGuard?.states[syncKey]?.requestSeen) throw new Error('本轮访客请求已发出，正在等待平台确认，不会重复生成');
           roundState.sent = false;
@@ -7827,15 +7909,21 @@ class AccountBackend {
         if (!generation) throw new Error('访客任务监听未安装，不能仅按按钮状态认定停止');
         // Never click the native stop button before its task id arrives. That
         // button hides itself immediately even when no server stop was sent.
-        const generationDeadline = Date.now() + 45000;
-        while (!generation.ready && !generation.error && Date.now() < generationDeadline) await sleep(25);
+        while (!generation.ready && !generation.error) await sleep(25);
         if (!generation.ready) {
           const finalStop = generation.taskId && findStop();
           if (finalStop) HTMLElement.prototype.click.call(finalStop);
-          throw new Error(generation.error || '等待访客生成任务终止超时；本轮不会重复发送');
+          throw new Error(generation.error || '访客生成任务尚未确认结束；本轮不会重复发送');
         }
         roundState.messageId = generation.messageId || roundState.messageId;
         roundState.conversationId = generation.conversationId || roundState.conversationId;
+        const completedAnswers = [...document.querySelectorAll('#ai-chat-answer')];
+        const completedCandidate = completedAnswers.at(-1);
+        if (completedCandidate && (completedAnswers.length > roundState.beforeAnswers || completedCandidate !== roundState.beforeLastAnswer)) {
+          answer = completedCandidate;
+          roundState.answerNode = answer;
+        }
+        questionCreatedAfterSend = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
         mark('server-generation-ended',{taskId:generation.taskId || null,messageId:generation.messageId || null,stopAcknowledged:generation.stopAcknowledged,stopAttempts:generation.stopAttempts || 0,outputCharacters:generation.outputCharacters});
         if (!roundState.stopped && (stop = findStop())) {
           // The server stream has ended. Clear any remaining frontend busy
@@ -9092,7 +9180,12 @@ class AccountBackend {
       if (String(packet.from) !== String(this.room.hostAccountId)) return;
       const result = packet.payload;
       if (!result || !Number.isInteger(Number(result.round)) || typeof result.input !== "string" || typeof result.output !== "string") return;
-      if (Number(result.round) < (this.room.round?.number || 1)) return;
+      if (Number(result.round) < (this.room.round?.number || 1)) {
+        if (this.room.round?.lastResult?.round === Number(result.round) && this.room.verifiedOutputRound === Number(result.round)) {
+          await this.sendRoomPacket(this.room.hostChatId, makePacket("round-result-ack", this.room.id, this.room.profile.id, ++this.seq, { round: Number(result.round), status: "ready", conversationId: this.conversation.activeId, gameReady: true, completedAt: Date.now() }));
+        }
+        return;
+      }
       this.room.round.status = "syncing";
       this.beginGuestOutputWait(result.round);
       this.mode = "guest-syncing";
@@ -9157,11 +9250,11 @@ class AccountBackend {
       this.room.round.resultAcks[String(member.id)] = acknowledgement;
       this.appendSessionLog("round-flow", { event: "host-received-result-ack", round: roundNumber, acknowledgement });
       if (status === "error") {
-        this.room.round.status = "error";
+        this.room.round.status = "syncing";
         this.room.round.error = `${acknowledgement.displayName} 同步失败：${acknowledgement.message || "访客端未完成记录同步"}`;
         await this.broadcastRoomPacket("turn-state", {
           round: this.room.round.number,
-          status: "error",
+          status: "syncing",
           readyNames: [],
           totalCount: this.room.members.length,
           error: this.room.round.error
@@ -10350,6 +10443,7 @@ handleLocalIpc("backend:remove-room-member", (_event, memberId) => backend.remov
 handleLocalIpc("backend:leave-room", () => backend.leaveRoom());
 handleLocalIpc("backend:send-room-chat", (_event, value) => backend.sendRoomChat(value));
 handleLocalIpc("backend:submit-round", (_event, value) => backend.submitRoundInput(value));
+handleLocalIpc("backend:recover-round", () => backend.recoverHostRound());
 handleLocalIpc("backend:copy-text", (_event, value) => { clipboard.writeText(String(value || "")); return true; });
 handleLocalIpc("credentials:load", () => loadCredentials(backend.profileId));
 handleLocalIpc("credentials:clear", () => { clearCredentials(backend.profileId); return true; });
@@ -10368,7 +10462,7 @@ handleLocalIpc("backend:update-plugin-settings", (_event, pluginId, settings) =>
 handleLocalIpc("backend:refresh-work-settings", () => backend.refreshWorkSettings());
 handleLocalIpc("backend:update-work-settings", (_event, settings) => backend.updateWorkSettings(settings || {}));
 handleLocalIpc("backend:refresh-models", () => backend.refreshPlatformModels());
-handleLocalIpc("backend:cancel-model-requests", () => backend.cancelAutoModels());
+handleLocalIpc("backend:cancel-model-requests", (_event, scope) => backend.cancelAutoModels(scope === "online-world-editor" ? scope : null));
 handleLocalIpc("backend:set-model", (_event, model) => backend.setPlatformModel(model || {}));
 handleLocalIpc("backend:message-operation", (_event, action, value) => backend.runHostMessageOperation(action, value));
 handleLocalIpc("backend:inject-prototype-tool-card", () => backend.injectPrototypeToolCard());

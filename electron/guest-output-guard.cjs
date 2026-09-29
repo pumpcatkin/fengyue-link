@@ -25,7 +25,14 @@ function installGuestOutputGuard(config) {
       if (state.hadResponseMode) window.actualResponseMode = state.previousResponseMode;
       else delete window.actualResponseMode;
       state.startedAt = Date.now();
-      const request = nativeFetch.call(this, resource, options);
+      let useGo = go;
+      const request = nativeFetch.call(this, resource, options).then(async response => {
+        if (go && [404, 405].includes(response.status)) {
+          useGo = false;
+          return nativeFetch.call(window, `/console/api/installed-apps/${encodeURIComponent(state.appId)}/chat-messages`, options);
+        }
+        return response;
+      });
       void request.then(async response => {
         const headers = new Headers(options.headers || {});
         headers.set('Content-Type', 'application/json');
@@ -34,16 +41,15 @@ function installGuestOutputGuard(config) {
           if (token) headers.set('Authorization', 'Bearer ' + token);
         }
         const stop = async () => {
-          const stopUrl = go ? '/go/api/apps/chat-stop'
-            : `/console/api/installed-apps/${state.appId}/chat-messages/${encodeURIComponent(state.taskId)}/stop`;
+          let stopGo = useGo;
           for (let attempt = 1; attempt <= 4; attempt++) {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 4000);
             try {
+              const stopUrl = stopGo ? '/go/api/apps/chat-stop' : `/console/api/installed-apps/${encodeURIComponent(state.appId)}/chat-messages/${encodeURIComponent(state.taskId)}/stop`;
               const result = await nativeFetch.call(window, stopUrl, {
-                method: 'POST', credentials: 'include', headers, signal: controller.signal,
-                ...(go ? { body: JSON.stringify({ task_id: state.taskId }) } : {})
+                method: 'POST', credentials: 'include', headers,
+                ...(stopGo ? { body: JSON.stringify({ task_id: state.taskId }) } : {})
               });
+              if (stopGo && [404, 405].includes(result.status)) { stopGo = false; continue; }
               const payload = await result.json().catch(() => ({}));
               const code = payload.code;
               if (!result.ok || (code != null && code !== '' && code !== 0 && code !== 100000)) throw new Error(payload.msg || payload.message || `HTTP ${result.status}`);
@@ -55,7 +61,7 @@ function installGuestOutputGuard(config) {
               state.stopError = error.message;
               state.stopAttempts = attempt;
               if (attempt < 4) await new Promise(resolve => setTimeout(resolve, attempt * 150));
-            } finally { clearTimeout(timer); }
+            }
           }
         };
         let stopPromise = null;
@@ -112,7 +118,7 @@ function installGuestOutputGuard(config) {
           state.streamError = error.message;
           // An aborted local connection is not proof that the server stopped.
         }
-        if (stopPromise) await stopPromise;
+        if (stopPromise && !state.terminalEvent) await stopPromise;
         state.ready = Boolean(state.streamEnded && !state.error && (state.stopAcknowledged || state.terminalEvent));
         if (!state.ready) state.error ||= state.stopError || state.streamError || '平台没有确认访客生成结束';
         state.finishedAt = Date.now();

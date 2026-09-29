@@ -11,16 +11,19 @@
 <div class="controls"><button id="advance" disabled>稳步探索</button><button id="risk" disabled>冒险前进</button><button id="restart" disabled>重新开始</button><button id="sync">刷新</button><button id="library">游戏库</button></div><p id="storage">读取本地存档…</p>
 </main><script>
 const SOURCE="fyow-grid-conquest",PROTOCOL="fyow-host/1";
-const fresh=()=>({version:1,step:0,hp:4});let game=fresh(),loaded=false,timer=null,pending=null,pendingTimer=null;
+const fresh=()=>({version:1,step:0,hp:4});let game=fresh(),loaded=false,timer=null,pending=null,revision=0,savedRevision=0,pendingRevision=0,lastSentAt=0,leaving=false,closeRequestId=null;
 const $=id=>document.getElementById(id);
 function send(type,data={}){parent.postMessage({source:SOURCE,protocol:PROTOCOL,type,...data},"*")}
 function render(){const ended=game.hp<=0||game.step>=3;$("status").textContent=game.hp<=0?"探索失败":game.step>=3?"探索胜利":"探索中";$("progress").textContent=`进度 ${game.step} / 3`;$("health").textContent=`体力 ${game.hp}`;document.querySelectorAll(".room").forEach((el,i)=>el.classList.toggle("active",i===game.step));$("advance").disabled=$("risk").disabled=!loaded||ended;$("restart").disabled=!loaded}
-function save(){clearTimeout(timer);timer=setTimeout(()=>{if(pending){save();return}pending=crypto.randomUUID();$("storage").textContent="保存中…";send("game-save",{requestId:pending,data:game});pendingTimer=setTimeout(()=>{pending=null;$("storage").textContent="保存超时，点击刷新重试"},5000)},180)}
+function completeExit(){if(closeRequestId){send("close-ready",{requestId:closeRequestId});closeRequestId=null}else if(leaving)send("library")}
+function flush(){clearTimeout(timer);if(pending)return;if(savedRevision===revision){if(leaving||closeRequestId)completeExit();return}const wait=100-(Date.now()-lastSentAt);if(wait>0){timer=setTimeout(flush,wait);return}pending=crypto.randomUUID();pendingRevision=revision;lastSentAt=Date.now();$("storage").textContent="保存中…";send("game-save",{requestId:pending,data:game})}
+function save(){revision++;clearTimeout(timer);timer=setTimeout(flush,180)}
 function act(risk){if(!loaded||game.hp<=0||game.step>=3)return;game.step++;game.hp=Math.max(0,game.hp-(risk?4:1));$("log").textContent=risk?"踩中了陷阱。重新开始可以再次探索。":"找到通向下一间遗迹的石阶。";render();save()}
 $("advance").onclick=()=>act(false);$("risk").onclick=()=>act(true);$("restart").onclick=()=>{game=fresh();$("log").textContent="选择行动开始探索。";render();save()};
-$("library").onclick=()=>send("library");$("sync").onclick=()=>{if(loaded)save();send("sync",{requestId:crypto.randomUUID()})};
+$("library").onclick=()=>{leaving=true;flush()};$("sync").onclick=()=>{if(loaded)flush();send("sync",{requestId:crypto.randomUUID()})};
 addEventListener("message",e=>{if(e.source!==parent||e.data?.source!=="fengyue-host"||e.data.protocol!==PROTOCOL)return;
 if(e.data.type==="state"&&!loaded){const value=e.data.state?.gameSave;if(value?.version===1&&Number.isInteger(value.step)&&value.step>=0&&value.step<=3&&Number.isInteger(value.hp)&&value.hp>=0&&value.hp<=4)game=value;loaded=true;$("storage").textContent=value?"已恢复本地进度":"本地存档就绪";render()}
-if(e.data.requestId===pending&&["result","error"].includes(e.data.type)){clearTimeout(pendingTimer);pending=null;$("storage").textContent=e.data.type==="result"?"进度已保存":`保存失败：${e.data.message||"请重试"}`}});
-send("ready");
+if(e.data.type==="prepare-close"){closeRequestId=e.data.requestId;flush()}
+if(e.data.requestId===pending&&["result","error"].includes(e.data.type)){pending=null;if(e.data.type==="result"){savedRevision=pendingRevision;$("storage").textContent="进度已保存";flush()}else{$("storage").textContent=`保存失败：${e.data.message||"请重试"}`;leaving=false;if(closeRequestId){send("close-ready",{requestId:closeRequestId,error:e.data.message||"保存失败"});closeRequestId=null}}}});
+send("ready",{capabilities:["flush-save/1"]});
 </script></body></html>

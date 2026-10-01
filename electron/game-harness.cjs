@@ -63,6 +63,134 @@ function parseDecision(answer) {
     || !value.args || typeof value.args !== "object" || Array.isArray(value.args)) throw new Error("Harness 响应缺少合法 tool/args");
   return value;
 }
+const PUBLIC_HARNESS_PRIVATE_KEYS = new Set(["analysis", "chainofthought", "internalreasoning", "privatereasoning", "reasoning", "thought", "thinking"]);
+const PUBLIC_HARNESS_SOURCE_KEYS = new Set(["after", "before", "code", "content", "html", "newtext", "oldtext", "raw", "source"]);
+const PUBLIC_HARNESS_TEXT_LIMIT = 24_000;
+const PUBLIC_HARNESS_NODE_LIMIT = 512;
+const publicHarnessKey = key => String(key || "").replace(/[-_\s]/g, "").toLowerCase();
+const isPrivateHarnessKey = key => PUBLIC_HARNESS_PRIVATE_KEYS.has(publicHarnessKey(key));
+function publicHarnessSerializedAnswer(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return JSON.stringify(publicHarnessValue(parsed, "", 0, {}, { remaining: PUBLIC_HARNESS_TEXT_LIMIT, nodes: PUBLIC_HARNESS_NODE_LIMIT }));
+  } catch { return value; }
+}
+function publicHarnessValue(value, key = "", depth = 0, options = {}, budget = { remaining: PUBLIC_HARNESS_TEXT_LIMIT, nodes: PUBLIC_HARNESS_NODE_LIMIT }) {
+  if (isPrivateHarnessKey(key)) return undefined;
+  if (!Number.isFinite(budget.nodes)) budget.nodes = PUBLIC_HARNESS_NODE_LIMIT;
+  if (budget.nodes-- <= 0) return { omitted: true, reason: "nodes" };
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const text = publicHarnessKey(key) === "answer" ? publicHarnessSerializedAnswer(value) : value;
+    if (options.summarizeSource && PUBLIC_HARNESS_SOURCE_KEYS.has(publicHarnessKey(key))) return { omitted: true, characters: text.length };
+    const shown = text.slice(0, Math.max(0, budget.remaining));
+    budget.remaining -= shown.length;
+    return shown.length === text.length ? shown : { preview: shown, characters: text.length, truncated: true };
+  }
+  if (depth >= 8) return { omitted: true, reason: "depth" };
+  if (Array.isArray(value)) {
+    const result = [];
+    for (let index = 0; index < value.length; index++) {
+      if (budget.nodes <= 0 || budget.remaining <= 0) { result.push({ omitted: true, reason: "budget", items: value.length - index }); break; }
+      result.push(publicHarnessValue(value[index], "", depth + 1, options, budget));
+    }
+    return result;
+  }
+  if (typeof value !== "object") return publicHarnessValue(String(value), key, depth, options, budget);
+  if (publicHarnessKey(key) === "files") {
+    const entries = Object.entries(value), result = entries.slice(0, PUBLIC_HARNESS_NODE_LIMIT).map(([path, content]) => ({ path, characters: typeof content === "string" ? content.length : null }));
+    if (entries.length > result.length) result.push({ omitted: true, reason: "nodes", items: entries.length - result.length });
+    return result;
+  }
+  const result = {};
+  for (const [childKey, child] of Object.entries(value)) {
+    if (budget.nodes <= 0 || budget.remaining <= 0 || childKey.length + 4 > budget.remaining) {
+      result.__truncated = { omitted: true, reason: "budget" };
+      break;
+    }
+    budget.remaining -= childKey.length + 4;
+    const publicChild = publicHarnessValue(child, childKey, depth + 1, options, budget);
+    if (publicChild !== undefined) result[childKey] = publicChild;
+  }
+  return result;
+}
+function publicHarnessBusinessSerializedAnswer(value) {
+  try { return JSON.stringify(publicHarnessBusinessValue(JSON.parse(value))); }
+  catch { return value; }
+}
+function publicHarnessBusinessValue(value, key = "", depth = 0) {
+  if (isPrivateHarnessKey(key)) return undefined;
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return publicHarnessKey(key) === "answer" ? publicHarnessBusinessSerializedAnswer(value) : value;
+  if (depth >= 32) return { omitted: true, reason: "depth" };
+  if (Array.isArray(value)) return value.map(item => publicHarnessBusinessValue(item, "", depth + 1));
+  if (typeof value !== "object") return String(value);
+  const entries = [];
+  for (const [childKey, child] of Object.entries(value)) {
+    const publicChild = publicHarnessBusinessValue(child, childKey, depth + 1);
+    if (publicChild !== undefined) entries.push([childKey, publicChild]);
+  }
+  return Object.fromEntries(entries);
+}
+function publicHarnessConsultResponse(value) {
+  return {
+    summary: publicHarnessBusinessValue(value.summary, "summary"),
+    issues: publicHarnessBusinessValue(value.issues, "issues"),
+    suggestions: publicHarnessBusinessValue(value.suggestions, "suggestions")
+  };
+}
+function publicHarnessReviewResponse(value) {
+  const result = {
+    approved: value.approved,
+    issues: publicHarnessBusinessValue(value.issues, "issues")
+  };
+  if (Object.hasOwn(value, "summary")) result.summary = publicHarnessBusinessValue(value.summary, "summary");
+  return result;
+}
+function appendPublicHarnessEventField(target, key, value) {
+  if (JSON.stringify({ ...target, [key]: value }).length <= PUBLIC_HARNESS_TEXT_LIMIT - 256) { target[key] = value; return true; }
+  let text;
+  try { text = typeof value === "string" ? value : JSON.stringify(value); } catch { text = String(value); }
+  const descriptor = { preview: "", characters: text.length, truncated: true };
+  let low = 0, high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    descriptor.preview = text.slice(0, middle);
+    if (JSON.stringify({ ...target, [key]: descriptor }).length <= PUBLIC_HARNESS_TEXT_LIMIT - 256) low = middle;
+    else high = middle - 1;
+  }
+  descriptor.preview = text.slice(0, low);
+  if (JSON.stringify({ ...target, [key]: descriptor }).length > PUBLIC_HARNESS_TEXT_LIMIT - 256) return false;
+  target[key] = descriptor;
+  return true;
+}
+function limitPublicHarnessEvent(event) {
+  const result = {}, keys = Object.keys(event);
+  let omittedFields = 0;
+  for (const key of keys) if (!appendPublicHarnessEventField(result, key, event[key])) omittedFields++;
+  if (omittedFields) result.eventTruncated = { omitted: true, fields: omittedFields };
+  return result;
+}
+function publicHarnessEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  const budget = { remaining: PUBLIC_HARNESS_TEXT_LIMIT - 2_000, nodes: PUBLIC_HARNESS_NODE_LIMIT }, result = {};
+  for (const [key, value] of Object.entries(event)) {
+    const publicValue = publicHarnessValue(value, key, 1,
+      { summarizeSource: key === "args" && ["write_file", "patch_file"].includes(event.tool) }, budget);
+    if (publicValue !== undefined) result[key] = publicValue;
+  }
+  return limitPublicHarnessEvent(result);
+}
+function publicHarnessActionArgs(tool, args = {}) {
+  if (tool === "write_file") return { path: args.path, content: { omitted: true, characters: typeof args.content === "string" ? args.content.length : 0 } };
+  if (tool === "patch_file") return {
+    path: args.path,
+    expectedSha256: args.expectedSha256,
+    oldText: { omitted: true, characters: typeof args.oldText === "string" ? args.oldText.length : 0 },
+    newText: { omitted: true, characters: typeof args.newText === "string" ? args.newText.length : 0 }
+  };
+  return publicHarnessValue(args);
+}
 function validateFile(path, content) {
   if (!FILES.includes(path) || typeof content !== "string") throw new Error("仅允许编辑项目虚拟文件");
   if (Buffer.byteLength(content) > (path === "program.html" ? 512000 : 90000)) throw new Error("单个项目文件超过大小预算");
@@ -117,9 +245,14 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
     if (count >= 3) throw Object.assign(new Error("同一版本连续出现相同失败，开发已暂停；候选与证据保留，请调整目标或修复能力缺口"), { code: "HARNESS_STALLED", retryable: false });
   };
   let evidence = null, review = null, authorModel = null, writerModel = null;
-  const events = [], models = new Set(), failures = [...FAILURES, ...(project.harness?.failures || []).slice(-8)];
-  const coordinator = clone(project.harness?.coordinator || { primaryModel: null, notes: "", feedback: [] });
-  coordinator.feedback ||= [];
+  const events = (Array.isArray(project.harness?.events) ? project.harness.events : []).map(publicHarnessEvent).filter(Boolean).slice(-180);
+  const models = new Set(), failures = [...FAILURES, ...(project.harness?.failures || []).slice(-8)];
+  const savedCoordinator = publicHarnessValue(clone(project.harness?.coordinator || { primaryModel: null, notes: "", feedback: [] }), "coordinator");
+  const coordinator = savedCoordinator && typeof savedCoordinator === "object" && !Array.isArray(savedCoordinator)
+    ? savedCoordinator : { primaryModel: null, notes: "", feedback: [] };
+  if (coordinator.primaryModel != null && typeof coordinator.primaryModel !== "string") coordinator.primaryModel = null;
+  if (typeof coordinator.notes !== "string") coordinator.notes = String(coordinator.notes?.preview || "");
+  coordinator.feedback = Array.isArray(coordinator.feedback) ? coordinator.feedback.slice(-8) : [];
   const startedAt = Date.now();
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -127,14 +260,15 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
   const timer = timeoutMs == null ? null : setTimeout(cancel, timeoutMs);
   const active = () => { assertActive(signal); assertActive(controller.signal); };
   const save = async event => {
-    events.push({ at: Date.now(), ...event });
+    events.push(publicHarnessEvent({ at: Date.now(), ...event }));
     if (events.length > 180) events.splice(0, events.length - 180);
-    await checkpoint({ status: "running", events: clone(events), files: clone(files), programAuthors: [...programAuthors], failures: failures.slice(-16), models: [...models], evidence, review, coordinator: clone(coordinator), budget: getBudget(), startedAt });
+    await checkpoint({ status: "running", events: clone(events), files: clone(files), programAuthors: [...programAuthors], failures: failures.slice(-16), models: [...models], evidence, review,
+      coordinator: publicHarnessValue(coordinator, "coordinator"), budget: getBudget(), startedAt });
   };
   try {
     for (let turn = 1; maxTurns == null || turn <= maxTurns; turn++) {
       active();
-      await save({ turn, tool: "model", summary: "模型正在检查目标与执行证据" });
+      await save({ turn, kind: "status", stage: "running", tool: "model", summary: "模型正在检查目标与执行证据" });
       const compactEvidence = value => value && ({ ...value, scenarios: value.scenarios?.map(s => ({ name: s.name, restored: s.restored, layouts: s.layouts, storageWrites: s.storageWrites, steps: s.steps?.map(({ text, before, ...step }) => step) })) });
       const query = `${HARNESS_INSTRUCTIONS}\n${JSON.stringify({ goal, turn, remainingTurns: maxTurns == null ? null : maxTurns - turn, budget: getBudget(), coordinator,
         failures, files: Object.entries(files).map(([path, content]) => ({ path, characters: content.length })),
@@ -144,10 +278,11 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
       const decision = response.parsed || parseDecision(response.answer);
       authorModel = response.modelKey;
       if (!authorModel) throw new Error("模型路由没有返回实际模型标识");
-      if (coordinator.primaryModel && coordinator.primaryModel !== authorModel) await save({ turn, tool: "handoff", summary: `主模型 ${coordinator.primaryModel} 本次未成功响应，${authorModel} 接续同一计划与反馈；后续仍优先原主模型` });
+      if (coordinator.primaryModel && coordinator.primaryModel !== authorModel) await save({ turn, kind: "status", stage: "handoff", tool: "handoff", summary: `主模型 ${coordinator.primaryModel} 本次未成功响应，${authorModel} 接续同一计划与反馈；后续仍优先原主模型` });
       coordinator.primaryModel ||= authorModel;
       models.add(authorModel);
-      await save({ turn, tool: decision.tool, model: response.modelLabel || authorModel, summary: String(decision.summary || "").slice(0, 1000) });
+      await save({ turn, kind: "assistant-action", stage: "selected", tool: decision.tool, model: response.modelLabel || authorModel,
+        summary: String(decision.summary || ""), args: publicHarnessActionArgs(decision.tool, decision.args) });
       try {
         const a = decision.args;
         let result;
@@ -172,8 +307,9 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
               parse: answer => { const v = JSON.parse(String(answer).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); if (typeof v.summary !== "string" || !Array.isArray(v.issues) || !Array.isArray(v.suggestions)) throw new Error("技术顾问响应格式无效"); return v; } });
             if (!res.modelKey || res.modelKey === authorModel) throw new Error("技术顾问必须是另一模型");
             models.add(res.modelKey);
-            result = { ...res.parsed, model: res.modelKey, fingerprint: fingerprint(files) };
-            coordinator.feedback.push({ kind: "consult", question: String(a.question).slice(0, 2000), model: res.modelKey, fingerprint: result.fingerprint, answer: JSON.stringify(res.parsed).slice(0, 6000) });
+            const publicResponse = publicHarnessConsultResponse(res.parsed);
+            result = { ...publicResponse, model: res.modelKey, fingerprint: fingerprint(files) };
+            coordinator.feedback.push({ kind: "consult", question: String(a.question).slice(0, 2000), model: res.modelKey, fingerprint: result.fingerprint, answer: JSON.stringify(publicResponse) });
             coordinator.feedback = coordinator.feedback.slice(-8);
             break;
           }
@@ -216,8 +352,9 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
               parse: answer => { const v = JSON.parse(String(answer).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); if (typeof v.approved !== "boolean" || !Array.isArray(v.issues)) throw new Error("评审格式无效"); return v; } });
             if (!res.modelKey || excluded.has(res.modelKey)) throw new Error("独立评审必须避开程序贡献者和当前编辑模型");
             models.add(res.modelKey);
-            review = { ...res.parsed, model: res.modelKey, fingerprint: fingerprint(files) };
-            coordinator.feedback.push({ kind: "review", model: res.modelKey, fingerprint: review.fingerprint, answer: JSON.stringify(res.parsed).slice(0, 6000) });
+            const publicResponse = publicHarnessReviewResponse(res.parsed);
+            review = { ...publicResponse, model: res.modelKey, fingerprint: fingerprint(files) };
+            coordinator.feedback.push({ kind: "review", model: res.modelKey, fingerprint: review.fingerprint, answer: JSON.stringify(publicResponse) });
             coordinator.feedback = coordinator.feedback.slice(-8);
             if (!review.approved) { failures.push(`独立评审：${JSON.stringify(review.issues).slice(0, 3000)}`); trackFailure(JSON.stringify(review.issues)); }
             result = review;
@@ -232,22 +369,26 @@ async function runGameHarness({ project, goal, request, testGame, checkpoint = a
             next.program = { ...next.program, html: files["program.html"] };
             next.card.title = config.app?.name || next.card.title;
             next.harness ||= {};
-            next.harness = { schema: "fyow.harness/2", status: "completed", goal, programAuthors: [...programAuthors], tests: JSON.parse(files["tests.json"]), evidence, review, coordinator, budget: getBudget(), failures: failures.slice(-16), models: [...models], events, finishedAt: Date.now() };
+            await save({ turn, kind: "tool-result", stage: "completed", tool: "finish", result: { completed: true, fingerprint: hash } });
+            next.harness = { schema: "fyow.harness/2", status: "completed", goal, programAuthors: [...programAuthors], tests: JSON.parse(files["tests.json"]), evidence, review,
+              coordinator: publicHarnessValue(coordinator, "coordinator"), budget: getBudget(), failures: failures.slice(-16), models: [...models], events, finishedAt: Date.now() };
             return next;
           }
         }
         active();
-        await save({ turn, tool: decision.tool, model: result?.model, result });
+        await save({ turn, kind: decision.tool === "review" ? "review" : "tool-result",
+          stage: result?.passed === false ? "failed" : result?.approved === false ? "changes-requested" : "completed",
+          tool: decision.tool, model: result?.model, result });
       } catch (error) {
         active();
         if (error?.retryable === false || /^HARNESS_(BUDGET|BILLING)/.test(error?.code || "")) throw error;
         trackFailure(error?.message || String(error));
         if (failures.length > FAILURES.length + 8) failures.splice(FAILURES.length, failures.length - FAILURES.length - 8);
-        await save({ turn, tool: decision.tool, error: String(error?.message || error || "未知工具错误").slice(0, 2000) });
+        await save({ turn, kind: "error", stage: "failed", tool: decision.tool, error: String(error?.message || error || "未知工具错误") });
       }
     }
     throw new Error("本轮开发预算已用完；候选代码和失败证据已保存，原游戏保持不变");
   } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancel); }
 }
 
-module.exports = { HARNESS_INSTRUCTIONS, FAILURES, projectFiles, fingerprint, parseDecision, validateTests, validateFile, runGameHarness };
+module.exports = { HARNESS_INSTRUCTIONS, FAILURES, projectFiles, fingerprint, parseDecision, publicHarnessActionArgs, publicHarnessEvent, publicHarnessValue, validateTests, validateFile, runGameHarness };

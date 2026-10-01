@@ -696,6 +696,7 @@ function showPage(page){
   onlineWorldPage.classList.toggle("hidden",page!=="online-world");
   onlineWorldEditorPage.classList.toggle("hidden",page!=="online-editor");
   multiplayerPage.classList.toggle("hidden",page!=="multiplayer");
+  if(page==="online-editor")renderOnlineWorldEditorProgress(state?.onlineWorldEditor);
   if(page==="multiplayer")syncSurfaceBounds();
 }
 
@@ -1053,6 +1054,7 @@ function renderOnlineWorldEditorProjects(){
 }
 
 function renderOnlineWorldEditorProject(){
+  resetOnlineEditorTimelineRenderCache();
   const project=onlineWorldEditorProject;
   const empty=document.querySelector("#online-editor-empty");
   const workspace=document.querySelector("#online-editor-workspace");
@@ -1097,13 +1099,219 @@ function renderOnlineWorldEditorProject(){
   onlineWorldEditorDirty=false;
 }
 
+const ONLINE_EDITOR_TIMELINE_TOOL_LABELS=Object.freeze({
+  model:"模型响应",handoff:"模型接续",read_file:"读取文件",write_file:"写入文件",patch_file:"修改文件",
+  search_file:"检索文件",search_docs:"检索资料",read_doc:"读取资料",update_plan:"更新计划",consult:"技术顾问",
+  test_game:"浏览器验收",review:"独立评审",finish:"完成开发"
+});
+const ONLINE_EDITOR_TIMELINE_KIND_LABELS=Object.freeze({status:"状态","assistant-action":"模型行动","tool-result":"工具结果",error:"错误",review:"评审结果"});
+const ONLINE_EDITOR_TIMELINE_PRIVATE_KEYS=new Set(["analysis","chainofthought","internalreasoning","privatereasoning","reasoning","thought","thinking"]);
+const ONLINE_EDITOR_TIMELINE_SOURCE_KEYS=new Set(["after","before","code","content","html","newtext","oldtext","raw","source"]);
+const ONLINE_EDITOR_TIMELINE_TEXT_LIMIT=24000;
+const ONLINE_EDITOR_TIMELINE_NODE_LIMIT=512;
+let onlineEditorTimelineRenderCache={libraryId:null,events:null,emptyState:null,signature:null};
+const onlineEditorTimelineKey=key=>String(key||"").replace(/[-_\s]/g,"").toLowerCase();
+const isOnlineEditorTimelinePrivateKey=key=>ONLINE_EDITOR_TIMELINE_PRIVATE_KEYS.has(onlineEditorTimelineKey(key));
+
+function compactOnlineEditorSerializedAnswer(value){
+  try{return JSON.stringify(compactOnlineEditorTimelineValue(JSON.parse(value),"",0,{}, {remaining:ONLINE_EDITOR_TIMELINE_TEXT_LIMIT}))}
+  catch{return value}
+}
+
+function compactOnlineEditorTimelineValue(value,key="",depth=0,options={},budget={remaining:ONLINE_EDITOR_TIMELINE_TEXT_LIMIT,nodes:ONLINE_EDITOR_TIMELINE_NODE_LIMIT}){
+  if(isOnlineEditorTimelinePrivateKey(key))return undefined;
+  if(!Number.isFinite(budget.nodes))budget.nodes=ONLINE_EDITOR_TIMELINE_NODE_LIMIT;
+  if(budget.nodes--<=0)return{omitted:true,reason:"nodes"};
+  if(value==null||typeof value==="number"||typeof value==="boolean")return value;
+  if(typeof value==="string"){
+    const text=onlineEditorTimelineKey(key)==="answer"?compactOnlineEditorSerializedAnswer(value):value;
+    if(options.summarizeSource&&ONLINE_EDITOR_TIMELINE_SOURCE_KEYS.has(onlineEditorTimelineKey(key)))return{omitted:true,characters:text.length};
+    const shown=text.slice(0,Math.max(0,budget.remaining));budget.remaining-=shown.length;
+    return shown.length===text.length?shown:{preview:shown,characters:text.length,truncated:true};
+  }
+  if(depth>=8)return{omitted:true,reason:"depth"};
+  if(Array.isArray(value)){
+    const result=[];
+    for(let index=0;index<value.length;index++){
+      if(budget.nodes<=0||budget.remaining<=0){result.push({omitted:true,reason:"budget",items:value.length-index});break}
+      result.push(compactOnlineEditorTimelineValue(value[index],"",depth+1,options,budget));
+    }
+    return result;
+  }
+  if(typeof value!=="object")return compactOnlineEditorTimelineValue(String(value),key,depth,options,budget);
+  if(onlineEditorTimelineKey(key)==="files"){
+    const entries=Object.entries(value),result=entries.slice(0,ONLINE_EDITOR_TIMELINE_NODE_LIMIT).map(([path,content])=>({path,characters:typeof content==="string"?content.length:null}));
+    if(entries.length>result.length)result.push({omitted:true,reason:"nodes",items:entries.length-result.length});
+    return result;
+  }
+  const result={};
+  for(const [childKey,child] of Object.entries(value)){
+    if(budget.nodes<=0||budget.remaining<=0||childKey.length+4>budget.remaining){result.__truncated={omitted:true,reason:"budget"};break}
+    budget.remaining-=childKey.length+4;
+    const compact=compactOnlineEditorTimelineValue(child,childKey,depth+1,options,budget);
+    if(compact!==undefined)result[childKey]=compact;
+  }
+  return result;
+}
+
+function onlineEditorTimelineText(value,fallback="",limit=ONLINE_EDITOR_TIMELINE_TEXT_LIMIT){
+  const boundedLimit=Math.max(0,Math.min(ONLINE_EDITOR_TIMELINE_TEXT_LIMIT,Number(limit)||0));
+  if(!boundedLimit)return"";
+  if(value==null)return fallback;
+  let text,total;
+  if(typeof value==="string"){text=value;total=value.length}
+  else if(value&&typeof value==="object"&&value.truncated===true&&typeof value.preview==="string"){
+    text=value.preview;total=Number.isFinite(Number(value.characters))?Number(value.characters):value.preview.length;
+  }else{
+    try{text=JSON.stringify(compactOnlineEditorTimelineValue(value));total=text.length}
+    catch{return fallback}
+  }
+  if(text.length<=boundedLimit&&total<=text.length)return text;
+  const marker=`\n…（记录已截断，共 ${Number(total).toLocaleString()} 字符）`;
+  if(marker.length>=boundedLimit)return marker.slice(0,boundedLimit);
+  return`${text.slice(0,Math.max(0,boundedLimit-marker.length))}${marker}`;
+}
+
+function onlineEditorTimelineEvents(job,saved,libraryId){
+  const savedEvents=Array.isArray(saved?.events)?saved.events:[];
+  const matchingJob=job?.libraryId===libraryId;
+  const liveEvents=matchingJob&&Array.isArray(job.events)?job.events:[];
+  const events=matchingJob&&(job.status==="running"||liveEvents.length)?liveEvents:savedEvents;
+  const filtered=events.filter(event=>event&&typeof event==="object"&&!Array.isArray(event));
+  return filtered.length===events.length?events:filtered;
+}
+
+function resetOnlineEditorTimelineRenderCache(){
+  onlineEditorTimelineRenderCache={libraryId:null,events:null,emptyState:null,signature:null};
+}
+
+function onlineEditorTimelineTextStamp(value){
+  if(typeof value!=="string")return value==null?null:typeof value;
+  return[value.length,value.slice(0,80),value.slice(-80)];
+}
+
+function onlineEditorTimelineProjection(events,source){
+  const event=events.at(-1);
+  if(!event)return`${source}:0`;
+  let length=null;
+  try{length=JSON.stringify(event).length}catch{}
+  return JSON.stringify([
+    source,events.length,event.at??null,event.turn??null,event.kind??null,event.stage??null,event.tool??null,event.model??null,length,
+    onlineEditorTimelineTextStamp(event.summary),onlineEditorTimelineTextStamp(event.error),
+    event.result?.passed??null,event.result?.approved??null,event.result?.characters??null,event.result?.fingerprint??null
+  ]);
+}
+
+function onlineEditorTimelineSource(job,saved,libraryId){
+  const live=job?.libraryId===libraryId&&(job.status==="running"||(Array.isArray(job.events)&&job.events.length));
+  if(live)return`job:${job.id||job.startedAt||"active"}`;
+  return`saved:${onlineWorldEditorProject?.revision??""}:${saved?.baseFingerprint||""}:${saved?.startedAt||""}:${saved?.finishedAt||""}`;
+}
+
+function onlineEditorTimelineEventKey(event,occurrences){
+  const base=JSON.stringify([event.at??null,event.turn??null,event.kind??null,event.stage??null,event.tool??null,event.model??null]);
+  const occurrence=(occurrences.get(base)||0)+1;occurrences.set(base,occurrence);
+  return`${base}:${occurrence}`;
+}
+
+function onlineEditorTimelineVisible(){
+  if(typeof activePage!=="undefined"&&activePage!=="online-editor")return false;
+  const workspace=document.querySelector("#online-editor-workspace");
+  return !workspace?.classList?.contains("hidden");
+}
+
+function onlineEditorTimelineResultSummary(tool,result){
+  if(!result||typeof result!=="object")return"工具执行完成";
+  const suppliedSummary=onlineEditorTimelineText(result.summary);
+  if(suppliedSummary.trim())return suppliedSummary;
+  if(tool==="read_file")return`已读取 ${result.path||"项目文件"}${Number.isFinite(Number(result.total))?` · ${Number(result.total).toLocaleString()} 字符`:""}`;
+  if(tool==="search_file")return`已检索 ${result.path||"项目文件"}${Number.isFinite(Number(result.offset))&&Number(result.offset)<0?" · 未找到匹配":""}`;
+  if(tool==="write_file"||tool==="patch_file")return`已${tool==="write_file"?"写入":"修改"} ${result.written||result.path||"项目文件"}${Number.isFinite(Number(result.characters))?` · ${Number(result.characters).toLocaleString()} 字符`:""}`;
+  if(tool==="search_docs")return`找到 ${Array.isArray(result)?result.length:Object.keys(result).length} 条资料`;
+  if(tool==="read_doc")return`已读取 ${result.id||result.title||"资料"}`;
+  if(tool==="update_plan"&&typeof result.notes==="string")return result.notes;
+  if(tool==="consult")return"技术顾问已返回建议";
+  if(tool==="test_game")return result.passed?"浏览器验收通过":`浏览器验收未通过${Array.isArray(result.errors)&&result.errors.length?`：${result.errors.join("；")}`:""}`;
+  if(tool==="review")return result.approved?"独立评审通过":`独立评审要求继续修改${Array.isArray(result.issues)&&result.issues.length?`：${result.issues.join("；")}`:""}`;
+  return"工具执行完成";
+}
+
+function onlineEditorTimelineView(event={}){
+  if(!event||typeof event!=="object"||Array.isArray(event))event={};
+  const tool=String(event.tool||"model");
+  const kind=event.kind||((event.error!=null)?"error":event.result!==undefined?(tool==="review"?"review":"tool-result"):["model","handoff"].includes(tool)?"status":"assistant-action");
+  const result=event.result;
+  const error=onlineEditorTimelineText(event.error);
+  const publicSummary=onlineEditorTimelineText(event.summary);
+  const evidence={},budget={remaining:ONLINE_EDITOR_TIMELINE_TEXT_LIMIT};
+  if(event.args!==undefined)evidence.args=compactOnlineEditorTimelineValue(event.args,"args",0,{summarizeSource:["write_file","patch_file"].includes(tool)},budget);
+  if(result!==undefined)evidence.result=compactOnlineEditorTimelineValue(result,"result",0,{},budget);
+  const summary=error||publicSummary||(kind==="assistant-action"?"已选择工具，等待执行":onlineEditorTimelineText(onlineEditorTimelineResultSummary(tool,evidence.result),"工具执行完成"));
+  const failed=Boolean(error)||event.stage==="failed"||(tool==="test_game"&&result?.passed===false)||(tool==="review"&&result?.approved===false);
+  const succeeded=(tool==="test_game"&&result?.passed===true)||(tool==="review"&&result?.approved===true)||(tool==="finish"&&kind==="tool-result");
+  const timestamp=Number(event.at);
+  const parsedDate=Number.isFinite(timestamp)&&timestamp>0?new Date(timestamp):null;
+  const at=parsedDate&&!Number.isNaN(parsedDate.getTime())?timestamp:null;
+  const detailSource=Object.keys(evidence).length?JSON.stringify(evidence,null,2):"";
+  const detail=detailSource?onlineEditorTimelineText(detailSource,"",Math.max(0,ONLINE_EDITOR_TIMELINE_TEXT_LIMIT-summary.length)):"";
+  return{
+    tool,kind,kindLabel:ONLINE_EDITOR_TIMELINE_KIND_LABELS[kind]||kind,label:ONLINE_EDITOR_TIMELINE_TOOL_LABELS[tool]||tool.replaceAll("_"," "),turn:Number(event.turn)||null,
+    model:event.model==null?"":onlineEditorTimelineText(event.model),at,summary,
+    tone:failed?"error":succeeded?"success":tool==="model"?"pending":"neutral",
+    detail
+  };
+}
+
+function renderOnlineWorldEditorTimeline(job){
+  const mount=document.querySelector("#online-editor-agent-result");
+  if(!mount||!onlineEditorTimelineVisible())return;
+  const saved=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
+  const events=onlineEditorTimelineEvents(job,saved,selectedOnlineWorldEditorId);
+  const emptyState=!events.length&&job?.status==="running"&&job.libraryId===selectedOnlineWorldEditorId?"running":"idle";
+  if(onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.events===events&&onlineEditorTimelineRenderCache.emptyState===emptyState)return;
+  const projection=onlineEditorTimelineProjection(events,onlineEditorTimelineSource(job,saved,selectedOnlineWorldEditorId));
+  const signature=projection==null?null:`${emptyState}:${projection}`;
+  if(signature!=null&&onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.signature===signature){
+    onlineEditorTimelineRenderCache.events=events;onlineEditorTimelineRenderCache.emptyState=emptyState;return;
+  }
+  onlineEditorTimelineRenderCache={libraryId:selectedOnlineWorldEditorId,events,emptyState,signature};
+  const follow=mount.scrollHeight-mount.scrollTop-mount.clientHeight<32;
+  if(!events.length){
+    const empty=document.createElement("span");empty.className="online-editor-timeline-empty";
+    empty.textContent=job?.status==="running"&&job.libraryId===selectedOnlineWorldEditorId?"正在准备开发环境…":"发送编辑目标后，这里会实时显示模型决策、工具执行、测试和评审结果。";
+    mount.replaceChildren(empty);return;
+  }
+  const openKeys=new Set(Array.from(mount.querySelectorAll?.("details[data-online-editor-event-key]")||[])
+    .filter(details=>details.open).map(details=>details.dataset.onlineEditorEventKey));
+  const occurrences=new Map();
+  const fragment=document.createDocumentFragment();
+  for(const event of events){
+    const view=onlineEditorTimelineView(event);
+    const eventKey=onlineEditorTimelineEventKey(event,occurrences);
+    const row=document.createElement("article");row.className=`online-editor-timeline-entry tone-${view.tone}`;
+    const header=document.createElement("header");
+    const title=document.createElement("strong");title.textContent=`${view.turn?`第 ${view.turn} 轮 · `:""}${view.kindLabel} · ${view.label}${view.model?` · ${view.model}`:""}`;
+    header.append(title);
+    if(view.at){const time=document.createElement("time");time.dateTime=new Date(view.at).toISOString();time.textContent=formatRoomChatTime(view.at);header.append(time)}
+    const summary=document.createElement("p");summary.textContent=view.summary;
+    row.append(header,summary);
+    if(view.detail){
+      const details=document.createElement("details");const label=document.createElement("summary");label.textContent="查看执行证据";
+      details.dataset.onlineEditorEventKey=eventKey;details.open=openKeys.has(eventKey);
+      const pre=document.createElement("pre");pre.textContent=view.detail;details.append(label,pre);row.append(details);
+    }
+    fragment.append(row);
+  }
+  mount.replaceChildren(fragment);
+  if(follow)mount.scrollTop=mount.scrollHeight;
+}
+
 function renderOnlineWorldEditorAgents(){
-  const draft=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
-  document.querySelector("#online-editor-agent-result").textContent=draft?JSON.stringify(draft,null,2):"";
   renderOnlineWorldEditorProgress(state?.onlineWorldEditor);
 }
 
 function renderOnlineWorldEditorProgress(job){
+  renderOnlineWorldEditorTimeline(job);
   const mount=document.querySelector("#online-editor-agent-progress");
   const busy=job?.status==="running";
   if(!busy&&(!job||job.libraryId!==selectedOnlineWorldEditorId)){
@@ -1123,12 +1331,7 @@ function renderOnlineWorldEditorProgress(job){
   const status=job.status==="running"?"运行中":job.status==="completed"?"已完成":job.status==="cancelled"?"已取消":job.status==="paused"?"已暂停":"失败";
   const head=document.createElement("strong");head.textContent=`${status}${job.coordinator?.primaryModel?` · 主轴 ${job.coordinator.primaryModel}`:""}${job.currentAgent?` · ${job.currentAgent}`:""}`;
   const list=document.createElement("div");list.className="online-editor-agent-status-list";
-  for(const item of job.events||[]){
-    const row=document.createElement("span");
-    row.textContent=`${item.tool||"开发"}${item.model?` · ${item.model}`:""}：${item.error||item.summary||item.result?.summary||(item.result?.passed===false?`运行失败：${(item.result.errors||[]).join("；").slice(0,500)||"已返回模型修复"}`:item.result?.passed===true?"浏览器验收通过":item.result?.approved===false?`评审需修改：${(item.result.issues||[]).join("；").slice(0,500)}`:"工具执行完成")}`;
-    list.append(row);
-  }
-  if(job.error){const row=document.createElement("span");row.textContent=job.error;list.append(row)}
+  if(job.error){const row=document.createElement("span");row.textContent=onlineEditorTimelineText(job.error);list.append(row)}
   for(const item of job.agents||[]){
     const row=document.createElement("span");
     row.className=`status-${item.status}`;

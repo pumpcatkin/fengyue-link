@@ -10,6 +10,101 @@ const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils
 const { createBudget } = require("./harness-budget.cjs");
 const { isStandalone } = require("./standalone-game.cjs");
 
+const HARNESS_UI_OMITTED_FIELDS = new Set([
+  "analysis", "chainofthought", "internalreasoning", "privatereasoning", "reasoning", "thought", "thinking"
+]);
+const HARNESS_UI_SOURCE_FIELDS = new Set([
+  "after", "before", "code", "content", "html", "newtext", "oldtext", "raw", "source"
+]);
+const HARNESS_UI_EVENT_TEXT_LIMIT = 24_000;
+const HARNESS_UI_EVENT_NODE_LIMIT = 512;
+const harnessUiKey = key => String(key || "").replace(/[-_\s]/g, "").toLowerCase();
+const isHarnessUiPrivateKey = key => HARNESS_UI_OMITTED_FIELDS.has(harnessUiKey(key));
+
+function summarizeSerializedHarnessAnswerForUi(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return JSON.stringify(summarizeHarnessValueForUi(parsed, "", 0, {}, { remaining: HARNESS_UI_EVENT_TEXT_LIMIT, nodes: HARNESS_UI_EVENT_NODE_LIMIT }));
+  } catch { return value; }
+}
+
+function summarizeHarnessValueForUi(value, key = "", depth = 0, options = {}, budget = { remaining: HARNESS_UI_EVENT_TEXT_LIMIT, nodes: HARNESS_UI_EVENT_NODE_LIMIT }) {
+  if (isHarnessUiPrivateKey(key)) return undefined;
+  if (!Number.isFinite(budget.nodes)) budget.nodes = HARNESS_UI_EVENT_NODE_LIMIT;
+  if (budget.nodes-- <= 0) return { omitted: true, reason: "nodes" };
+  if (value == null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const text = harnessUiKey(key) === "answer" ? summarizeSerializedHarnessAnswerForUi(value) : value;
+    if (options.summarizeSource && HARNESS_UI_SOURCE_FIELDS.has(harnessUiKey(key))) return { omitted: true, characters: text.length };
+    const shown = text.slice(0, Math.max(0, budget.remaining));
+    budget.remaining -= shown.length;
+    return shown.length === text.length ? shown : { preview: shown, characters: text.length, truncated: true };
+  }
+  if (depth >= 8) return { omitted: true, reason: "depth" };
+  if (Array.isArray(value)) {
+    const result = [];
+    for (let index = 0; index < value.length; index++) {
+      if (budget.nodes <= 0 || budget.remaining <= 0) { result.push({ omitted: true, reason: "budget", items: value.length - index }); break; }
+      result.push(summarizeHarnessValueForUi(value[index], "", depth + 1, options, budget));
+    }
+    return result;
+  }
+  if (typeof value !== "object") return summarizeHarnessValueForUi(String(value), key, depth, options, budget);
+  if (harnessUiKey(key) === "files") {
+    const entries = Object.entries(value), result = entries.slice(0, HARNESS_UI_EVENT_NODE_LIMIT).map(([path, content]) => ({ path, characters: typeof content === "string" ? content.length : null }));
+    if (entries.length > result.length) result.push({ omitted: true, reason: "nodes", items: entries.length - result.length });
+    return result;
+  }
+  const result = {};
+  for (const [childKey, child] of Object.entries(value)) {
+    if (budget.nodes <= 0 || budget.remaining <= 0 || childKey.length + 4 > budget.remaining) {
+      result.__truncated = { omitted: true, reason: "budget" };
+      break;
+    }
+    budget.remaining -= childKey.length + 4;
+    const summarized = summarizeHarnessValueForUi(child, childKey, depth + 1, options, budget);
+    if (summarized !== undefined) result[childKey] = summarized;
+  }
+  return result;
+}
+
+function appendHarnessUiEventField(target, key, value) {
+  if (JSON.stringify({ ...target, [key]: value }).length <= HARNESS_UI_EVENT_TEXT_LIMIT - 256) { target[key] = value; return true; }
+  let text;
+  try { text = typeof value === "string" ? value : JSON.stringify(value); } catch { text = String(value); }
+  const descriptor = { preview: "", characters: text.length, truncated: true };
+  let low = 0, high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    descriptor.preview = text.slice(0, middle);
+    if (JSON.stringify({ ...target, [key]: descriptor }).length <= HARNESS_UI_EVENT_TEXT_LIMIT - 256) low = middle;
+    else high = middle - 1;
+  }
+  descriptor.preview = text.slice(0, low);
+  if (JSON.stringify({ ...target, [key]: descriptor }).length > HARNESS_UI_EVENT_TEXT_LIMIT - 256) return false;
+  target[key] = descriptor;
+  return true;
+}
+
+function limitHarnessEventForUi(event) {
+  const result = {};
+  let omittedFields = 0;
+  for (const [key, value] of Object.entries(event)) if (!appendHarnessUiEventField(result, key, value)) omittedFields++;
+  if (omittedFields) result.eventTruncated = { omitted: true, fields: omittedFields };
+  return result;
+}
+
+function summarizeHarnessEventForUi(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return null;
+  const budget = { remaining: HARNESS_UI_EVENT_TEXT_LIMIT - 2_000, nodes: HARNESS_UI_EVENT_NODE_LIMIT }, publicEvent = {};
+  for (const [key, value] of Object.entries(event)) {
+    const summarized = summarizeHarnessValueForUi(value, key, 1,
+      { summarizeSource: key === "args" && ["write_file", "patch_file"].includes(event.tool) }, budget);
+    if (summarized !== undefined) publicEvent[key] = summarized;
+  }
+  return limitHarnessEventForUi(publicEvent);
+}
+
 async function ensureHarnessWork(backend) {
   const file = `${backend.onlineWorldEditorFile}.harness-work.json`;
   const identity = `${backend.origin}|${backend.account.accountId}`;
@@ -51,7 +146,7 @@ async function runEditorHarness(backend, payload = {}) {
   backend.onlineWorldEditorProjects.projects[key] = original;
   saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
   const baseFingerprint = fingerprint(projectFiles(original));
-  const goal = String(payload.goal || "").trim().slice(0, 4000);
+  const goal = String(payload.goal || "").trim();
   if (!goal) throw new Error("请输入游戏开发目标");
   const id = crypto.randomUUID(), controller = new AbortController();
   backend.editorHarnessController = controller;
@@ -76,7 +171,8 @@ async function runEditorHarness(backend, payload = {}) {
       working.program.html = candidate.files["program.html"];
       const config = JSON.parse(candidate.files["configuration.json"]);
       working.configuration = { ...working.configuration, ...config, app: { ...working.configuration.app, ...config.app } };
-      working.harness = { ...working.harness, programAuthors: candidate.programAuthors, tests: JSON.parse(candidate.files["tests.json"]), failures: candidate.failures, coordinator: candidate.coordinator };
+      working.harness = { ...working.harness, programAuthors: candidate.programAuthors, tests: JSON.parse(candidate.files["tests.json"]), failures: candidate.failures,
+        coordinator: candidate.coordinator, events: candidate.events };
     }
     const next = await runGameHarness({ project: working, goal, signal: controller.signal,
       testGame: testGameInBrowser, getBudget: budget.snapshot,
@@ -88,9 +184,11 @@ async function runEditorHarness(backend, payload = {}) {
         current.harnessCandidate = checkpoint;
         backend.onlineWorldEditorProjects.projects[key] = current;
         saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
-        job.events = value.events.map(({ result, ...event }) => ({ ...event, result: result && !result.content ? result : undefined })).slice(-24);
+        job.events = value.events.map(summarizeHarnessEventForUi).filter(Boolean);
         job.currentAgent = value.events.at(-1)?.tool;
-        job.models = value.models; job.coordinator = value.coordinator; job.budget = budget.snapshot(); job.updatedAt = Date.now(); backend.emit();
+        job.models = summarizeHarnessValueForUi(value.models, "models");
+        job.coordinator = summarizeHarnessValueForUi(value.coordinator, "coordinator");
+        job.budget = budget.snapshot(); job.updatedAt = Date.now(); backend.emit();
       },
       request: async ({ query, kind, excludeModel, excludeModels = [], preferredModel, signal, parse }) => {
         check(); assertActive(signal);
@@ -136,11 +234,21 @@ async function runEditorHarness(backend, payload = {}) {
     next.updatedAt = Date.now();
     backend.onlineWorldEditorProjects.projects[key] = next;
     saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
-    job.status = "completed"; job.result = next.harness; job.currentAgent = null;
+    job.status = "completed";
+    job.result = summarizeHarnessValueForUi({
+      schema: next.harness?.schema,
+      status: next.harness?.status,
+      finishedAt: next.harness?.finishedAt,
+      models: next.harness?.models,
+      budget: next.harness?.budget,
+      evidence: next.harness?.evidence ? { passed: next.harness.evidence.passed, checkedAt: next.harness.evidence.checkedAt } : null,
+      review: next.harness?.review ? { approved: next.harness.review.approved, summary: next.harness.review.summary } : null
+    }, "result");
+    job.currentAgent = null;
     return { project: next, draft: next.harness };
   } catch (error) {
     job.status = /^HARNESS_(BUDGET|BILLING|STALLED|CAPABILITY)/.test(error.code || "") ? "paused" : error.name === "AbortError" ? "cancelled" : "failed";
-    job.error = error.message;
+    job.error = summarizeHarnessValueForUi(String(error?.message || error || "未知开发错误"), "error");
     if (checkpoint) {
       checkpoint.status = job.status; checkpoint.error = error.message; checkpoint.budget = budget.snapshot();
       const current = backend.onlineWorldEditorProjects.projects[key];
@@ -157,4 +265,4 @@ async function runEditorHarness(backend, payload = {}) {
     job.updatedAt = Date.now(); backend.emit();
   }
 }
-module.exports = { ensureHarnessWork, runEditorHarness };
+module.exports = { ensureHarnessWork, runEditorHarness, summarizeHarnessEventForUi };

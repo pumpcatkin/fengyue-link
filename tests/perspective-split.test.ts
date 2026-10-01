@@ -24,7 +24,7 @@ const parse = (value: any, source = sourceOf(fixture())) => split.parsePerspecti
 function backend(overrides = {}) {
   const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
   const type = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-    ...split, ...pipeline, ...settings, ...runtimeUtils, ...autoModels, URL, Buffer, console, setTimeout, clearTimeout, AbortController, setInterval, clearInterval,
+    ...split, ...pipeline, ...settings, ...runtimeUtils, ...autoModels, ...require("../electron/platform-turn-preparation.cjs"), URL, Buffer, console, setTimeout, clearTimeout, AbortController, setInterval, clearInterval,
     crypto: require("node:crypto"), ...require("../electron/multiplayer-prompts.cjs"), ...retryModels,
     perspectiveRetryModelKey: retryModels.modelKey, ...overrides
   });
@@ -262,7 +262,11 @@ describe("perspective partition and reconstruction", () => {
     instance.isSameWorkPage = () => true;
     instance.clearGameIsolation = vi.fn();
     instance.appendSessionLog = vi.fn();
-    instance.gameSurface = { webContents: { getURL: () => "https://test/work", executeJavaScript: vi.fn(async () => ({ conversationId: "created-session", stopClicked: true })) } };
+    instance.gameSurface = { webContents: { getURL: () => "https://test/work", executeJavaScript: vi.fn(async () => null) } };
+    let bootstrapInput = '';
+    instance.requestPlatformModel = vi.fn(async (options: any) => { bootstrapInput = options.query; return { conversationId: "created-session", messageId: 'm1', stopAcknowledged: true }; });
+    instance.readPlatformMessages = async () => [{ id: 'm1', query: bootstrapInput, answer: '' }];
+    instance.setPlatformConversationId = vi.fn(async () => true);
     instance.refreshConversations = async () => ({ activeId: "created-session", items: [{ id: "created-session", name: "新会话" }] });
     instance.persistSaveAnchor = vi.fn();
     await expect(instance.ensureHostConversationForPromptConfig({ allowLobby: true })).resolves.toMatchObject({ created: true, conversationId: "created-session" });
@@ -295,13 +299,15 @@ describe("perspective partition and reconstruction", () => {
     });
     instance.gameSurface = { webContents: { getURL: () => "https://test/work", executeJavaScript: evaluate } };
     instance.refreshConversations = async () => ({ activeId: existingId, items: [{ id: existingId, name: "已有会话" }] });
+    instance.readPlatformMessages = vi.fn(async () => []);
+    instance.requestPlatformModel = vi.fn();
     await expect(instance.ensureHostConversationForPromptConfig({ allowLobby: true })).resolves.toMatchObject({ conversationId: existingId, created: false, marker: null });
+    expect(instance.readPlatformMessages).toHaveBeenCalledWith('work', existingId);
+    expect(instance.requestPlatformModel).not.toHaveBeenCalled();
     instance.conversation.activeId = null;
-    instance.gameSurface.webContents.executeJavaScript = (source: string) => vm.runInNewContext(source, {
-      localStorage: { getItem: () => "{}" },
-      document: { querySelector: () => ({}), querySelectorAll: (selector: string) => selector === "#ai-chat-answer" ? [{}] : [] }
-    });
-    await expect(instance.ensureHostConversationForPromptConfig({ allowLobby: true })).rejects.toThrow("已有内容但无法确认会话编号");
+    instance.readPlatformMessages = async () => { throw new Error('selected conversation not confirmed'); };
+    await expect(instance.ensureHostConversationForPromptConfig({ allowLobby: true })).rejects.toThrow('not confirmed');
+    expect(instance.requestPlatformModel).not.toHaveBeenCalled();
   });
   it("sends only each recipient's text and withholds missing projections", async () => {
     const instance = backend();

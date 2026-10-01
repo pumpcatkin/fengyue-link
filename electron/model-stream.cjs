@@ -25,13 +25,27 @@ function createModelRequestPayload({ workId, query, files = [] }) {
       || !/^[a-zA-Z0-9_-]{1,120}$/.test(String(file.upload_file_id || ""))) throw new Error("模型附件必须来自已验证的本地文件上传结果");
     return { type: file.type, transfer_method: "local_file", upload_file_id: file.upload_file_id };
   });
-  return {
+  const payload = {
     app_id: String(workId || ""),
     inputs: {},
     query: String(query || ""),
     response_mode: "streaming",
     files: attachments
   };
+  return payload;
+}
+
+// Explicit conversation mode; auxiliary model calls retain their fresh-only contract.
+function createConversationModelRequestPayload(options = {}) {
+  const { conversationId, messageId, createdAt, isRefresh = false, isUseRefreshCard, inputs } = options;
+  const payload = createModelRequestPayload(options);
+  if (inputs && typeof inputs === "object" && !Array.isArray(inputs)) payload.inputs = inputs;
+  if (conversationId) payload.conversation_id = String(conversationId);
+  if (messageId) payload.message_id = String(messageId);
+  if (createdAt != null && String(createdAt) !== "") payload.created_at = createdAt;
+  if (isRefresh) payload.is_refresh = true;
+  if (isUseRefreshCard != null) payload.is_use_refresh_card = Boolean(isUseRefreshCard);
+  return payload;
 }
 
 function finitePointValue(value) {
@@ -76,7 +90,7 @@ function normalizeModelPoints(value) {
   };
 }
 
-async function consumeModelEventStream(body, { signal, onEvent = () => {} } = {}) {
+async function consumeModelEventStream(body, { signal, onEvent = () => {}, allowEmpty = false, confirmStopped = async () => false } = {}) {
   assertActive(signal);
   if (!body || typeof body.getReader !== "function") throw modelStreamError("模型响应缺少数据流");
   const reader = body.getReader();
@@ -110,7 +124,7 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {} } = {}
     const event = String(data?.event || data?.type || "");
     if (event === "error") throw modelStreamError(data?.message || data?.error || "模型流返回错误", true);
     taskId ||= data?.task_id || data?.taskId || null;
-    messageId ||= data?.message_id || data?.messageId || null;
+    messageId ||= data?.message_id || data?.messageId || (/^(message|agent_message|message_end|message_replace)$/.test(event) ? data?.id : null) || null;
     conversationId ||= data?.conversation_id || data?.conversationId || null;
     onEvent({ event, taskId, messageId, conversationId });
     const text = answerText(data);
@@ -146,9 +160,13 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {} } = {}
     void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
+  if (!finished && taskId && messageId && conversationId && await confirmStopped()) {
+    finished = true;
+    finishEvent = "server_stop";
+  }
   if (!finished) throw modelStreamError("模型响应在完成标记前提前结束");
-  if (!answer.trim()) throw modelStreamError("模型完成后没有返回正文");
+  if (!answer.trim() && !allowEmpty) throw modelStreamError("模型完成后没有返回正文");
   return { answer: answer.trim(), taskId, messageId, conversationId, usage, points, finishEvent };
 }
 
-module.exports = { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints };
+module.exports = { consumeModelEventStream, createModelRequestPayload, createConversationModelRequestPayload, normalizeModelPoints };

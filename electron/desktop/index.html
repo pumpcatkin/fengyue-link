@@ -123,7 +123,7 @@
         <form method="dialog">
           <header><div><b>选择本地项目</b><small>仅显示当前账号作为服主的项目</small></div><button value="cancel" type="submit">关闭</button></header>
           <div id="online-editor-project-list" class="online-editor-project-list"></div>
-          <button id="online-editor-import" value="cancel" type="button">导入游戏卡</button>
+          <button id="online-editor-import" value="cancel" type="button">导入游戏卡 / 项目</button>
           <button id="online-editor-create-blank" value="cancel" type="button" class="primary">从零新建游戏卡</button>
         </form>
       </dialog>
@@ -296,7 +296,7 @@
                 <label>每名玩家独立正文目标字数<input id="perspective-split-words" type="number" min="100" max="10000" step="100" value="800"></label>
                 <button id="save-perspective-split" class="primary">保存字数设置</button>
                 <small class="plugin-cost-warning">等待较久时会自动重试，重试可能再次消耗积分，你可以随时取消。请先配置视角整理作品的提示词。</small>
-                <small>停用时只移除本插件的“两段正文”前置词。3 次均失败时返回失败提示，不使用原文。</small>
+                <small>主回复完成后调用视角整理作品；失败会按自动选模规则重试。取消或终止后显示失败提示，原文暂不公开。停用时移除本插件的“两段正文”前置词。</small>
                 <small>空白会话首次启用可能消耗少量积分。</small>
                 <small id="perspective-split-last-run"></small>
               </div>
@@ -417,7 +417,7 @@
         </footer>
       </div>
     </section>
-    <div id="app-version" aria-label="当前版本">v1.7.1</div>
+    <div id="app-version" aria-label="当前版本">v1.7.3</div>
     <div id="model-loading" class="model-loading hidden" role="status" aria-live="polite">
       <span class="model-loading-logo" aria-hidden="true">✦</span>
       <div><strong id="model-loading-title">正在生成</strong><small id="model-loading-detail"></small></div>

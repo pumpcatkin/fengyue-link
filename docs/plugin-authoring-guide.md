@@ -34,6 +34,16 @@ rg -n "effect-judge|plugin" electron/desktop/index.html electron/desktop/rendere
 
 ## 一、当前插件架构的真实状态
 
+### 1.7.2 增补（优先于下文历史实现说明）
+
+独立视角固定调用 `0f357d8b-6170-4a22-afa7-72fef3490890`。主回复完成后，`runPerspectivePlugin` 将完整原文和本轮成员交给 `runPlatformAutomationModel`，经 `requestEditorModelForWork` / `requestFreshModel` 使用当前登录节点和账号发送流式请求。请求不携带旧会话编号，每次使用新会话；读到完成事件且 JSON 校验通过后，才同步各玩家投影。正常请求使用 `/go/api/apps/chat-messages` 和该 app_id，仅在 404/405 时转到该作品的 installed-app 接口。
+
+主回合发送适用于隐藏 `WebContentsView`：使用计时器和输入/按钮状态回读，不依赖绘制帧。页面导航前启用 CDP Page 并注册文档起始 fetch 分发器，使平台缓存 fetch 或使用 Request 对象时仍能捕获本轮流。发送前等待和请求捕获有准备期限，已发送的生成流继续等待明确结束事件，并支持取消。
+
+日志 `round-capture` 记录输入就绪、点击、请求发出、受理与首段；`perspective-split` 记录作品编号、开始、完成或失败，不记录各玩家正文。运行卡片携带 `appId`。自动选模沿用统一重试规则，不使用旧版固定三次限制。
+
+`npm run verify:perspective` 使用真实隐藏视图和本机 HTTP/SSE 验证主回合到指定切分作品、按玩家分发、捕获覆盖、取消和失败保护，不调用平台账号。支持 `FYMP_QA_APP_ROOT` 指向打包后的 app.asar，验证实际发布代码。
+
 ### 0.10.8 增补
 
 独立视角的首次尝试使用整理作品当前模型。重试继续由新的隐藏窗口和纯净会话承担，并在创建窗口前切换整理作品模型：第二次优先实时列表中的 Gemini Flash，第三次优先 DeepSeek V4 Flash，缺失时使用其他未使用型号。模型写入后必须回读 provider/name；验证失败不发送。该操作只改独立视角整理作品的 `model` 字段，不改提示词或正式剧情作品。

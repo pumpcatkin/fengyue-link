@@ -2,16 +2,32 @@
 
 // Runs inside the platform page. Completion belongs to this request, not to a
 // DOM node count or a delayed billing label. There is deliberately no deadline.
-function installHostOutputCapture(config) {
+function installHostOutputCapture(config = null) {
+  // Install this dispatcher at document start. A platform SDK may cache fetch
+  // before a round begins; that cached function must see the active capture.
+  let bridge = window.__fympHostFetchBridge;
+  if (!bridge) {
+    const nativeFetch = window.fetch;
+    bridge = { nativeFetch, handle: null };
+    window.fetch = function(...args) {
+      return bridge.handle ? bridge.handle(this, args) : nativeFetch.apply(this, args);
+    };
+    window.__fympHostFetchBridge = bridge;
+  }
+  if (!config) return { installed: true };
   window.__fympHostCapture?.dispose?.();
-  const nativeFetch = window.fetch;
+  const nativeFetch = bridge.nativeFetch;
   const state = { attemptId: config.attemptId, requestSeen: false, accepted: false,
     conversationId: config.conversationId || null, messageId: null, taskId: null, output: "", events: [] };
   let resolve, reject, settled = false;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   // The caller obtains the promise in a second executeJavaScript call.
   promise.catch(() => {});
-  const mark = (event, detail = {}) => state.events.push({ event, ...detail });
+  const mark = (event, detail = {}) => {
+    const entry = { event, ...detail };
+    state.events.push(entry);
+    try { console.debug("FYMP_HOST_CAPTURE " + JSON.stringify({ attemptId: config.attemptId, ...entry })); } catch {}
+  };
   const fail = (code, message, retryable = false) => {
     if (settled) return;
     settled = true;
@@ -44,22 +60,35 @@ function installHostOutputCapture(config) {
     state.usage = data.metadata?.usage || data.usage || state.usage;
     if (["message_end", "workflow_finished"].includes(event)) finish(event);
   };
-  window.fetch = function(resource, options = {}) {
-    let url, body;
-    try { url = new URL(typeof resource === "string" ? resource : resource.url, location.href); body = JSON.parse(options.body); } catch {}
-    const matched = !settled && url?.origin === location.origin && typeof body?.query === "string"
+  const handle = async (receiver, args) => {
+    const [resource, options = {}] = args;
+    let url, body, bodyText;
+    try { url = new URL(resource?.url || resource, location.href); } catch {}
+    const endpoint = url?.origin === location.origin
+      && (url.pathname === "/go/api/apps/chat-messages" || url.pathname === `/console/api/installed-apps/${config.appId}/chat-messages`);
+    if (settled || !endpoint) return nativeFetch.apply(receiver, args);
+    try {
+      bodyText = options.body ?? (typeof resource?.clone === "function" ? await resource.clone().text() : undefined);
+      body = JSON.parse(bodyText);
+    } catch {}
+    // Another request may have completed while reading a Request object's body.
+    const matched = !settled && typeof body?.query === "string"
       && ((url.pathname === "/go/api/apps/chat-messages" && body.app_id === config.appId)
         || url.pathname === `/console/api/installed-apps/${config.appId}/chat-messages`)
       && (!config.conversationId || body.conversation_id === config.conversationId);
-    if (!matched) return nativeFetch.call(this, resource, options);
+    if (!matched) return nativeFetch.apply(receiver, args);
     if (state.requestSeen) return Promise.reject(new Error("本轮请求已发送，请等待结果或停止本轮"));
     state.requestSeen = true;
     state.inputTransformed = body.query !== config.input;
     mark("request-dispatched");
-    const request = nativeFetch.call(this, resource, options).then(async response => {
+    const fallbackOptions = typeof resource?.clone === "function" ? {
+      method: resource.method, headers: resource.headers, credentials: resource.credentials,
+      signal: resource.signal, ...options, body: bodyText
+    } : options;
+    const request = Promise.resolve().then(() => nativeFetch.apply(receiver, args)).then(async response => {
       if ([404,405].includes(response.status) && url.pathname === "/go/api/apps/chat-messages") {
         mark("endpoint-fallback", { status: response.status });
-        return nativeFetch.call(window, `/console/api/installed-apps/${encodeURIComponent(config.appId)}/chat-messages`, options);
+        return nativeFetch.call(window, `/console/api/installed-apps/${encodeURIComponent(config.appId)}/chat-messages`, fallbackOptions);
       }
       return response;
     });
@@ -99,13 +128,61 @@ function installHostOutputCapture(config) {
     }).catch(error => fail("REQUEST_UNCERTAIN", String(error?.message || error)));
     return request;
   };
+  bridge.handle = handle;
   const unload = () => fail("PAGE_REPLACED", "回合页面已离开，本次结果不再应用");
   addEventListener("beforeunload", unload, { once: true });
   state.promise = promise;
   state.fail = fail;
-  state.dispose = () => { window.fetch = nativeFetch; removeEventListener("beforeunload", unload); };
+  state.mark = mark;
+  state.dispose = () => {
+    fail("CAPTURE_REPLACED", "回合捕获已结束或被新的请求替换");
+    if (bridge.handle === handle) bridge.handle = null;
+    removeEventListener("beforeunload", unload);
+  };
   window.__fympHostCapture = state;
   return { installed: true, attemptId: config.attemptId };
 }
 
-module.exports = { installHostOutputCapture };
+// Runs in a hidden WebContentsView as well as a visible page. Readiness and
+// dispatch have bounded waits; an accepted model stream has no time limit.
+async function sendHostModelInput(modelInput, { readyTimeoutMs = 15000, dispatchTimeoutMs = 10000 } = {}) {
+  const capture = window.__fympHostCapture;
+  if (!capture) throw new Error("回合回复捕获尚未就绪");
+  const waitUntil = async (predicate, timeoutMs, code, message) => {
+    const end = Date.now() + timeoutMs;
+    while (!predicate()) {
+      if (capture.error) return capture.promise;
+      if (Date.now() >= end) { capture.fail(code, message, false); return capture.promise; }
+      await Promise.race([capture.promise, new Promise(resolve => setTimeout(resolve, 25))]);
+    }
+    if (capture.error) return capture.promise;
+  };
+  const inputReady = () => {
+    const input = document.querySelector('#ai-chat-input');
+    return input && !input.disabled && !input.readOnly && document.querySelector('#ai-send-button');
+  };
+  capture.mark('waiting-input');
+  await waitUntil(inputReady, readyTimeoutMs, 'PAGE_NOT_READY', '页面输入控件尚未就绪，本轮未发送');
+  const input = document.querySelector('#ai-chat-input');
+  const previous = input.value;
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+  setter?.call(input, modelInput);
+  try { input._valueTracker?.setValue(previous); } catch {}
+  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: modelInput }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  // Yield for framework updates without depending on painting a hidden view.
+  await Promise.race([capture.promise, new Promise(resolve => setTimeout(resolve, 0))]);
+  await waitUntil(() => {
+    const current = document.querySelector('#ai-chat-input');
+    const send = document.querySelector('#ai-send-button');
+    return current && !current.disabled && !current.readOnly && current.value === modelInput
+      && send && !send.disabled && send.getAttribute('aria-disabled') !== 'true';
+  }, readyTimeoutMs, 'SEND_NOT_READY', '输入或发送按钮尚未就绪，本轮未发送');
+  capture.mark('input-ready');
+  capture.mark('send-clicked');
+  document.querySelector('#ai-send-button').click();
+  await waitUntil(() => capture.requestSeen, dispatchTimeoutMs, 'REQUEST_NOT_OBSERVED', '发送后未捕获到本轮请求，已停止等待；请检查平台记录后恢复本轮');
+  return capture.promise;
+}
+
+module.exports = { installHostOutputCapture, sendHostModelInput };

@@ -4,11 +4,18 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
-const { decomposeGameCard } = require("./online-world-card.cjs");
-const { injectSandboxCsp } = require("./online-world-runtime.cjs");
+const {
+  GAME_CARD_SCHEMA,
+  MAX_GAME_CARD_FILE_BYTES,
+  decomposeGameCard,
+  normalizeConfiguration,
+  validateGameCard
+} = require("./online-world-card.cjs");
+const { PROGRAM_PREFIX, injectSandboxCsp, parseProgram } = require("./online-world-runtime.cjs");
 
 const EDITOR_SCHEMA = "fyow.game-card-editor/1";
 const EDITOR_PROJECTS_SCHEMA = "fyow.game-card-editor-projects/1";
+const CARD_LIBRARY_SCHEMA = "fyow.game-card-library/1";
 
 const DEFAULT_AGENT_COMPONENTS = Object.freeze([
   { id: "architect", label: "世界架构师", role: "把目标拆成可验证的循环、状态机、事件和任务契约", workId: "", enabled: true },
@@ -230,6 +237,172 @@ function createBlankEditorProject({ origin = "", accountId = "", title = "未命
   });
 }
 
+function isPlatformConfiguration(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const source = value.configuration && typeof value.configuration === "object" && !Array.isArray(value.configuration)
+    ? value.configuration
+    : value;
+  return [
+    "app", "name", "nm", "title", "description", "desc", "intro",
+    "pre_text", "pre_prompt", "ppt", "post_text", "world_book", "wbook", "world_bk"
+  ].some(key => Object.hasOwn(source, key));
+}
+
+function platformConfigurationProject(value) {
+  const source = value.configuration && typeof value.configuration === "object" && !Array.isArray(value.configuration)
+    ? value.configuration
+    : value;
+  const configuration = normalizeConfiguration(source);
+  const description = String(configuration.app?.description || "");
+  let program = null;
+  if (description.includes(PROGRAM_PREFIX)) {
+    try {
+      program = parseProgram(description);
+    } catch (error) {
+      throw new Error(`作品配置中的 FYOW-PROGRAM/1 程序包无效：${error?.message || error}`);
+    }
+  }
+  const title = String(configuration.app?.name || "未命名游戏").slice(0, 80);
+  return {
+    schema: EDITOR_SCHEMA,
+    card: {
+      gameId: String(program?.manifest?.gameId || ""),
+      title,
+      version: 0,
+      exportedAt: null,
+      companion: {
+        workId: String(configuration.app?.id || ""),
+        name: title,
+        summary: String(configuration.app?.summary || ""),
+        language: String(configuration.app?.language || "zh-Hans")
+      }
+    },
+    program: program ? {
+      format: program.manifest.format,
+      apiVersion: program.manifest.apiVersion,
+      digest: program.digest,
+      html: program.html
+    } : { html: DEFAULT_EDITOR_PROGRAM },
+    configuration,
+    harness: program
+      ? { tests: clone(STARTER_TESTS), status: "needs-test" }
+      : {
+        tests: clone(STARTER_TESTS),
+        status: "needs-implementation",
+        migration: "导入的平台作品配置不包含 FYOW-PROGRAM/1；已载入开发样例，请按原作品规则实现玩法后再发布"
+      }
+  };
+}
+
+function createImportedEditorProject(value, { origin = "", accountId = "" } = {}) {
+  const source = normalizeEditorProject(value);
+  const title = String(source.card?.title || source.configuration?.app?.name || "未命名游戏").slice(0, 80);
+  const fresh = createBlankEditorProject({ origin, accountId, title });
+  const sourceCompanion = source.card?.companion && typeof source.card.companion === "object"
+    ? source.card.companion
+    : {};
+  const configuration = normalizeConfiguration(source.configuration);
+  configuration.app.id = "";
+  const sourceHtml = String(source.program?.html || "").trim();
+  const hasProgram = Boolean(sourceHtml);
+  const sourceHarness = source.harness && typeof source.harness === "object" ? clone(source.harness) : {};
+  const project = normalizeEditorProject({
+    ...source,
+    schema: EDITOR_SCHEMA,
+    draftId: fresh.draftId,
+    isDraft: true,
+    revision: 0,
+    updatedAt: Date.now(),
+    pendingPublication: null,
+    agentDraft: null,
+    workSelection: "create",
+    card: {
+      ...fresh.card,
+      ...source.card,
+      cardId: String(source.card?.cardId || fresh.card.cardId),
+      gameId: String(source.card?.gameId || fresh.card.gameId),
+      title,
+      version: 0,
+      exportedAt: null,
+      companion: {
+        ...fresh.card.companion,
+        name: String(sourceCompanion.name || configuration.app.name || title).slice(0, 120),
+        summary: String(sourceCompanion.summary || configuration.app.summary || "").slice(0, 4000),
+        language: String(sourceCompanion.language || configuration.app.language || "zh-Hans"),
+        origin: String(origin || ""),
+        workId: "",
+        authorAccountId: String(accountId || "")
+      }
+    },
+    program: {
+      ...fresh.program,
+      ...(source.program || {}),
+      digest: "",
+      html: hasProgram ? sourceHtml : DEFAULT_EDITOR_PROGRAM
+    },
+    configuration,
+    validation: null,
+    harness: {
+      ...sourceHarness,
+      tests: clone(sourceHarness.tests || STARTER_TESTS),
+      status: hasProgram
+        ? (sourceHarness.status === "needs-implementation" ? "needs-implementation" : "needs-test")
+        : "needs-implementation",
+      ...(hasProgram ? {} : { migration: sourceHarness.migration || "导入项目缺少玩法程序；已载入开发样例，请完成实现后再发布" }),
+      evidence: null,
+      review: null
+    }
+  });
+  project.agents = normalizeAgentComponents(source.agents, "");
+  return project;
+}
+
+function readOnlineWorldEditorImportFile(file, options = {}) {
+  const requested = String(file || "");
+  if (!requested || !path.isAbsolute(requested)) throw new Error("作品编辑器导入文件路径无效");
+  const resolved = path.resolve(requested);
+  if (path.extname(resolved).toLowerCase() !== ".json") throw new Error("作品编辑器导入文件必须是 JSON");
+  let stat;
+  try { stat = fs.statSync(resolved); } catch { throw new Error("作品编辑器导入文件不存在或不可读取"); }
+  if (!stat.isFile()) throw new Error("作品编辑器导入路径不是文件");
+  const maxBytes = Number(options.maxBytes || MAX_GAME_CARD_FILE_BYTES);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("作品编辑器导入文件大小上限无效");
+  if (stat.size > maxBytes) throw new Error(`作品编辑器导入文件超过 ${Math.floor(maxBytes / 1024 / 1024)} MiB 上限`);
+  let value;
+  try { value = JSON.parse(fs.readFileSync(resolved, "utf8").replace(/^\uFEFF/, "")); }
+  catch { throw new Error("作品编辑器导入 JSON 内容无效"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("作品编辑器导入文件不是 JSON 对象");
+
+  if (value.schema === GAME_CARD_SCHEMA) {
+    return { file: resolved, type: "game-card", cards: [validateGameCard(value)], projects: [], size: stat.size, modifiedAt: stat.mtimeMs };
+  }
+  if (value.schema === EDITOR_SCHEMA) {
+    return { file: resolved, type: "editor-project", cards: [], projects: [value], size: stat.size, modifiedAt: stat.mtimeMs };
+  }
+  if (value.schema === EDITOR_PROJECTS_SCHEMA) {
+    const entries = Array.isArray(value.projects) ? value.projects : Object.values(value.projects || {});
+    if (!entries.length) throw new Error("编辑器项目备份中没有可导入项目");
+    if (entries.length > 32) throw new Error("编辑器项目备份一次最多导入 32 个项目");
+    if (entries.some(item => !item || typeof item !== "object" || Array.isArray(item))) {
+      throw new Error("编辑器项目备份包含无效项目");
+    }
+    return { file: resolved, type: "editor-projects", cards: [], projects: entries, size: stat.size, modifiedAt: stat.mtimeMs };
+  }
+  if (value.schema === "fyow.game-card/2") {
+    throw new Error("该文件是 fyow.game-card/2；当前编辑器支持 fyow.game-card/1，/2 格式尚未实现，请使用 /1 导出文件");
+  }
+  if (value.schema === CARD_LIBRARY_SCHEMA) {
+    throw new Error("该文件是完整游戏卡库备份；请从游戏库导出并选择单张 fyow.game-card/1 游戏卡");
+  }
+  if (value.schema) {
+    throw new Error(`不支持的作品编辑器格式：${String(value.schema).slice(0, 120)}；可导入运行卡、编辑器项目、项目备份或平台作品配置`);
+  }
+  if (!isPlatformConfiguration(value)) {
+    throw new Error("未识别该 JSON；请选择运行卡、编辑器项目、项目备份或包含作品名称/提示词/世界书的平台配置");
+  }
+  return { file: resolved, type: "platform-configuration", cards: [], projects: [platformConfigurationProject(value)], size: stat.size, modifiedAt: stat.mtimeMs };
+}
+
 function parseAgentAnswer(answer) {
   const text = String(answer || "").trim();
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -321,6 +494,8 @@ module.exports = {
   saveEditorProjects,
   createEditorProject,
   createBlankEditorProject,
+  createImportedEditorProject,
+  readOnlineWorldEditorImportFile,
   DEFAULT_EDITOR_PROGRAM,
   parseAgentAnswer,
   parseStructuredAgentAnswer,

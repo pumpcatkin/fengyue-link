@@ -36,14 +36,13 @@ describe("Electron platform API regressions", () => {
     expect(css).toMatch(/pointer-events:\s*auto/);
   });
 
-  it("stabilizes React-controlled long reply edits before saving", () => {
+  it("saves long replies through verified APIs while retaining the tool editor", () => {
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const renderer = readFileSync(new URL("../electron/desktop/renderer.js", import.meta.url), "utf8");
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
-    expect(source).toContain("editor._valueTracker?.setValue(previous)");
-    expect(source).toContain("document.execCommand('insertText',false,expectedOutput)");
-    expect(source).toContain("findMessageButton(target, '#customized-edit-button')");
-    expect(source).toContain("平台没有保存工具文本框中的完整回复");
+    expect(source).toContain("mutatePlatformMessage(");
+    expect(source).not.toContain("editor._valueTracker");
+    expect(source).not.toContain("findMessageButton(");
     expect(html).toContain('id="message-edit-form" class="message-edit-form hidden"');
     expect(html).not.toContain('id="message-edit-overlay"');
     expect(renderer).toContain('api.runMessageOperation("edit",document.querySelector("#message-edit-value").value)');
@@ -63,8 +62,9 @@ describe("Electron platform API regressions", () => {
     const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const preload = readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
-    expect(main).toContain(".chat-container .MuiStack-root.css-1ajg1ui");
-    expect(main).toMatch(/\.MuiStack-root\.css-1ajg1ui button[\s\S]*display:\s*none !important/);
+    expect(main).toContain("#customized-message-answer-actions button");
+    expect(main).toContain("#customized-message-question-actions button");
+    expect(main).not.toContain("css-1ajg1ui");
     expect(main).toContain('liveView.webContents.on("did-finish-load"');
     expect(main).toContain('"message-operation"');
     expect(preload).toContain("runMessageOperation");
@@ -536,7 +536,7 @@ describe("Electron platform API regressions", () => {
     expect(main).toContain("data-fymp-message-sibling");
     expect(main).toContain('html[data-fy-surface="game"] [data-fymp-stage-sibling]');
     expect(main).toContain("display: contents !important");
-    expect(main).toContain("#customized-question-content,#ai-chat-answer");
+    expect(main).toContain("#customized-question-content,:is(#customized-answer,#ai-chat-answer)");
     expect(main).not.toContain("shieldTransparentHitLayers");
     expect(main).not.toContain("data-fymp-transparent-hit-layer");
     expect(main).not.toContain("data-fymp-transparent-pseudo-layer");
@@ -598,25 +598,23 @@ describe("Electron platform API regressions", () => {
     expect(renderer).toContain('confirmAction("刷新会调用房主平台模型并可能消耗积分');
     expect(renderer).toContain('confirmAction("确定删除所有成员的最近一条 AI 回复');
     expect(html).not.toContain('id="confirm-overlay"');
-    expect(main).toContain("const findMessageButton = (target, selector)");
-    expect(main).toContain("const chooser = [...document.querySelectorAll");
+    expect(main).toContain("mutatePlatformMessage(");
+    expect(main).toContain("isRefresh: true");
     expect(main).toContain("const operationRound = {");
     expect(main).toContain("await this.runConversationPluginStack(");
     expect(main).toContain("Array.isArray(previousResult.pluginRuns)");
   });
 
-  it("keeps the platform message-operation page script syntactically valid", () => {
-    const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
-    const methodStart = main.indexOf("  async performLatestPlatformMessageOperation");
-    const methodEnd = main.indexOf("  async syncGuestMessageOperation", methodStart);
-    const method = main.slice(methodStart, methodEnd);
-    const scriptStart = method.indexOf("executeJavaScript(`") + "executeJavaScript(`".length;
-    const scriptEnd = method.indexOf("`, true)", scriptStart);
-    const pageTemplate = method.slice(scriptStart, scriptEnd);
-    const cookedPageScript = new Function("JSON", "operation", "expectedOutput", `return \`${pageTemplate}\`;`)(JSON, "refresh", "");
-    expect(methodStart).toBeGreaterThanOrEqual(0);
-    expect(scriptEnd).toBeGreaterThan(scriptStart);
-    expect(() => new Function(cookedPageScript)).not.toThrow();
+  it('keeps message operations independent of page scripts and button selectors', () => {
+    const main = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+    const start = main.indexOf('  async performLatestPlatformMessageOperation');
+    const end = main.indexOf('  async syncGuestMessageOperation', start);
+    const methods = main.slice(start, end);
+    expect(methods).not.toContain('executeJavaScript');
+    expect(methods).not.toContain('querySelector');
+    expect(methods).toContain('mutatePlatformMessage');
+    expect(methods).toContain('requestPlatformModel');
+    expect(methods).toContain('generated.messageId');
   });
 
   it("keeps the conversation plugin card page script syntactically valid", () => {
@@ -674,34 +672,28 @@ describe("Electron platform API regressions", () => {
       .toBeLessThan(method.indexOf("this.adoptPendingConversation(created, sessionKey"));
   });
 
-  it("keeps guest round-result synchronization edit-only in the live view", () => {
-    const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
-    const syncStart = main.indexOf("async syncGuestRoundResult(result");
-    const syncEnd = main.indexOf("async syncGuestRoundResultWithRetries", syncStart);
-    const activeSync = main.slice(syncStart, syncEnd);
-    expect(syncStart).toBeGreaterThanOrEqual(0);
-    expect(activeSync).toContain('event: "prepared-input-verification"');
-    expect(activeSync).toContain("#customized-edit-button");
-    expect(activeSync).toContain("HTMLElement.prototype.click.call(save)");
-    expect(activeSync).toContain("round-result 不会再次发送输入");
-    expect(activeSync).not.toContain("readySend.click()");
-    expect(activeSync).not.toContain("retrySend.click()");
-    expect(activeSync).not.toContain("#ai-send-button').click");
+  it('keeps guest result synchronization edit-only with server verification', () => {
+    const main = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+    const start = main.indexOf('  async syncGuestRoundResult(');
+    const end = main.indexOf('  async syncGuestRoundResultWithRetries', start);
+    const method = main.slice(start, end);
+    expect(method).toContain('findPreparedMessage(');
+    expect(method).toContain('mutatePlatformMessage(');
+    expect(method).not.toContain('requestPlatformModel(');
+    expect(method).not.toContain('executeJavaScript');
+    expect(method.indexOf('mutatePlatformMessage(')).toBeLessThan(method.indexOf('setPlatformConversationId('));
   });
 
-  it("stops guest generation before conversation discovery and keeps fast output editable", () => {
-    const main = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
-    const prepareStart = main.indexOf("async prepareGuestRoundInput(payload");
-    const prepareEnd = main.indexOf("async prepareGuestRoundInputWithRetries", prepareStart);
-    const prepare = main.slice(prepareStart, prepareEnd);
-    expect(prepareStart).toBeGreaterThanOrEqual(0);
-    expect(prepare.indexOf("mark('stop-control-found-immediately')"))
-      .toBeLessThan(prepare.indexOf("const postStopDeadline"));
-    expect(prepare).toContain("for (let burst = 1; burst <= 5; burst += 1)");
-    expect(prepare).toContain("[20,60,120,240,480,720].includes(attempt)");
-    expect(prepare).toContain("mark('late-stop-clicked',{confirmation})");
-    expect(prepare).toContain("roundState.terminationMode = 'completed-before-stop'");
-    expect(prepare).toContain("成员端已经停止生成，但平台没有返回会话编号；不会重复发送本轮输入");
+  it('prepares guest records using a retained API request state and server stop', () => {
+    const main = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
+    const start = main.indexOf('  async prepareGuestRoundInput(');
+    const end = main.indexOf('  async prepareGuestRoundInputWithRetries', start);
+    const method = main.slice(start, end);
+    expect(method).toContain('preparePlatformTurn(');
+    expect(method.indexOf('this.guestPreparedTurns.set(')).toBeLessThan(method.indexOf('preparePlatformTurn('));
+    expect(method).toContain('guestPreparationJobs');
+    expect(method).not.toContain('executeJavaScript');
+    expect(method).not.toContain('querySelector');
   });
 
   it("keeps the dialogue view resident under a native settings overlay", () => {

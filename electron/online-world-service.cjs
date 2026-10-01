@@ -948,7 +948,7 @@ function modelConfigSavePayload(exported, workId, name, description, model, { pr
   const payload = {
     ...(preserveExtras ? source : {}),
     pre_prompt: prePrompt,
-    pre_prompt_sort: firstNumber(0, source.pre_prompt_sort),
+    pre_prompt_sort: firstNumber(0, source.pre_prompt_sort, source.prompt_sort),
     pre_text: preText,
     pre_text_sort: firstNumber(0, source.pre_text_sort),
     post_text: postText,
@@ -1080,11 +1080,15 @@ function comparableWorldBook(value, { sortEntries = false } = {}) {
 
 function coreConfigProjection(value) {
   const firstText = (...values) => normalizeConfigText(values.find(value => value != null));
+  const promptSortValue = value?.pre_prompt_sort ?? value?.prompt_sort;
+  const promptSortNumber = Number(promptSortValue);
   return {
     description: firstText(value?.app?.description, value?.desc, value?.descr, value?.dsc, value?.intro, value?.description),
     name: firstText(value?.app?.name, value?.name, value?.nm, value?.ttl, value?.title, value?.app_name),
     summary: firstText(value?.app?.summary, value?.summary, value?.smry, value?.abs_txt, value?.sum_info, value?.abstract),
-    promptSort: JSON.stringify(value?.pre_prompt_sort ?? value?.prompt_sort ?? null),
+    promptSort: promptSortValue == null || promptSortValue === "" || Number.isFinite(promptSortNumber)
+      ? (Number.isFinite(promptSortNumber) ? promptSortNumber : 0)
+      : `invalid:${canonicalJson(promptSortValue)}`,
     prePrompt: firstText(value?.pre_prompt, value?.prpt, value?.ppt, value?.pre_pt, value?.prompt_pre),
     preText: firstText(value?.pre_text, value?.pretxt, value?.ptx, value?.pre_tx, value?.prefix_txt),
     postText: firstText(value?.post_text, value?.posttxt, value?.potx, value?.post_tx, value?.suffix_txt),

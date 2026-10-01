@@ -1,6 +1,6 @@
 {
   "name": "fengyue-link",
-  "version": "1.7.1",
+  "version": "1.7.3",
   "description": "风月多人联机桌面工具",
   "author": "八爪毛米",
   "private": true,
@@ -12,6 +12,8 @@
     "build": "node scripts/build-harness-knowledge.cjs && tsc --noEmit && vite build",
     "test": "vitest run",
     "verify:sandbox": "electron scripts/verify-sandbox.cjs",
+    "verify:perspective": "electron scripts/verify-perspective-pipeline.cjs",
+    "verify:platform-api": "electron scripts/verify-platform-api.cjs",
     "desktop": "npm run build && electron .",
     "pack:win": "npm run build && electron-builder --win dir --x64 --publish never && node scripts/create-channel-runtime-proof.cjs && electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never",
     "pack:dir": "npm run build && electron-builder --win dir --x64 --publish never && node scripts/create-channel-runtime-proof.cjs",

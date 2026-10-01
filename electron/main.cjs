@@ -33,14 +33,13 @@ const {
   runPluginStack
 } = require("./plugin-pipeline.cjs");
 const {
-  PERSPECTIVE_PLUGIN_ID, PERSPECTIVE_APP_ID, PERSPECTIVE_MAX_ATTEMPTS, PERSPECTIVE_ATTEMPT_TIMEOUT_MS, WITHHELD_OUTPUT,
+  PERSPECTIVE_PLUGIN_ID, PERSPECTIVE_APP_ID, WITHHELD_OUTPUT,
   normalizePerspectiveSettings, upsertPerspectivePrefix, buildPerspectiveRequest,
   parsePerspectiveResponse, outputFingerprint, personalizeResult
 } = require("./perspective-split.cjs");
 const { publicGlobalConfig, countConfigCharacters, changedGlobalFields } = require("./work-settings.cjs");
 const { mutatePlatformConversation, updateConversationAnchors } = require("./conversation-management.cjs");
 const { modelMetric, selectGuestModel, matchesConfiguredModel } = require("./guest-model-policy.cjs");
-const { installGuestOutputGuard } = require("./guest-output-guard.cjs");
 const { buildPerspectiveRetryModelPlan, modelKey: perspectiveRetryModelKey } = require("./perspective-retry-model.cjs");
 const {
   OFFICIAL_RELEASE_PAGE,
@@ -79,7 +78,18 @@ const {
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
 const { installHostOutputCapture } = require("./round-output-capture.cjs");
-const { requestFreshModel } = require("./fresh-model-request.cjs");
+const { requestFreshModel, requestPlatformModel: requestConversationModel } = require("./fresh-model-request.cjs");
+const { preparePlatformTurn } = require("./platform-turn-preparation.cjs");
+const {
+  normalizeMessageText,
+  messageId,
+  latestMessageRecord,
+  findPreparedMessage,
+  editMessageRequest,
+  deleteMessageRequest,
+  readMessageRecords,
+  mutatePlatformMessage
+} = require("./platform-message-operations.cjs");
 const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive, abortable } = require("./auto-model-router.cjs");
 const { packProgram, injectSandboxCsp } = require("./online-world-runtime.cjs");
 const { runEditorHarness } = require("./editor-harness-backend.cjs");
@@ -93,7 +103,9 @@ const {
   loadEditorProjects,
   saveEditorProjects,
   createEditorProject,
-  createBlankEditorProject
+  createBlankEditorProject,
+  createImportedEditorProject,
+  readOnlineWorldEditorImportFile
 } = require("./online-game-editor.cjs");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
@@ -1339,8 +1351,9 @@ class AccountBackend {
       this.appendSessionLog("game-network", { event: "early-capture-install-started", pageUrl: webContents.getURL() });
       if (!webContents.debugger.isAttached()) webContents.debugger.attach("1.3");
       this.appendSessionLog("game-network", { event: "debugger-attached", pageUrl: webContents.getURL() });
+      await webContents.debugger.sendCommand("Page.enable");
       const installCommand = webContents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {
-        source: `(() => {
+        source: `(${installHostOutputCapture.toString()})(); (() => {
           if (window.__fympEarlyNetwork?.installed) return;
           const state = window.__fympEarlyNetwork = {
             installed:true,
@@ -2515,7 +2528,7 @@ class AccountBackend {
           viewportWidth:window.innerWidth,
           viewportHeight:window.innerHeight,
           questionCount:chat.querySelectorAll('#customized-question-content').length,
-          answerCount:chat.querySelectorAll('#ai-chat-answer').length,
+          answerCount:chat.querySelectorAll(':is(#customized-answer,#ai-chat-answer)').length,
           scrollTop:chat.scrollTop,
           scrollHeight:chat.scrollHeight,
           clientHeight:chat.clientHeight,
@@ -3868,6 +3881,67 @@ class AccountBackend {
     return (await this.platformRequest(`/go/api${pathname}`, options)).payload;
   }
 
+  async requestPlatformModel(options = {}) {
+    const origin = this.origin, revision = this.authSessionRevision, work = this.work, room = this.room;
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    assertActive(options.signal);
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    const watcher = setInterval(() => {
+      if (origin !== this.origin || revision !== this.authSessionRevision || work !== this.work || room !== this.room || this.destroying) controller.abort();
+    }, 250);
+    try {
+      await abortable(() => this.networkReady, controller.signal);
+      let token = '';
+      const contents = this.anchor?.webContents;
+      let timer;
+      try {
+        if (contents && !contents.isDestroyed() && new URL(contents.getURL()).origin === origin) {
+          token = await abortable(() => Promise.race([contents.executeJavaScript("localStorage.getItem('console_token') || ''", true).catch(() => ''),
+            new Promise(resolve => { timer = setTimeout(() => resolve(''), 500); })]), controller.signal);
+        }
+      } finally { clearTimeout(timer); }
+      assertActive(controller.signal);
+      const headers = { 'Content-Type': 'application/json', 'X-Language': 'zh-Hans' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      return await requestConversationModel({ ...options, origin, headers, signal: controller.signal,
+        fetch: (url, request) => this.platformSession.fetch(url, request) });
+    } finally { clearInterval(watcher); options.signal?.removeEventListener('abort', cancel); }
+  }
+
+  async readPlatformMessages(appId, conversationId, { limit = 100, signal } = {}) {
+    if (!appId || !conversationId) throw new Error('读取记录缺少作品或会话编号');
+    const payload = await this.platformChatApi(`/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(conversationId)}&limit=${limit}&page=1&paging_query_sort=desc`, { timeout: 10000, signal });
+    return readMessageRecords(payload, { strict: true });
+  }
+
+  async readPlatformMessage(appId, conversationId, id, createdAt, { signal } = {}) {
+    try {
+      return (await this.readPlatformMessages(appId, conversationId, { signal })).find(item => messageId(item) === id) || null;
+    } catch (error) {
+      if (![404, 405].includes(error.status) || typeof createdAt !== 'number') throw error;
+      const payload = await this.platformGoApi('/apps/message', { method: 'POST', body: { message_id: id, message_created_at: createdAt }, signal });
+      const record = payload?.message || payload?.data?.message;
+      if (!record || messageId(record) !== id || typeof record.answer !== 'string' || (record.conversation_id && record.conversation_id !== conversationId)) {
+        throw new Error('备用消息详情接口未返回匹配记录，继续保留未确认状态');
+      }
+      this.appendSessionLog('platform-network', { event: 'message-read-fallback', messageId: id, route: '/go/api/apps/message' });
+      return { ...record, query: record.query ?? record.origin_query };
+    }
+  }
+
+  async readSelectedPlatformConversationId(appId) {
+    const wc = this.gameSurface?.webContents;
+    if (!wc || wc.isDestroyed?.()) return null;
+    return await wc.executeJavaScript(`(() => {
+      try {
+        const stored = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}')[${JSON.stringify(appId)}];
+        const id = typeof stored === 'string' ? stored : stored?.conversationId || stored?.conversation_id || stored?.id;
+        return typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) ? id : null;
+      } catch { return null; }
+    })()`, true);
+  }
+
   async listOnlineWorldCards() {
     const entries = [...this.onlineWorldCards.entries()];
     const accountId = String(this.account.accountId || "");
@@ -4310,17 +4384,57 @@ class AccountBackend {
   async importOnlineWorldEditorCard() {
     this.assertToolLoggedIn();
     const selected = await dialog.showOpenDialog(this.window, {
-      title: "导入可编辑游戏卡",
+      title: "导入游戏卡或编辑器项目",
       properties: ["openFile", "multiSelections"],
-      filters: [{ name: "风月在线游戏卡", extensions: ["json"] }]
+      filters: [{ name: "游戏卡、编辑器项目或作品配置", extensions: ["json"] }]
     });
     if (selected.canceled || !selected.filePaths.length) {
       return { canceled: true, editorProjects: this.listOnlineWorldEditorProjects().projects };
     }
-    const loaded = selected.filePaths.map(file => readGameCardFile(file));
-    for (const { card } of loaded) this.assertOnlineWorldEditorOwner(card);
-    const result = await this.importOnlineWorldCardFiles(selected.filePaths);
-    return { ...result, editorProjects: this.listOnlineWorldEditorProjects().projects };
+    return this.importOnlineWorldEditorCardFiles(selected.filePaths);
+  }
+
+  async importOnlineWorldEditorCardFiles(files) {
+    this.assertToolLoggedIn();
+    if (!Array.isArray(files) || !files.length) throw new Error("请选择要导入的作品编辑器文件");
+    if (files.length > 32) throw new Error("一次最多选择 32 个作品编辑器文件");
+    const loaded = files.map(file => readOnlineWorldEditorImportFile(file));
+    const totalEntries = loaded.reduce((total, item) => total + item.cards.length + item.projects.length, 0);
+    if (totalEntries > 32) throw new Error("一次最多导入 32 张游戏卡或编辑器项目");
+
+    const cardFiles = [];
+    for (const item of loaded) {
+      for (const card of item.cards) this.assertOnlineWorldEditorOwner(card);
+      if (item.cards.length) cardFiles.push(item.file);
+    }
+    let cardResult = null;
+    if (cardFiles.length) cardResult = await this.importOnlineWorldCardFiles(cardFiles);
+
+    const importedDrafts = [];
+    for (const item of loaded) {
+      for (const source of item.projects) {
+        const project = createImportedEditorProject(source, {
+          origin: this.origin,
+          accountId: this.account.accountId
+        });
+        const libraryId = `draft::${project.draftId}`;
+        this.onlineWorldEditorProjects.projects[libraryId] = project;
+        importedDrafts.push(this.summarizeOnlineWorldEditorProject(project, libraryId));
+      }
+    }
+    if (importedDrafts.length) saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+
+    const importedCards = [
+      ...(Array.isArray(cardResult?.importedCards) ? cardResult.importedCards : []),
+      ...importedDrafts
+    ];
+    return {
+      canceled: false,
+      imported: importedCards[0] || null,
+      importedCards,
+      ...(await this.listOnlineWorldCards()),
+      editorProjects: this.listOnlineWorldEditorProjects().projects
+    };
   }
 
   async importOnlineWorldCardFiles(files) {
@@ -4672,41 +4786,11 @@ class AccountBackend {
       platformRequestStarted = true;
       const requestHeaders = { "Content-Type": "application/json", "X-Language": "zh-Hans" };
       if (token) requestHeaders.Authorization = `Bearer ${token}`;
-      const response = await anchor.webContents.session.fetch(new URL("/go/api/apps/chat-messages", this.origin).href, {
-        method: "POST",
-        credentials: "include",
-        cache: "no-store",
-        signal: controller.signal,
-        headers: requestHeaders,
-        body: JSON.stringify(createModelRequestPayload({ workId, query }))
+      const result = await requestFreshModel({
+        fetch: (url, request) => anchor.webContents.session.fetch(url, request),
+        origin: this.origin, workId, query, headers: requestHeaders, signal: controller.signal,
+        onEvent: detail => this.appendSessionLog('online-world-model', { task, ...detail })
       });
-      if (!response.ok) {
-        const failure = await response.json().catch(() => ({}));
-        const message = String(failure?.message || failure?.msg || `模型请求失败：${response.status}`);
-        const rateLimited = response.status === 429 || isRateLimitMessage(`${message} ${failure?.code || ""}`);
-        const error = rateLimited
-          ? platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
-            status: 429,
-            httpStatus: response.status,
-            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
-          })
-          : new Error(message);
-        if ([401, 402, 403].includes(response.status)) error.retryable = false;
-        throw error;
-      }
-      if (/json/i.test(String(response.headers.get("content-type") || ""))) {
-        const failure = await response.json().catch(() => ({}));
-        const message = String(failure?.message || failure?.msg || "模型接口返回了业务错误");
-        if (isRateLimitMessage(`${message} ${failure?.code || ""}`)) {
-          throw platformRequestError("PLATFORM_RATE_LIMIT", RATE_LIMIT_MESSAGE, {
-            status: 429,
-            httpStatus: response.status,
-            retryAfterMs: retryAfterMs(response.headers.get("retry-after"))
-          });
-        }
-        throw new Error(message);
-      }
-      const result = await consumeModelEventStream(response.body);
       if (!String(result.conversationId || "").trim()) throw new Error("平台完成模型输出后没有返回新会话编号");
       await this.refreshOnlineWorldPoints(task, "after");
       const points = resolvedModelPointUsage(result.points || result.usage, pointsBefore, this.account.points);
@@ -5006,19 +5090,23 @@ class AccountBackend {
     this.perspectiveProgress = { attempt: 1, maxAttempts: null };
     this.emit({ perspectiveAttemptStarted: true });
     try {
+      this.appendSessionLog("perspective-split", { event: "started", appId: PERSPECTIVE_APP_ID, round: activeRound.number, memberCount: members.length, sourceCharacters: String(output).length });
       const generated = await this.runPlatformAutomationModel(
         PERSPECTIVE_APP_ID, buildPerspectiveRequest(output, members), "独立视角",
-        { timeoutMs: PERSPECTIVE_ATTEMPT_TIMEOUT_MS, validate: result => parsePerspectiveResponse(result.output, { members }) }
+        { validate: result => parsePerspectiveResponse(result.output, { members }) }
       );
       const parsed = parsePerspectiveResponse(generated.output, { members });
       activeRound.perspectiveOutputs = parsed.outputs;
+      this.appendSessionLog("perspective-split", { event: "completed", appId: PERSPECTIVE_APP_ID, round: activeRound.number, conversationId: generated.conversationId, messageId: generated.messageId, memberCount: members.length, segmentCount: parsed.payload.segments.length, attemptCount: generated.attemptCount });
       return { value: parsed.outputs[String(this.account.accountId)] || WITHHELD_OUTPUT, run: {
+        appId: PERSPECTIVE_APP_ID,
         model: generated.model, points: generated.points, pointsIncomplete: generated.pointsIncomplete,
         attemptCount: generated.attemptCount, maxAttempts: null, attempts: generated.attempts,
         memberCount: members.length, segmentCount: parsed.payload.segments.length
       } };
     } catch (error) {
-      error.pluginRun = { ...(error.pluginRun || {}), withheld: true };
+      this.appendSessionLog("perspective-split", { event: "failed", appId: PERSPECTIVE_APP_ID, round: activeRound.number, error: error?.message || String(error) });
+      error.pluginRun = { ...(error.pluginRun || {}), appId: PERSPECTIVE_APP_ID, withheld: true };
       throw error;
     } finally {
       this.perspectiveProgress = null;
@@ -5539,149 +5627,38 @@ class AccountBackend {
   }
 
   async ensureHostConversationForPromptConfig({ allowLobby = false } = {}) {
-    if ((!this.room && !allowLobby) || (this.room && this.room.role !== "host")) throw new Error("只有房主可以准备多人会话配置");
-    const existingId = String(this.room?.save?.conversationId || this.conversation.activeId || "").trim();
+    if ((!this.room && !allowLobby) || (this.room && this.room.role !== 'host')) throw new Error('只有房主可以准备多人会话配置');
+    const existingId = String(this.room?.save?.conversationId || this.conversation.activeId || '').trim();
     if (existingId) return { conversationId: existingId, created: false, marker: null };
-    if (!this.work?.suffix) throw new Error("房主尚未选择游玩作品");
-
-    const appId = parseInviteWork(this.work.suffix, this.origin).id;
-    const gameUrl = this.workGameUrl();
-    const marker = `【多人会话配置初始化:${crypto.randomUUID()}】`;
-    const knownIds = new Set((this.conversation.items || []).map(item => String(item?.id || "")).filter(Boolean));
-    this.keepGameSurfaceResident();
-    await this.gameNetworkCaptureReady.catch(() => false);
-    if (!this.isSameWorkPage(this.gameSurface.webContents.getURL(), gameUrl)) {
-      await this.loadSurfaceUrl(this.gameSurface, gameUrl, "作品对话页面", 20000);
+    const appId = this.currentWorkAppId();
+    if (!appId) throw new Error('房主尚未选择游玩作品');
+    const selectedId = await this.readSelectedPlatformConversationId(appId);
+    if (selectedId) {
+      await this.readPlatformMessages(appId, selectedId);
+      this.conversation.activeId = selectedId;
+      if (this.room?.save) this.room.save.conversationId = selectedId;
+      return { conversationId: selectedId, created: false, marker: null };
     }
-    await this.clearGameIsolation();
-    this.appendSessionLog("multiplayer-prompt", { event: "conversation-bootstrap-started", appId });
-
-    let outcome;
-    try {
-      outcome = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const marker = ${JSON.stringify(marker)};
-        const installedAppId = ${JSON.stringify(appId)};
-        const validId = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
-        const readConversationId = (allowEarly = true) => {
-          try {
-            const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-            const stored = map?.[installedAppId];
-            const value = typeof stored === 'string' ? stored : stored?.conversationId || stored?.conversation_id || stored?.id || null;
-            if (validId(value)) return String(value);
-          } catch {}
-          const early = allowEarly ? window.__fympEarlyNetwork?.conversationId : null;
-          return validId(early) ? String(early) : null;
-        };
-        const stopSelector = 'div.absolute.bottom-2.right-2 > div[role="presentation"].bg-black.cursor-pointer';
-        const findStop = () => [...document.querySelectorAll(stopSelector)].find(element =>
-          !element.id && element.querySelector('svg') && !element.querySelector('input,textarea')
-        ) || null;
-        for (let attempt = 0; attempt < 120 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(100);
-        const input = document.querySelector('#ai-chat-input');
-        const send = document.querySelector('#ai-send-button');
-        if (!input || !send) throw new Error('常驻作品页没有出现平台输入栈');
-        if (findStop()) throw new Error('作品页已有模型输出正在进行，无法安全初始化会话配置');
-        const beforeAnswers = document.querySelectorAll('#ai-chat-answer').length;
-        const beforeQuestions = document.querySelectorAll('#customized-question-content').length;
-        const selectedConversationId = readConversationId(false);
-        if (selectedConversationId) return { conversationId: selectedConversationId, reused: true };
-        if (beforeAnswers || beforeQuestions) throw new Error('作品页已有内容但无法确认会话编号，请刷新会话后重试');
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-        setter?.call(input, marker);
-        input.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'insertText', data:marker }));
-        input.dispatchEvent(new Event('change', { bubbles:true }));
-        await sleep(160);
-        if (input.value !== marker) throw new Error('平台输入框没有保留会话初始化标记');
-        const readySend = document.querySelector('#ai-send-button');
-        if (!readySend || readySend.disabled || readySend.getAttribute('aria-disabled') === 'true') throw new Error('平台发送按钮尚未就绪');
-        HTMLElement.prototype.click.call(readySend);
-
-        let stopClicked = false;
-        let answerCreated = false;
-        let questionCreated = false;
-        const sendDeadline = Date.now() + 8000;
-        while (Date.now() < sendDeadline) {
-          questionCreated = document.querySelectorAll('#customized-question-content').length > beforeQuestions;
-          answerCreated = document.querySelectorAll('#ai-chat-answer').length > beforeAnswers;
-          const stop = findStop();
-          if (stop) {
-            HTMLElement.prototype.click.call(stop);
-            stopClicked = true;
-            break;
-          }
-          if (answerCreated && readConversationId()) break;
-          await sleep(5);
-        }
-        if (!stopClicked && !answerCreated && !questionCreated) throw new Error('平台发送按钮没有建立初始化消息');
-        if (stopClicked) {
-          let settled = false;
-          for (let attempt = 0; attempt < 500; attempt += 1) {
-            const remaining = findStop();
-            if (!remaining && document.querySelector('#ai-send-button')) { settled = true; break; }
-            if (remaining && [120, 300].includes(attempt)) HTMLElement.prototype.click.call(remaining);
-            await sleep(10);
-          }
-          if (!settled) throw new Error('平台初始化输出没有正常终止');
-        }
-        let conversationId = readConversationId();
-        const idDeadline = Date.now() + 6000;
-        while (!conversationId && Date.now() < idDeadline) {
-          conversationId = readConversationId();
-          await sleep(40);
-        }
-        return {
-          marker,
-          conversationId,
-          stopClicked,
-          answerCreated: document.querySelectorAll('#ai-chat-answer').length > beforeAnswers,
-          questionCreated: document.querySelectorAll('#customized-question-content').length > beforeQuestions
-        };
-      })()`, true);
-    } catch (error) {
-      this.appendSessionLog("multiplayer-prompt", { event: "conversation-bootstrap-page-failed", appId, error: error?.message || String(error) });
-      throw error;
-    }
-
-    let refreshed = null;
-    let conversationId = String(outcome?.conversationId || "").trim();
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
-      refreshed = await this.refreshConversations({ bindHost: true, keepSessionKey: true }).catch(() => null);
-      if (!conversationId) {
-        conversationId = String(refreshed?.activeId || (refreshed?.items || []).find(item => item.id && !knownIds.has(String(item.id)))?.id || "").trim();
-      }
-      if (conversationId) break;
-      await new Promise(resolve => setTimeout(resolve, attempt * 180));
-    }
-    if (!conversationId) throw new Error("平台已终止初始化输出，但没有返回新会话编号");
-
-    if (String(refreshed?.activeId || "") !== conversationId) await this.setPlatformConversationId(conversationId);
-    const sessionKey = this.room?.save?.key || this.conversation.sessionKey || crypto.randomUUID();
-    const activeName = refreshed?.items?.find(item => String(item.id) === conversationId)?.name || this.conversation.activeName || "新的对话";
-    this.conversation = {
-      ...this.conversation,
-      items: [
-        { id: conversationId, name: activeName, active: true },
-        ...(this.conversation.items || []).filter(item => item.id && String(item.id) !== conversationId).map(item => ({ ...item, active: false }))
-      ],
-      activeId: conversationId,
-      activeName,
-      sessionKey,
-      anchorRole: "host",
-      anchored: true,
-      hasChat: true,
-      source: "platform-bootstrap",
-      updatedAt: Date.now()
-    };
-    if (this.room) this.room.save = { ...(this.room.save || {}), key: sessionKey, conversationId, name: activeName };
-    this.persistSaveAnchor({ sessionKey, conversationId, name: activeName, role: "host" });
-    this.appendSessionLog("multiplayer-prompt", {
-      event: "conversation-bootstrap-ready",
-      appId,
-      conversationId,
-      stopped: Boolean(outcome?.stopClicked)
-    });
-    return { conversationId, created: !outcome?.reused, marker: outcome?.reused ? null : marker };
+    const key = `${this.authSessionRevision}:${this.origin}:${appId}:${this.room?.id || 'lobby'}`;
+    const state = this.platformBootstrapState?.key === key ? this.platformBootstrapState : { key, input: `【多人会话配置初始化:${crypto.randomUUID()}】` };
+    this.platformBootstrapState = state;
+    const room = this.room, work = this.work, revision = this.authSessionRevision;
+    const check = () => { if (room !== this.room || work !== this.work || revision !== this.authSessionRevision) throw abortError(); };
+    const outcome = await preparePlatformTurn({ state, appId, query: state.input,
+      readRecords: id => { check(); return this.readPlatformMessages(appId, id); },
+      requestModel: options => { check(); return this.requestPlatformModel(options); },
+      onEvent: detail => this.appendSessionLog('multiplayer-prompt', { scope: 'conversation-bootstrap', appId, ...detail }) });
+    check();
+    const conversationId = outcome.conversationId, sessionKey = room?.save?.key || this.conversation.sessionKey || crypto.randomUUID();
+    const name = this.conversation.activeName || '新的对话';
+    this.conversation = { ...this.conversation, activeId: conversationId, activeName: name, sessionKey, anchorRole: 'host', anchored: true, hasChat: true,
+      items: [{ id: conversationId, name, active: true }, ...(this.conversation.items || []).map(item => ({ ...item, active: false }))],
+      source: 'platform-api-bootstrap', updatedAt: Date.now() };
+    if (room) room.save = { ...(room.save || {}), key: sessionKey, conversationId, name };
+    this.persistSaveAnchor({ sessionKey, conversationId, name, role: 'host' });
+    this.platformBootstrapState = null;
+    await this.setPlatformConversationId(conversationId).catch(error => this.appendSessionLog('multiplayer-prompt', { event: 'bootstrap-display-refresh-failed', error: error.message }));
+    return { conversationId, created: true, marker: state.input };
   }
 
   async removeHostPromptBootstrapTurn(appId, conversationId, marker) {
@@ -6961,9 +6938,8 @@ class AccountBackend {
         sentAt: Date.now()
       }, true);
       this.appendSessionLog("round-flow", { event: "host-input-broadcast", round: activeRound.number, input: modelInput });
-      // Sending and showing the live page must run concurrently.  Waiting for
-      // sendModelInputAndCapture first used to hide both the submitted row and
-      // the entire streaming response until generation had already finished.
+      // Generation lives in the main-process API transport. The existing view
+      // remains available and reloads the committed reply after projection.
       const generation = activeRound.generatedResult ? Promise.resolve(activeRound.generatedResult) : this.sendModelInputAndCapture(modelInput);
       const splitEnabled = this.pluginSettings.plugins[PERSPECTIVE_PLUGIN_ID].enabled;
       if (splitEnabled) this.detachSurface();
@@ -6995,6 +6971,8 @@ class AccountBackend {
         await this.rememberPerspectiveView(generated.output, result.output);
         await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "独立视角对话", 20000);
         await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
+      } else {
+        await this.setPlatformConversationId(generated.conversationId);
       }
       this.perspectivePresentationBlocked = false;
       this.appendSessionLog("round-flow", { event: "host-model-output", round: activeRound.number, result });
@@ -7132,265 +7110,88 @@ class AccountBackend {
       const result = await this.sendModelInputAttempt(requestInput, signal);
       return { ...result, model: model.label || model.model };
     }, {
-      conversationId: this.room?.save?.conversationId || this.conversation.activeId,
-      reload: async () => {
-        await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "自动模型切换", 20000);
-        await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
-        await this.applyGameIsolation(false);
-      }
+      conversationId: this.room?.save?.conversationId || this.conversation.activeId
     });
   }
 
   async sendModelInputAttempt(modelInput, signal) {
-    if (!this.work?.url) throw new Error("房主尚未载入游玩作品");
-    const gameUrl = this.workGameUrl();
-    if (!this.isSameWorkPage(this.gameSurface.webContents.getURL(), gameUrl)) await this.gameSurface.webContents.loadURL(gameUrl);
-    // Keep an already-isolated conversation attached. DOM automation can use
-    // hidden platform controls directly, while the user sees the submitted row
-    // and streaming answer without a full-page flash or a detach/reattach gap.
-    const cancel = () => { if (!this.gameSurface.webContents.isDestroyed()) this.gameSurface.webContents.reload(); };
+    if (!this.work?.url) throw new Error('房主尚未载入游玩作品');
     assertActive(signal);
-    signal?.addEventListener("abort", cancel, { once: true });
-    try {
-    const attemptId = crypto.randomUUID();
+    const room = this.room, work = this.work, revision = this.authSessionRevision;
     const appId = this.currentWorkAppId();
-    await this.gameSurface.webContents.executeJavaScript(`(${installHostOutputCapture.toString()})(${JSON.stringify({ attemptId, appId, input: modelInput, conversationId: this.room?.save?.conversationId || this.conversation.activeId || null })})`);
-    this.appendSessionLog("round-flow", { event: "capture-armed", attemptId, round: this.room?.round?.number, inputCharacters: modelInput.length });
-    const result = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-      const capture = window.__fympHostCapture;
-      const fail = (code,message) => { capture.fail(code,message,false); return capture.promise; };
-      let input, send, observer;
-      const editable = () => {
-        input = document.querySelector('#ai-chat-input');
-        send = document.querySelector('#ai-send-button');
-        return input && send && !input.disabled && !input.readOnly;
-      };
-      if (!editable()) {
-        try {
-          await Promise.race([capture.promise, new Promise(resolve => {
-            observer = new MutationObserver(() => { if (editable()) resolve(); });
-            observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['disabled','readonly']});
-            if (editable()) resolve();
-          })]);
-        } finally { observer?.disconnect(); }
-      }
-      if (!editable()) return fail('PAGE_NOT_READY','目标对话已离开，未发送本轮请求');
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-      setter?.call(input, ${JSON.stringify(modelInput)});
-      input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:${JSON.stringify(modelInput)}}));
-      input.dispatchEvent(new Event('change',{bubbles:true}));
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      if (send.disabled || send.getAttribute('aria-disabled') === 'true') return fail('SEND_DISABLED','发送按钮仍被占用，未发送本轮请求');
-      send.click();
-      capture.events.push({event:'send-clicked'});
-      return capture.promise;
-    })()`, true);
-    if (!result?.output) throw new Error("平台模型已结束，但没有取得输出内容");
-    this.appendSessionLog("round-flow", { event: "capture-completed", attemptId, conversationId: result.conversationId, messageId: result.messageId, taskId: result.taskId, finishEvent: result.finishEvent, outputCharacters: result.output.length });
-    return { ...result, points: normalizeModelPoints(result.usage), pointsIncomplete: !normalizeModelPoints(result.usage) };
-    } catch (error) {
-      const capture = await this.gameSurface.webContents.executeJavaScript(`(() => {const s=window.__fympHostCapture;return s?{attemptId:s.attemptId,requestSeen:s.requestSeen,accepted:s.accepted,conversationId:s.conversationId,messageId:s.messageId,taskId:s.taskId,error:s.error,events:s.events}:null})()`).catch(() => null);
-      this.appendSessionLog("round-flow", { event: "capture-failed", capture, error: error.message });
-      error.retryable = capture?.error?.retryable === true;
-      error.code = capture?.error?.code || "REPLY_CAPTURE_FAILED";
-      throw error;
-    } finally { signal?.removeEventListener("abort", cancel); }
-  }
-
-  async performLatestPlatformMessageOperation(action, value = "") {
-    if (action !== "refresh") return this.performLatestPlatformMessageAttempt(action, value);
-    return this.withAutoModel(this.currentWorkAppId(), "重新生成回复", async ({ signal }) => {
-      const cancel = () => { if (!this.gameSurface.webContents.isDestroyed()) this.gameSurface.webContents.reload(); };
-      assertActive(signal);
-      signal.addEventListener("abort", cancel, { once: true });
-      try { return await this.performLatestPlatformMessageAttempt(action, value); }
-      finally { signal.removeEventListener("abort", cancel); }
-    }, {
-      conversationId: this.room?.save?.conversationId || this.conversation.activeId,
-      reload: async () => {
-        await this.loadSurfaceUrl(this.gameSurface, this.workGameUrl(), "自动模型切换", 20000);
-        await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
-      }
-    });
-  }
-
-  async performLatestPlatformMessageAttempt(action, value = "") {
-    if (!this.work?.url) throw new Error("尚未载入作品对话页面");
-    const operation = String(action || "");
-    if (!["refresh", "edit", "delete"].includes(operation)) throw new Error("不支持的记录操作");
-    const expectedOutput = String(value ?? "");
-    await this.ensureGameSurfaceMounted({ timeoutMs: 15000 });
-    await this.suspendGameSurfacePresentation();
-    try {
-      await this.clearGameIsolation();
-      const result = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-      const operation = ${JSON.stringify(operation)};
-      const expectedOutput = ${JSON.stringify(expectedOutput)};
-      const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
-      const visible = element => {
-        if (!element || !element.isConnected) return false;
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const isOpenDialog = element => element && element.getAttribute('data-state') !== 'closed' && visible(element);
-      const answers = [...document.querySelectorAll('#ai-chat-answer')];
-      const answer = answers.at(-1) || null;
-      if (!answer) throw new Error('当前会话没有可操作的 AI 回复');
-      const messageRowFor = target => target?.closest('.relative.flex.items-start.justify-between.gap-3.py-3.px-3') || target?.parentElement || null;
-      const findMessageButton = (target, selector) => target?.querySelector(selector) || messageRowFor(target)?.querySelector(selector) || null;
-      const parsePoints = text => Number((String(text || '').match(/[\\d,]+/)?.[0] || '0').replaceAll(',','')) || 0;
-      const readMeta = target => {
-        const modelText = target?.querySelector('#customized-answer-content-model-name')?.textContent?.trim() || '';
-        const inputText = target?.querySelector('#customized-answer-content-model-input-points')?.textContent?.trim() || '';
-        const outputText = target?.querySelector('#customized-answer-content-model-output-points')?.textContent?.trim() || '';
-        return {
-          model:modelText.replace(/^模型\\s*/,'').trim(),
-          points:{input:parsePoints(inputText),output:parsePoints(outputText),total:parsePoints(inputText)+parsePoints(outputText)}
-        };
-      };
-      const openEditor = async target => {
-        const edit = findMessageButton(target, '#customized-edit-button');
-        if (!edit) throw new Error('找不到平台回复编辑按钮');
-        HTMLElement.prototype.click.call(edit);
-        for (let attempt = 0; attempt < 120; attempt += 1) {
-          const dialog = [...document.querySelectorAll('[role="dialog"]')].filter(isOpenDialog).filter(item => item.querySelector('textarea')).at(-1) || null;
-          const editor = dialog ? [...dialog.querySelectorAll('textarea')].find(item => item.getAttribute('placeholder') === '请输入' || item.className.includes('h-[65vh]')) || dialog.querySelector('textarea') : null;
-          if (dialog && editor) return {dialog,editor};
-          await sleep(50);
-        }
-        throw new Error('无法打开平台回复编辑框');
-      };
-      const closeEditor = async dialog => {
-        const cancel = [...dialog.querySelectorAll('button')].find(button => /^(取消|Cancel)$/i.test((button.textContent || '').trim()));
-        if (cancel) HTMLElement.prototype.click.call(cancel);
-        await sleep(80);
-      };
-      const readOutput = async target => {
-        const {dialog,editor} = await openEditor(target);
-        const output = String(editor.value || '');
-        await closeEditor(dialog);
-        return output;
-      };
-      const writeOutput = async target => {
-        const {dialog,editor} = await openEditor(target);
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-        const write = () => {
-          const previous = String(editor.value || '');
-          editor.focus();
-          setter?.call(editor,expectedOutput);
-          try { editor._valueTracker?.setValue(previous); } catch {}
-          editor.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:null}));
-          editor.dispatchEvent(new Event('change',{bubbles:true}));
-        };
-        let stable = false;
-        for (let attempt = 0; attempt < 4 && !stable; attempt += 1) {
-          write();
-          await sleep(180 + attempt * 100);
-          stable = editor.value === expectedOutput;
-        }
-        if (!stable) {
-          try {
-            editor.focus();
-            editor.select();
-            document.execCommand('insertText',false,expectedOutput);
-            await sleep(300);
-            stable = editor.value === expectedOutput;
-          } catch {}
-        }
-        if (!stable) throw new Error('平台编辑框没有完整写入同步内容');
-        const save = [...dialog.querySelectorAll('button')].find(button => /^(保存|Save)$/i.test((button.textContent || '').trim()) && !button.disabled);
-        if (!save) throw new Error('找不到平台保存回复按钮');
-        HTMLElement.prototype.click.call(save);
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          if (!dialog.isConnected || !isOpenDialog(dialog)) return true;
-          await sleep(50);
-        }
-        throw new Error('平台保存回复超时');
-      };
-
-      if (operation === 'edit') {
-        await writeOutput(answer);
-        return {operation,output:expectedOutput,...readMeta(answer)};
-      }
-      if (operation === 'delete') {
-        const button = findMessageButton(answer, '#customized-delete-button');
-        if (!button) throw new Error('找不到平台回复删除按钮');
-        HTMLElement.prototype.click.call(button);
-        let confirmed = false;
-        for (let attempt = 0; attempt < 100; attempt += 1) {
-          const dialog = [...document.querySelectorAll('[role="dialog"]')].filter(isOpenDialog).at(-1) || null;
-          const confirm = dialog ? [...dialog.querySelectorAll('button')].find(item => /^(确认|确定|删除|Confirm|Delete)$/i.test((item.textContent || '').trim()) && !item.disabled) : null;
-          if (confirm) {
-            HTMLElement.prototype.click.call(confirm);
-            confirmed = true;
-            break;
-          }
-          await sleep(30);
-        }
-        if (!confirmed) throw new Error('找不到平台删除确认按钮');
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          if (document.querySelectorAll('#ai-chat-answer').length < answers.length) return {operation,deleted:true};
-          await sleep(50);
-        }
-        throw new Error('平台删除回复超时');
-      }
-
-      const reload = findMessageButton(answer, '#customized-reload-button');
-      if (!reload) throw new Error('只有最近一条 AI 回复可以刷新');
-      const beforeText = String(answer.innerText || '');
-      HTMLElement.prototype.click.call(reload);
-      // Some accounts show the platform's points/refresh-card chooser. Always
-      // choose the ordinary points route so the tool mirrors a normal refresh.
-      for (let attempt = 0; attempt < 80; attempt += 1) {
-        const chooser = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[data-radix-popper-content-wrapper]')].filter(isOpenDialog).at(-1) || null;
-        const pointsButton = [...(chooser || document).querySelectorAll('button')].filter(visible).find(item => {
-          const text = (item.textContent || '').trim();
-          return /(积分|point)/i.test(text) && !/(刷新卡|refresh\\s*card)/i.test(text) && !item.disabled;
-        });
-        if (pointsButton) {
-          HTMLElement.prototype.click.call(pointsButton);
-          break;
-        }
-        const current = [...document.querySelectorAll('#ai-chat-answer')].at(-1);
-        if (!document.querySelector('#ai-send-button') || String(current?.innerText || '') !== beforeText) break;
-        await sleep(40);
-      }
-      let started = false;
-      let refreshed = null;
-      for (let attempt = 0; attempt < 2400; attempt += 1) {
-        const current = [...document.querySelectorAll('#ai-chat-answer')].at(-1) || null;
-        const currentText = String(current?.innerText || '');
-        if (!document.querySelector('#ai-send-button') || currentText !== beforeText) started = true;
-        const meta = readMeta(current);
-        if (started && document.querySelector('#ai-send-button') && findMessageButton(current, '#customized-edit-button') && meta.model) {
-          refreshed = current;
-          break;
-        }
-        await sleep(125);
-      }
-      if (!refreshed) throw new Error('等待平台刷新回复完成超时');
-      const output = await readOutput(refreshed);
-      return {operation,output,...readMeta(refreshed)};
-      })()`, true);
-      if (operation === "edit") {
-        const normalize = text => String(text ?? "").replace(/\r\n/g, "\n").trimEnd();
-        let verified = false;
-        let lastPlatformOutput = "";
-        for (let attempt = 0; attempt < 8 && !verified; attempt += 1) {
-          const outputs = await this.readRecentConversationOutputs(1).catch(() => []);
-          lastPlatformOutput = String(outputs[0] || "");
-          verified = normalize(lastPlatformOutput) === normalize(expectedOutput);
-          if (!verified) await new Promise(resolve => setTimeout(resolve, 350));
-        }
-        if (!verified) throw new Error(`平台没有保存工具文本框中的完整回复（期望 ${expectedOutput.length} 字，平台返回 ${lastPlatformOutput.length} 字）`);
-      }
-      return result;
-    } finally {
-      await this.applyGameIsolation(false).catch(() => false);
-      this.resumeGameSurfacePresentation();
-      await this.captureGameFrame(true).catch(() => false);
+    const conversationId = room?.save?.conversationId || this.conversation.activeId || null;
+    const generated = await this.requestPlatformModel({ workId: appId, query: modelInput, conversationId, signal,
+      onEvent: detail => this.appendSessionLog('round-flow', { scope: 'direct-model-request', round: room?.round?.number, ...detail }) });
+    assertActive(signal);
+    if (room !== this.room || work !== this.work || revision !== this.authSessionRevision) throw abortError();
+    this.conversation.activeId = generated.conversationId;
+    if (room?.save) {
+      room.save.conversationId = generated.conversationId;
+      if (room.save.key) this.persistSaveAnchor({ sessionKey: room.save.key, conversationId: generated.conversationId, name: room.save.name || this.conversation.activeName, role: 'host' });
     }
+    return { ...generated, output: generated.answer, outputSource: 'stream', points: generated.points, pointsIncomplete: !generated.points };
+  }
+
+  async performLatestPlatformMessageOperation(action, value = '', options = {}) {
+    if (action !== 'refresh') return this.performLatestPlatformMessageAttempt(action, value, options);
+    const pinned = { ...options };
+    return this.withAutoModel(this.currentWorkAppId(), '重新生成回复', async ({ signal, model }) => {
+      const result = await this.performLatestPlatformMessageAttempt(action, value, { ...pinned, signal, pin: pinned });
+      this.recordAutomaticModelUsage(signal, { points: result.points });
+      return { ...result, model: model.label || model.model };
+    }, { conversationId: this.room?.save?.conversationId || this.conversation.activeId });
+  }
+
+  async performLatestPlatformMessageAttempt(action, value = '', { signal, operationKey, pin = {} } = {}) {
+    if (!this.work?.url) throw new Error('尚未载入作品对话页面');
+    if (!['refresh', 'edit', 'delete'].includes(action)) throw new Error('不支持的记录操作');
+    const appId = this.currentWorkAppId();
+    const conversationId = String(this.room?.save?.conversationId || this.conversation.activeId || '').trim();
+    if (!appId || !conversationId) throw new Error('当前会话没有可操作的服务端编号');
+    const room = this.room, work = this.work, revision = this.authSessionRevision;
+    const check = () => {
+      assertActive(signal);
+      if (room !== this.room || work !== this.work || revision !== this.authSessionRevision) throw abortError();
+    };
+    this.platformMessageTargets ||= new Map();
+    const key = operationKey ? `${revision}:${this.origin}:${appId}:${conversationId}:${operationKey}` : null;
+    let record = pin.record || (key && this.platformMessageTargets.get(key));
+    if (!record) {
+      record = latestMessageRecord(await this.readPlatformMessages(appId, conversationId, { signal }), { requireAnswer: true });
+      if (!record) throw new Error('当前会话没有可操作的 AI 回复');
+      pin.record = record;
+      if (key) {
+        this.platformMessageTargets.set(key, record);
+        if (this.platformMessageTargets.size > 200) this.platformMessageTargets.delete(this.platformMessageTargets.keys().next().value);
+      }
+    }
+    check();
+    const id = messageId(record);
+    this.appendSessionLog('message-operation', { event: 'server-operation-started', action, appId, conversationId, messageId: id });
+    let result;
+    if (action !== 'refresh') {
+      await mutatePlatformMessage((path, options) => { check(); return this.platformChatApi(path, options); },
+        { appId, conversationId, id, action, answer: value }, { signal, readRecord: () => { check(); return this.readPlatformMessage(appId, conversationId, id, record.created_at ?? record.createdAt, { signal }); } });
+      result = { operation: action, output: action === 'edit' ? String(value) : '', deleted: action === 'delete', messageId: id, conversationId };
+    } else {
+      const generated = await this.requestPlatformModel({ workId: appId, conversationId, query: String(record.query || ''), messageId: id,
+        createdAt: record.created_at ?? record.createdAt, isRefresh: true, signal,
+        onEvent: detail => this.appendSessionLog('message-operation', { action, appId, ...detail }) });
+      let verified = false;
+      for (let attempt = 0; attempt < 12 && !verified; attempt++) {
+        check();
+        const records = await this.readPlatformMessages(appId, conversationId, { signal });
+        verified = records.some(item => messageId(item) === generated.messageId && normalizeMessageText(item.answer) === normalizeMessageText(generated.answer));
+        if (!verified && attempt < 11) await new Promise(resolve => setTimeout(resolve, 350));
+      }
+      if (!verified) throw Object.assign(new Error('刷新已结束，服务端回读尚未匹配完整正文；已停止重复生成'), { retryable: false });
+      result = { ...generated, operation: action, output: generated.answer };
+    }
+    check();
+    // Data success and display refresh are distinct; a view failure must not replay a write.
+    await this.setPlatformConversationId(conversationId).catch(error => this.appendSessionLog('message-operation', { event: 'display-refresh-failed', error: error.message }));
+    await this.applyGameIsolation(false).catch(() => false);
+    return result;
   }
 
   async syncGuestMessageOperation(payload, { maxAttempts = 4 } = {}) {
@@ -7400,7 +7201,7 @@ class AccountBackend {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
         this.appendSessionLog("message-operation", { event: "guest-attempt-started", operationId: payload?.operationId, action, attempt, maxAttempts });
-        const result = await this.performLatestPlatformMessageOperation(action === "refresh" ? "edit" : action, value);
+        const result = await this.performLatestPlatformMessageOperation(action === "refresh" ? "edit" : action, value, { operationKey: payload?.operationId });
         this.appendSessionLog("message-operation", { event: "guest-attempt-succeeded", operationId: payload?.operationId, action, attempt, result });
         return result;
       } catch (error) {
@@ -7498,400 +7299,38 @@ class AccountBackend {
   }
 
   async prepareGuestRoundInput(payload, { retryAttempt = 1 } = {}) {
-    if (!this.work?.url) throw new Error("成员端尚未载入游玩作品");
-    const round = Number(payload?.round);
-    const expectedInput = String(payload?.input || "");
-    if (!Number.isInteger(round) || !expectedInput.trim()) throw new Error("房主同步的本轮输入无效");
-    const gameUrl = this.workGameUrl();
-    const appId = parseInviteWork(this.work.suffix, this.origin).id;
-    const expectedConversationId = [this.room?.save?.conversationId, this.conversation.activeId]
-      .map(value => String(value || ""))
-      .find(value => /^[0-9a-f-]{36}$/i.test(value)) || null;
-    const knownConversationIds = [...new Set([
-      ...(this.conversation.items || []).map(item => String(item?.id || "")),
-      String(this.conversation.activeId || ""),
-      String(this.room?.save?.conversationId || "")
-    ].filter(value => /^[0-9a-f-]{36}$/i.test(value)))];
-    await this.gameNetworkCaptureReady.catch(() => false);
-    if (!this.isSameWorkPage(this.gameSurface.webContents.getURL(), gameUrl)) {
-      await this.loadSurfaceUrl(this.gameSurface, gameUrl, "作品对话页面");
-    }
-    await this.clearGameIsolation();
-    const syncKey = `${this.room?.id || "room"}:${round}`;
-    this.appendSessionLog("guest-input-prep", { event: "started", round, retryAttempt, syncKey, input: expectedInput });
-    let outcome;
-    try {
-      await this.gameSurface.webContents.executeJavaScript(`(${installGuestOutputGuard.toString()})(${JSON.stringify({ syncKey, appId, input: expectedInput, conversationId: expectedConversationId })})`, true);
-      outcome = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
-        const expectedInput = ${JSON.stringify(expectedInput)};
-        const installedAppId = ${JSON.stringify(appId)};
-        const expectedConversationId = ${JSON.stringify(expectedConversationId)};
-        const knownConversationIds = new Set(${JSON.stringify(knownConversationIds)});
-        const syncKey = ${JSON.stringify(syncKey)};
-        window.__fympRoundSyncStates ||= Object.create(null);
-        const roundState = window.__fympRoundSyncStates[syncKey] ||= {
-          sent:false,stopped:false,saved:false,beforeAnswers:null,beforeQuestions:null,answerNode:null
-        };
-        window.__fympInputPrepTrace = [];
-        const mark = (stage,detail={}) => window.__fympInputPrepTrace.push({time:new Date().toISOString(),stage,...detail});
-        mark('early-network-status',{
-          installed:Boolean(window.__fympEarlyNetwork?.installed),
-          recordCount:Array.isArray(window.__fympEarlyNetwork?.records) ? window.__fympEarlyNetwork.records.length : 0
-        });
-        const validId = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ''));
-        const readConversationId = () => {
-          if (validId(roundState.conversationId)) return String(roundState.conversationId);
-          try {
-            const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-            const stored = map?.[installedAppId];
-            const value = typeof stored === 'string' ? stored : stored?.conversationId || stored?.conversation_id || stored?.id || null;
-            return validId(value) ? String(value) : null;
-          } catch { return null; }
-        };
-        roundState.captureSources ||= [];
-        let earlyCaptureCount = Number(roundState.earlyCaptureCount || 0);
-        const readEarlyConversationId = () => {
-          const early = window.__fympEarlyNetwork;
-          const captures = Array.isArray(early?.captures) ? early.captures : [];
-          while (earlyCaptureCount < captures.length) {
-            const item = captures[earlyCaptureCount++];
-            roundState.captureSources.push(item);
-            mark('conversation-id-captured',{source:item.source,url:item.url || '',conversationId:item.conversationId});
-          }
-          roundState.earlyCaptureCount = earlyCaptureCount;
-          return validId(early?.conversationId) ? String(early.conversationId) : null;
-        };
-        const captureText = (value,source,url='') => {
-          const text = String(value || '');
-          const patterns = [
-            /["']conversation_id["']\\s*:\\s*["']([0-9a-f-]{36})["']/i,
-            /["']conversationId["']\\s*:\\s*["']([0-9a-f-]{36})["']/i,
-            /conversation_id(?:=|%3D|%22%3A%22)([0-9a-f-]{36})/i
-          ];
-          const candidate = patterns.map(pattern => text.match(pattern)?.[1]).find(value => validId(value) && String(value) !== installedAppId) || null;
-          if (candidate && !validId(roundState.conversationId)) {
-            roundState.conversationId = String(candidate);
-            roundState.captureSources.push({source,url,conversationId:String(candidate),time:new Date().toISOString()});
-            mark('conversation-id-captured',{source,url,conversationId:String(candidate)});
-          }
-          return candidate;
-        };
-        window.__fympRestoreInputPrepCapture?.();
-        const nativeFetch = window.fetch;
-        const probeServerConversationId = async () => {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(),700);
-          try {
-            const token = localStorage.getItem('console_token') || '';
-            const headers = { 'X-Language':'zh-Hans' };
-            if (token) headers.Authorization = 'Bearer ' + token;
-            const response = await nativeFetch('/console/api/installed-apps/' + encodeURIComponent(installedAppId) + '/conversations?limit=500', {
-              method:'GET',credentials:'include',cache:'no-store',signal:controller.signal,
-              headers
-            });
-            if (!response.ok) return null;
-            const payload = await response.json().catch(() => ({}));
-            const arrays = [];
-            const queue = [{value:payload,depth:0}];
-            const visited = new Set();
-            while (queue.length && visited.size < 120) {
-              const {value,depth} = queue.shift();
-              if (!value || typeof value !== 'object' || visited.has(value)) continue;
-              visited.add(value);
-              if (Array.isArray(value)) { arrays.push(value); continue; }
-              if (depth < 5) for (const child of Object.values(value)) queue.push({value:child,depth:depth+1});
-            }
-            const score = values => values.reduce((total,record) => total + (record && typeof record === 'object' && (record.id || record.conversation_id || record.conversationId || record.uuid) ? 1 : 0),0);
-            const records = arrays.sort((left,right) => score(right)-score(left) || right.length-left.length)[0] || [];
-            const ids = records.map(record => String(record?.id ?? record?.conversation_id ?? record?.conversationId ?? record?.uuid ?? '')).filter(validId);
-            const candidate = validId(expectedConversationId) && ids.includes(expectedConversationId)
-              ? expectedConversationId
-              : ids.find(id => !knownConversationIds.has(id)) || null;
-            if (candidate) {
-              roundState.conversationId = candidate;
-              const source = {source:'platform-conversation-list-before-stop',conversationId:candidate,time:new Date().toISOString()};
-              roundState.captureSources.push(source);
-              mark('conversation-confirmed-on-platform',source);
-            }
-            return candidate;
-          } catch (error) {
-            mark('conversation-probe-failed',{message:error?.message || String(error)});
-            return null;
-          } finally {
-            clearTimeout(timeout);
-          }
-        };
-        const nativeXhrOpen = XMLHttpRequest.prototype.open;
-        const nativeXhrSend = XMLHttpRequest.prototype.send;
-        window.fetch = function(...args) {
-          const requestUrl = String(typeof args[0] === 'string' ? args[0] : args[0]?.url || '');
-          const requestBody = args[1]?.body || (typeof args[0] === 'object' ? args[0]?.body : '');
-          captureText(requestBody,'fetch-request',requestUrl);
-          return nativeFetch.apply(this,args).then(response => {
-            if (requestUrl.includes(installedAppId)) {
-              try {
-                const clone = response.clone();
-                void clone.text().then(text => captureText(text,'fetch-response',response.url || requestUrl)).catch(() => {});
-              } catch {}
-            }
-            return response;
-          });
-        };
-        XMLHttpRequest.prototype.open = function(method,url,...rest) {
-          this.__fympInputPrepUrl = String(url || '');
-          return nativeXhrOpen.call(this,method,url,...rest);
-        };
-        XMLHttpRequest.prototype.send = function(body) {
-          captureText(body,'xhr-request',this.__fympInputPrepUrl || '');
-          const inspect = () => {
-            try { captureText(this.responseText,'xhr-response',this.responseURL || this.__fympInputPrepUrl || ''); } catch {}
-          };
-          this.addEventListener('progress',inspect);
-          this.addEventListener('readystatechange',inspect);
-          return nativeXhrSend.call(this,body);
-        };
-        window.__fympRestoreInputPrepCapture = () => {
-          if (window.fetch !== nativeFetch) window.fetch = nativeFetch;
-          if (XMLHttpRequest.prototype.open !== nativeXhrOpen) XMLHttpRequest.prototype.open = nativeXhrOpen;
-          if (XMLHttpRequest.prototype.send !== nativeXhrSend) XMLHttpRequest.prototype.send = nativeXhrSend;
-          delete window.__fympRestoreInputPrepCapture;
-        };
-        const stopSelector = 'div.absolute.bottom-2.right-2 > div[role="presentation"].bg-black.cursor-pointer';
-        const findStop = () => [...document.querySelectorAll(stopSelector)].find(element =>
-          !element.id && element.querySelector('svg') && !element.querySelector('input,textarea')
-        ) || null;
-        for (let attempt = 0; attempt < 100 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(150);
-        const input = document.querySelector('#ai-chat-input');
-        if (!input) throw new Error('成员端常驻作品页没有出现平台输入栈');
-        const currentAnswers = document.querySelectorAll('#ai-chat-answer').length;
-        const currentQuestions = document.querySelectorAll('#customized-question-content').length;
-        if (!Number.isInteger(roundState.beforeAnswers)) roundState.beforeAnswers = currentAnswers;
-        if (!Number.isInteger(roundState.beforeQuestions)) roundState.beforeQuestions = currentQuestions;
-        if (!roundState.beforeLastAnswer) roundState.beforeLastAnswer = [...document.querySelectorAll('#ai-chat-answer')][roundState.beforeAnswers - 1] || null;
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-        let answer = roundState.answerNode?.isConnected ? roundState.answerNode : null;
-        let stop = findStop();
-        if (!roundState.sent) {
-          if (stop) throw new Error('成员端已有其他输出正在进行，无法安全建立本轮空回复');
-          setter?.call(input,expectedInput);
-          input.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:expectedInput}));
-          input.dispatchEvent(new Event('change',{bubbles:true}));
-          // Let React commit the controlled textarea state before invoking the
-          // same button path used by a normal platform click.
-          await sleep(180);
-          if (input.value !== expectedInput) throw new Error('成员端没有正确写入房主输入');
-          const send = document.querySelector('#ai-send-button');
-          if (!send) throw new Error('成员端发送按钮尚未就绪');
-          if (send.disabled || send.getAttribute('aria-disabled') === 'true') throw new Error('成员端发送按钮仍处于禁用状态');
-          send.click();
-          roundState.sent = true;
-          roundState.sentAt = Date.now();
-          mark('send-clicked');
-        } else {
-          mark('send-reused');
-        }
-        for (let attempt = 0; attempt < 800 && !stop && !roundState.stopped; attempt += 1) {
-          stop = findStop();
-          const answers = [...document.querySelectorAll('#ai-chat-answer')];
-          const candidate = answers.at(-1) || null;
-          if (candidate && answers.length > roundState.beforeAnswers && candidate !== roundState.beforeLastAnswer) {
-            answer = candidate;
-            roundState.answerNode = candidate;
-          }
-          const questionCreated = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
-          if (!stop && answer && questionCreated && document.querySelector('#ai-send-button')) {
-            mark('model-completed-before-stop-control',{answerCount:answers.length});
-            break;
-          }
-          if (!stop && !answer && attempt === 300) {
-            const retrySend = document.querySelector('#ai-send-button');
-            if (!questionCreated && retrySend && input.value === expectedInput && !window.__fympGuestOutputGuard?.states[syncKey]?.requestSeen) {
-              retrySend.click();
-              mark('send-click-retried');
-            }
-          }
-          if (!stop && !roundState.stopped) await sleep(5);
-        }
-        let questionCreatedAfterSend = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
-        if (!stop && !answer && !questionCreatedAfterSend && !roundState.stopped) {
-          if (window.__fympGuestOutputGuard?.states[syncKey]?.requestSeen) throw new Error('本轮访客请求已发出，正在等待平台确认，不会重复生成');
-          roundState.sent = false;
-          mark('send-produced-no-platform-message',{
-            inputLength:String(input.value || '').length,
-            sendPresent:Boolean(document.querySelector('#ai-send-button')),
-            questionCount:document.querySelectorAll('#customized-question-content').length,
-            answerCount:document.querySelectorAll('#ai-chat-answer').length
-          });
-          throw new Error('访客端发送按钮没有产生平台消息，已恢复输入并准备安全重试');
-        }
-        const generation = window.__fympGuestOutputGuard?.states[syncKey];
-        if (!generation) throw new Error('访客任务监听未安装，不能仅按按钮状态认定停止');
-        // Never click the native stop button before its task id arrives. That
-        // button hides itself immediately even when no server stop was sent.
-        while (!generation.ready && !generation.error) await sleep(25);
-        if (!generation.ready) {
-          const finalStop = generation.taskId && findStop();
-          if (finalStop) HTMLElement.prototype.click.call(finalStop);
-          throw new Error(generation.error || '访客生成任务尚未确认结束；本轮不会重复发送');
-        }
-        roundState.messageId = generation.messageId || roundState.messageId;
-        roundState.conversationId = generation.conversationId || roundState.conversationId;
-        const completedAnswers = [...document.querySelectorAll('#ai-chat-answer')];
-        const completedCandidate = completedAnswers.at(-1);
-        if (completedCandidate && (completedAnswers.length > roundState.beforeAnswers || completedCandidate !== roundState.beforeLastAnswer)) {
-          answer = completedCandidate;
-          roundState.answerNode = answer;
-        }
-        questionCreatedAfterSend = document.querySelectorAll('#customized-question-content').length > roundState.beforeQuestions;
-        mark('server-generation-ended',{taskId:generation.taskId || null,messageId:generation.messageId || null,stopAcknowledged:generation.stopAcknowledged,stopAttempts:generation.stopAttempts || 0,outputCharacters:generation.outputCharacters});
-        if (!roundState.stopped && (stop = findStop())) {
-          // The server stream has ended. Clear any remaining frontend busy
-          // state before locating the editable placeholder.
-          mark('stop-control-found-immediately');
-          for (let burst = 1; burst <= 5; burst += 1) {
-            const currentStop = findStop();
-            if (!currentStop) break;
-            HTMLElement.prototype.click.call(currentStop);
-            mark('stop-clicked',{burst});
-            await sleep(burst * 18);
-          }
-          let settled = false;
-          for (let attempt = 0; attempt < 800; attempt += 1) {
-            const remaining = findStop();
-            if (!remaining && document.querySelector('#ai-send-button')) { settled = true; break; }
-            if (remaining && [20,60,120,240,480,720].includes(attempt)) {
-              HTMLElement.prototype.click.call(remaining);
-              mark('stop-click-repeated',{attempt});
-            }
-            await sleep(10);
-          }
-          if (!settled) throw new Error('成员端终止输出超时');
-          let stableChecks = 0;
-          for (let confirmation = 1; confirmation <= 4; confirmation += 1) {
-            await sleep(120);
-            const lateStop = findStop();
-            if (lateStop) {
-              HTMLElement.prototype.click.call(lateStop);
-              mark('late-stop-clicked',{confirmation});
-              stableChecks = 0;
-            } else if (document.querySelector('#ai-send-button')) {
-              stableChecks += 1;
-            }
-          }
-          if (stableChecks < 2) throw new Error('成员端终止状态没有稳定下来');
-          roundState.stopped = true;
-          roundState.terminationMode = 'stop-control';
-          mark('stop-settled-stable');
-        } else if (!roundState.stopped) {
-          // An exceptionally fast model may finish before Chromium exposes the
-          // stop control.  Keep its answer only as the editable placeholder;
-          // round-result will still overwrite it with the host authority.
-          if (answer && questionCreatedAfterSend && document.querySelector('#ai-send-button')) {
-            roundState.stopped = true;
-            roundState.terminationMode = 'completed-before-stop';
-            mark('completed-answer-adopted-as-placeholder');
-          } else {
-            throw new Error('平台没有出现可终止控件，且生成状态尚未稳定');
-          }
-        }
-        let serverConversationId = readConversationId() || readEarlyConversationId();
-        const postStopDeadline = Date.now() + 5000;
-        while (Date.now() < postStopDeadline && !serverConversationId) {
-          serverConversationId = readEarlyConversationId() || readConversationId();
-          if (!serverConversationId) serverConversationId = await probeServerConversationId();
-          if (!serverConversationId) await sleep(120);
-        }
-        if (!serverConversationId) {
-          mark('early-network-diagnostics',{
-            installed:Boolean(window.__fympEarlyNetwork?.installed),
-            records:Array.isArray(window.__fympEarlyNetwork?.records) ? window.__fympEarlyNetwork.records.slice(-16) : []
-          });
-          throw new Error('成员端已经停止生成，但平台没有返回会话编号；不会重复发送本轮输入');
-        }
-        roundState.conversationId = serverConversationId;
-        if (!answer) {
-          for (let attempt = 0; attempt < 300; attempt += 1) {
-            const answers = [...document.querySelectorAll('#ai-chat-answer')];
-            const candidate = answers.at(-1) || null;
-            if (candidate && answers.length > roundState.beforeAnswers && candidate !== roundState.beforeLastAnswer) {
-              answer = candidate;
-              roundState.answerNode = candidate;
-              break;
-            }
-            await sleep(20);
-          }
-        }
-        if (!answer) throw new Error('终止后没有形成可编辑的空回复');
-        let conversationId = serverConversationId || readConversationId();
-        if (conversationId) {
-          try {
-            const map = JSON.parse(localStorage.getItem('conversationIdInfo') || '{}');
-            map[installedAppId] = conversationId;
-            localStorage.setItem('conversationIdInfo',JSON.stringify(map));
-          } catch {}
-        }
-        window.__fympRestoreInputPrepCapture?.();
-        mark('input-preparation-completed',{conversationId,captureSources:roundState.captureSources});
-        return {sent:true,stopped:true,terminationMode:generation.stopAcknowledged ? 'server-stop-confirmed' : 'server-completed',messageId:roundState.messageId || null,conversationId,captureSources:roundState.captureSources,trace:window.__fympInputPrepTrace};
-      })()`, true);
-    } catch (error) {
-      const trace = await this.gameSurface.webContents.executeJavaScript(`window.__fympInputPrepTrace || []`, true).catch(() => []);
-      await this.gameSurface.webContents.executeJavaScript(`window.__fympRestoreInputPrepCapture?.()`, true).catch(() => {});
-      this.appendSessionLog("guest-input-prep", { event: "page-operation-failed", round, retryAttempt, error: error?.message || String(error), trace });
-      throw error;
-    }
-    if (!outcome?.sent || !outcome?.stopped) throw new Error("成员端没有完成发送与终止流程");
-    const conversationId = String(outcome.conversationId || "").trim() || null;
-    if (!conversationId) throw new Error("成员端虽然终止了输出，但平台没有返回新会话编号，已拒绝伪报成功");
-    const normalize = value => String(value ?? "").replace(/\r\n/g, "\n").trimEnd();
-    let platformInputVerified = false;
-    let verificationError = null;
-    for (let attempt = 1; attempt <= 8 && !platformInputVerified; attempt += 1) {
-      try {
-        const payload = await this.platformChatApi(`/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(conversationId)}&limit=8&page=1&paging_query_sort=desc`, { timeout: 3000 });
-        const arrays = [];
-        const queue = [{ value: payload, depth: 0 }];
-        const visited = new Set();
-        while (queue.length && visited.size < 100) {
-          const { value, depth } = queue.shift();
-          if (!value || typeof value !== "object" || visited.has(value)) continue;
-          visited.add(value);
-          if (Array.isArray(value)) { arrays.push(value); continue; }
-          if (depth < 5) for (const child of Object.values(value)) queue.push({ value: child, depth: depth + 1 });
-        }
-        platformInputVerified = arrays.some(records => records.some(message => (!outcome.messageId || message.id === outcome.messageId) && normalize(message?.query) === normalize(expectedInput)));
-        this.appendSessionLog("guest-input-prep", { event: "platform-record-verification", round, retryAttempt, attempt, conversationId, verified: platformInputVerified });
-      } catch (error) {
-        verificationError = error;
-        this.appendSessionLog("guest-input-prep", { event: "platform-record-verification", round, retryAttempt, attempt, conversationId, verified: false, error: error?.message || String(error) });
-      }
-      if (!platformInputVerified && attempt < 8) await new Promise(resolve => setTimeout(resolve, 350));
-    }
-    if (!platformInputVerified) {
-      throw new Error(`平台已分配会话，但没有保存房主输入内容${verificationError ? `：${verificationError.message || String(verificationError)}` : ""}`);
-    }
-    if (conversationId && this.room?.save?.key) {
-      const activeName = this.room.save.name || this.conversation.activeName || "新的对话";
-      this.conversation = {
-        ...this.conversation,
-        items: [{ id: conversationId, name: activeName, active: true }, ...(this.conversation.items || []).filter(item => item.id && item.id !== conversationId).map(item => ({ ...item, active: false }))],
-        activeId: conversationId,
-        activeName,
-        sessionKey: this.room.save.key,
-        anchorRole: "guest",
-        anchored: true,
-        hasChat: true,
-        source: "guest-input-stop",
-        updatedAt: Date.now()
-      };
-      this.room.save.conversationId = conversationId;
-      this.persistSaveAnchor({ sessionKey: this.room.save.key, conversationId, name: activeName, role: "guest" });
-    }
-    this.appendSessionLog("guest-input-prep", { event: "completed", round, retryAttempt, outcome, conversationId });
+    if (!this.work?.url) throw new Error('成员端尚未载入游玩作品');
+    const round = Number(payload?.round), input = String(payload?.input || '');
+    if (!Number.isInteger(round) || !input.trim()) throw new Error('房主同步的本轮输入无效');
+    const appId = this.currentWorkAppId();
+    const room = this.room, work = this.work, revision = this.authSessionRevision;
+    const syncKey = `${room?.id || 'room'}:${round}`;
     this.guestPreparedTurns ||= new Map();
-    this.guestPreparedTurns.set(syncKey, { conversationId, messageId: outcome.messageId || null, input: expectedInput });
-    return { ...outcome, conversationId };
+    this.guestPreparationJobs ||= new Map();
+    const state = this.guestPreparedTurns.get(syncKey) || { input, conversationId: room?.save?.conversationId || this.conversation.activeId || null, appId, revision };
+    if (state.appId && (state.appId !== appId || state.revision !== revision)) throw new Error('本轮访客锚点属于其他账号或作品');
+    this.guestPreparedTurns.set(syncKey, state);
+    if (this.guestPreparationJobs.has(syncKey)) return this.guestPreparationJobs.get(syncKey);
+    const check = () => { if (room !== this.room || work !== this.work || revision !== this.authSessionRevision) throw abortError(); };
+    const pending = (async () => {
+      const outcome = await preparePlatformTurn({ state, appId, conversationId: state.conversationId, query: input,
+        readRecords: async id => { check(); return this.readPlatformMessages(appId, id); },
+        requestModel: options => { check(); return this.requestPlatformModel(options); },
+        onEvent: detail => this.appendSessionLog('guest-input-prep', { round, retryAttempt, ...detail }) });
+      check();
+      const conversationId = outcome.conversationId;
+      const name = room?.save?.name || this.conversation.activeName || '新的对话';
+      const sessionKey = room?.save?.key || this.conversation.sessionKey;
+      this.conversation = { ...this.conversation, activeId: conversationId, activeName: name, sessionKey, anchorRole: 'guest', anchored: Boolean(sessionKey),
+        items: [{ id: conversationId, name, active: true }, ...(this.conversation.items || []).filter(item => item.id !== conversationId).map(item => ({ ...item, active: false }))],
+        hasChat: true, source: 'guest-api-preparation', updatedAt: Date.now() };
+      if (room?.save) room.save.conversationId = conversationId;
+      if (sessionKey) this.persistSaveAnchor({ sessionKey, conversationId, name, role: 'guest' });
+      this.appendSessionLog('guest-input-prep', { event: 'completed', round, retryAttempt, ...outcome });
+      return outcome;
+    })();
+    this.guestPreparationJobs.set(syncKey, pending);
+    try { return await pending; } finally { this.guestPreparationJobs.delete(syncKey); }
   }
 
   async prepareGuestRoundInputWithRetries(payload) {
@@ -7912,221 +7351,53 @@ class AccountBackend {
     throw new Error(`成员端准备空回复失败，已重试 4 次：${lastError?.message || String(lastError || "未知错误")}`);
   }
 
-  // Retained only as a diagnostic reference for the pre-live-view prototype.
-  // The active result path below is intentionally edit-only and never sends a
-  // second platform turn after round-input has prepared the blank answer.
   async syncGuestRoundResult(result, { retryAttempt = 1 } = {}) {
-    if (!this.work?.url) throw new Error("成员端尚未载入游玩作品");
-    if (typeof result?.input !== "string" || !result.input.trim()) throw new Error("房主同步数据缺少输入内容");
-    if (typeof result?.output !== "string" || !result.output.trim()) throw new Error("房主同步数据缺少输出内容");
-    const appId = parseInviteWork(this.work.suffix, this.origin).id;
-    const gameUrl = this.workGameUrl();
-    const syncKey = `${this.room?.id || "room"}:${Number(result.round)}`;
-    const preparedTurn = this.guestPreparedTurns?.get(syncKey);
-    const validConversationId = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
-    const preparedConversationId = [preparedTurn?.conversationId, this.room?.save?.conversationId, this.conversation.activeId]
-      .map(value => String(value || "").trim())
-      .find(validConversationId) || null;
-    if (!preparedConversationId) throw new Error("房主结果已到达，但访客端没有可编辑的本轮会话锚点");
-
-    const normalize = value => String(value ?? "").replace(/\r\n?/g, "\n").trimEnd();
-    const readRecords = payload => {
-      const arrays = [];
-      const queue = [{ value: payload, depth: 0 }];
-      const visited = new Set();
-      while (queue.length && visited.size < 120) {
-        const { value, depth } = queue.shift();
-        if (!value || typeof value !== "object" || visited.has(value)) continue;
-        visited.add(value);
-        if (Array.isArray(value)) {
-          arrays.push(value);
-          continue;
-        }
-        if (depth < 5) for (const child of Object.values(value)) queue.push({ value: child, depth: depth + 1 });
-      }
-      return arrays.sort((left, right) => {
-        const score = records => records.reduce((total, record) => total + (typeof record?.query === "string" ? 1 : 0), 0);
-        return score(right) - score(left) || right.length - left.length;
-      })[0] || [];
-    };
-
-    // round-result may only edit the record created by round-input. Confirm the
-    // exact host input on the platform before touching any AI answer node.
-    let preparedRecordFound = false;
-    let preparationDetail = "平台尚未返回 round-input 建立的访客记录";
-    for (let attempt = 1; attempt <= 8 && !preparedRecordFound; attempt += 1) {
-      try {
-        const payload = await this.platformChatApi(`/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(preparedConversationId)}&limit=12&page=1&paging_query_sort=desc`, { timeout: 4000 });
-        const records = readRecords(payload);
-        preparedRecordFound = records.some(message => (!preparedTurn?.messageId || message.id === preparedTurn.messageId) && normalize(message?.query) === normalize(result.input));
-        if (!preparedRecordFound && records.length) preparationDetail = "当前访客会话中找不到房主发送的本轮输入";
-        this.appendSessionLog("guest-sync", { event: "prepared-input-verification", round: result.round, retryAttempt, attempt, conversationId: preparedConversationId, verified: preparedRecordFound });
-      } catch (error) {
-        preparationDetail = `读取访客本轮输入失败：${error?.message || String(error)}`;
-        this.appendSessionLog("guest-sync", { event: "prepared-input-verification", round: result.round, retryAttempt, attempt, conversationId: preparedConversationId, verified: false, error: error?.message || String(error) });
-      }
-      if (!preparedRecordFound && attempt < 8) await new Promise(resolve => setTimeout(resolve, 350));
+    if (!this.work?.url) throw new Error('成员端尚未载入游玩作品');
+    if (typeof result?.input !== 'string' || !result.input.trim()) throw new Error('房主同步数据缺少输入内容');
+    if (typeof result?.output !== 'string' || !result.output.trim()) throw new Error('房主同步数据缺少输出内容');
+    const appId = this.currentWorkAppId();
+    const room = this.room, work = this.work, revision = this.authSessionRevision;
+    const check = () => { if (room !== this.room || work !== this.work || revision !== this.authSessionRevision) throw abortError(); };
+    const syncKey = `${room?.id || 'room'}:${Number(result.round)}`;
+    this.guestPreparedTurns ||= new Map();
+    const state = this.guestPreparedTurns.get(syncKey);
+    if (state?.identityMismatch || (state?.appId && (state.appId !== appId || state.revision !== revision))) throw new Error('本轮访客锚点与当前作品不一致');
+    if (state?.sent && !state.ended && !(state.stopAcknowledged && state.streamClosed)) throw new Error('访客请求尚未确认结束，正在等待服务端终止确认');
+    const conversationId = String(state?.conversationId || room?.save?.conversationId || this.conversation.activeId || '').trim();
+    if (!conversationId) throw new Error('房主结果已到达，但访客端尚未取得本轮会话编号');
+    let record;
+    for (let attempt = 0; attempt < 8 && !record; attempt++) {
+      check();
+      // A prepared ID and timestamp support independent Go detail readback.
+      const records = state?.messageId
+        ? [await this.readPlatformMessage(appId, conversationId, state.messageId, state.createdAt)].filter(Boolean)
+        : await this.readPlatformMessages(appId, conversationId);
+      // Legacy recovery may use only the latest record, never an older duplicate query.
+      const candidates = state?.messageId ? records : [latestMessageRecord(records)].filter(Boolean);
+      record = findPreparedMessage(candidates, { query: result.input, messageId: state?.messageId });
+      if (!record && attempt < 7) await new Promise(resolve => setTimeout(resolve, 350));
     }
-    if (!preparedRecordFound) throw new Error(`${preparationDetail}；为避免重复消息，round-result 不会再次发送输入`);
-
-    // Discard queued frontend stream updates before opening the editor. Only the
-    // verified stopped request's existing conversation is reloaded, never sent.
-    await this.setPlatformConversationId(preparedConversationId);
-    await this.clearGameIsolation();
-    this.appendSessionLog("guest-sync", { event: "edit-only-started", round: result.round, retryAttempt, syncKey, conversationId: preparedConversationId, output: result.output });
-    let editOutcome;
-    try {
-      editOutcome = await this.gameSurface.webContents.executeJavaScript(`(async () => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
-        const expectedInput = ${JSON.stringify(result.input)};
-        // HTML textarea values normalize CRLF/CR to LF. Compare the same value
-        // the native editor can retain rather than reporting two missing bytes.
-        const expectedOutput = ${JSON.stringify(result.output.replace(/\r\n?/g, "\n"))};
-        const preparedConversationId = ${JSON.stringify(preparedConversationId)};
-        const syncKey = ${JSON.stringify(syncKey)};
-        window.__fympRoundSyncStates ||= Object.create(null);
-        const roundState = window.__fympRoundSyncStates[syncKey] ||= {
-          sent:true,stopped:true,saved:false,beforeAnswers:null,beforeQuestions:null,answerNode:null
-        };
-        window.__fympSyncTrace = [];
-        const mark = (stage,detail={}) => window.__fympSyncTrace.push({time:new Date().toISOString(),stage,...detail});
-        const isOpenDialog = dialog => {
-          if (!dialog || dialog.getAttribute('data-state') === 'closed' || dialog.getAttribute('aria-hidden') === 'true') return false;
-          const style = getComputedStyle(dialog);
-          const rect = dialog.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        for (let attempt = 0; attempt < 100 && !document.querySelector('#ai-chat-input'); attempt += 1) await sleep(100);
-        if (!document.querySelector('#ai-chat-input')) throw new Error('成员端常驻作品页没有出现平台输入栈');
-        const answers = [...document.querySelectorAll('#ai-chat-answer')];
-        const preparedIndex = Number.isInteger(roundState.beforeAnswers) ? roundState.beforeAnswers : -1;
-        let answer = roundState.answerNode?.isConnected ? roundState.answerNode : null;
-        if (!answer && preparedIndex >= 0 && answers[preparedIndex]) answer = answers[preparedIndex];
-        if (!answer) answer = answers.at(-1) || null;
-        if (!answer?.querySelector('#customized-edit-button')) throw new Error('找不到 round-input 留下的可编辑空回复');
-        roundState.sent = true;
-        roundState.stopped = true;
-        roundState.answerNode = answer;
-        roundState.conversationId = preparedConversationId;
-        roundState.expectedInput = expectedInput;
-        mark('prepared-answer-located',{preparedIndex,answerCount:answers.length,recoveredAfterReload:preparedIndex < 0});
-        if (roundState.saved) {
-          mark('saved-edit-reused');
-          return {saved:true,reused:true,conversationId:preparedConversationId,trace:window.__fympSyncTrace};
-        }
-
-        let dialog = [...document.querySelectorAll('[role="dialog"]')].filter(isOpenDialog).find(item => item.querySelector('textarea')) || null;
-        let editor = dialog?.querySelector('textarea') || null;
-        if (!editor) {
-          HTMLElement.prototype.click.call(answer.querySelector('#customized-edit-button'));
-          for (let attempt = 0; attempt < 160; attempt += 1) {
-            dialog = [...document.querySelectorAll('[role="dialog"]')].filter(isOpenDialog).find(item => item.querySelector('textarea')) || null;
-            editor = dialog?.querySelector('textarea') || null;
-            if (editor) break;
-            await sleep(40);
-          }
-        }
-        if (!dialog || !editor) throw new Error('成员端无法打开本轮空回复的编辑框');
-        mark('edit-dialog-opened');
-        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-        const write = () => {
-          const previous = String(editor.value || '');
-          editor.focus();
-          setter?.call(editor,expectedOutput);
-          try { editor._valueTracker?.setValue(previous); } catch {}
-          editor.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:null}));
-          editor.dispatchEvent(new Event('change',{bubbles:true}));
-        };
-        let stable = false;
-        for (let attempt = 0; attempt < 5 && !stable; attempt += 1) {
-          write();
-          await sleep(180 + attempt * 100);
-          if (editor.value === expectedOutput) {
-            await sleep(140);
-            stable = editor.value === expectedOutput;
-          }
-        }
-        if (!stable) {
-          try {
-            editor.focus();
-            editor.select();
-            document.execCommand('insertText',false,expectedOutput);
-            await sleep(300);
-            stable = editor.value === expectedOutput;
-          } catch {}
-        }
-        if (!stable) throw new Error('成员端编辑框没有完整写入房主输出（期望 ' + expectedOutput.length + ' 字，实际 ' + String(editor.value || '').length + ' 字）');
-        mark('host-output-filled');
-        let save = null;
-        for (let attempt = 0; attempt < 60; attempt += 1) {
-          save = [...dialog.querySelectorAll('button')].find(button => /^(保存|Save)$/i.test((button.textContent || '').trim()) && !button.disabled) || null;
-          if (save) break;
-          await sleep(25);
-        }
-        if (!save) throw new Error('成员端找不到保存回复按钮');
-        HTMLElement.prototype.click.call(save);
-        mark('save-clicked');
-        for (let attempt = 0; attempt < 240; attempt += 1) {
-          if (!dialog.isConnected || !isOpenDialog(dialog)) {
-            roundState.saved = true;
-            mark('save-completed');
-            return {saved:true,conversationId:preparedConversationId,trace:window.__fympSyncTrace};
-          }
-          await sleep(50);
-        }
-        throw new Error('成员端保存房主输出超时');
-      })()`, true);
-    } catch (error) {
-      const trace = await this.gameSurface.webContents.executeJavaScript(`window.__fympSyncTrace || []`, true).catch(() => []);
-      this.appendSessionLog("guest-sync-error", { event: "edit-only-failed", round: result.round, retryAttempt, conversationId: preparedConversationId, error: error?.message || String(error), trace });
-      throw error;
-    }
-    if (!editOutcome?.saved) throw new Error("成员端没有通过编辑功能保存房主输出");
-    this.appendSessionLog("guest-sync", { event: "edit-only-completed", round: result.round, retryAttempt, conversationId: preparedConversationId, outcome: editOutcome });
-
-    let verified = false;
-    let verificationDetail = "平台尚未返回同步记录";
-    for (let attempt = 1; attempt <= 12 && !verified; attempt += 1) {
-      try {
-        const payload = await this.platformChatApi(`/installed-apps/${encodeURIComponent(appId)}/messages?conversation_id=${encodeURIComponent(preparedConversationId)}&limit=20&page=1&paging_query_sort=desc`);
-        const records = readRecords(payload);
-        const matched = records.find(message => (!preparedTurn?.messageId || message.id === preparedTurn.messageId) && normalize(message?.query) === normalize(result.input));
-        verified = Boolean(matched && normalize(matched.answer) === normalize(result.output));
-        verificationDetail = matched ? "平台保存的访客输出与房主输出不一致" : "平台保存的访客输入与房主输入不一致";
-        this.appendSessionLog("guest-sync", { event: "server-verification", round: result.round, attempt, conversationId: preparedConversationId, verified, verificationDetail });
-      } catch (error) {
-        verificationDetail = `读取平台同步记录失败：${error?.message || String(error)}`;
-        this.appendSessionLog("guest-sync", { event: "server-verification", round: result.round, attempt, conversationId: preparedConversationId, verified: false, verificationDetail });
-      }
-      if (!verified && attempt < 12) await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    if (!verified) throw new Error(`${verificationDetail}；本轮不会标记为同步完成`);
-
+    if (!record) throw new Error('服务端没有匹配本轮输入的访客记录；结果同步只编辑已有记录');
+    const id = messageId(record);
+    this.guestPreparedTurns.set(syncKey, { ...state, appId, revision, conversationId, messageId: id, createdAt: record.created_at ?? record.createdAt, input: result.input, ended: true });
+    await mutatePlatformMessage((path, options) => { check(); return this.platformChatApi(path, options); },
+      { appId, conversationId, id, action: 'edit', answer: result.output }, { readRecord: () => { check(); return this.readPlatformMessage(appId, conversationId, id, record.created_at ?? record.createdAt); } });
+    check();
+    this.appendSessionLog('guest-sync', { event: 'server-verification', round: result.round, retryAttempt, conversationId, messageId: id, verified: true });
+    // Reload only after authoritative server verification so queued UI updates cannot overwrite the answer.
+    await this.setPlatformConversationId(conversationId);
+    check();
     const refreshed = await this.refreshConversations({ keepSessionKey: true });
-    const activeName = (refreshed.items || []).find(item => String(item.id) === preparedConversationId)?.name || this.room?.save?.name || refreshed.activeName || "新的对话";
-    const sessionKey = refreshed.sessionKey || this.room?.save?.key || this.conversation.sessionKey;
-    this.conversation = {
-      ...refreshed,
-      items: [
-        { id: preparedConversationId, name: activeName, active: true },
-        ...(refreshed.items || []).filter(item => String(item.id) !== preparedConversationId).map(item => ({ ...item, active: false }))
-      ],
-      activeId: preparedConversationId,
-      activeName,
-      sessionKey,
-      anchorRole: "guest",
-      anchored: Boolean(sessionKey),
-      hasChat: true,
-      source: "guest-edit-sync",
-      updatedAt: Date.now()
-    };
-    if (this.room?.save?.key) {
-      this.persistSaveAnchor({ sessionKey: this.room.save.key, conversationId: preparedConversationId, name: activeName, role: "guest" });
-      this.room.save.conversationId = preparedConversationId;
-      this.room.save.name = activeName;
-    }
+    check();
+    const name = (refreshed.items || []).find(item => String(item.id) === conversationId)?.name || room?.save?.name || '新的对话';
+    const sessionKey = room?.save?.key || refreshed.sessionKey || this.conversation.sessionKey;
+    this.conversation = { ...refreshed, activeId: conversationId, activeName: name, sessionKey, anchorRole: 'guest', anchored: Boolean(sessionKey),
+      items: [{ id: conversationId, name, active: true }, ...(refreshed.items || []).filter(item => String(item.id) !== conversationId).map(item => ({ ...item, active: false }))],
+      hasChat: true, source: 'guest-api-sync', updatedAt: Date.now() };
+    if (room?.save) { room.save.conversationId = conversationId; room.save.name = name; }
+    if (sessionKey) this.persistSaveAnchor({ sessionKey, conversationId, name, role: 'guest' });
     const gameReady = await this.applyGameIsolation(true);
-    this.appendSessionLog("guest-sync", { event: "completed", round: result.round, conversationId: preparedConversationId, gameReady });
+    this.appendSessionLog('guest-sync', { event: 'completed', round: result.round, conversationId, messageId: id, gameReady });
     return { conversation: this.conversation, gameReady };
   }
 
@@ -8163,17 +7434,6 @@ class AccountBackend {
             error: error?.message || String(error)
           });
           if (attempt >= attempts) break;
-          const outputMismatch = /输出.*不一致|没有保存房主输出|编辑.*失败|编辑框没有完整写入|保存.*超时/.test(error?.message || "");
-          if (outputMismatch) {
-            const syncKey = `${this.room?.id || "room"}:${Number(result?.round)}`;
-            await this.gameSurface.webContents.executeJavaScript(`(() => {
-              const state = window.__fympRoundSyncStates?.[${JSON.stringify(syncKey)}];
-              if (!state) return false;
-              state.saved = false;
-              return true;
-            })()`, true).catch(() => false);
-            this.appendSessionLog("guest-sync-retry", { event: "edit-state-reset", round: result?.round, attempt });
-          }
           await this.clearGameIsolation().catch(() => {});
           const backoffMs = [900, 1800, 3200][Math.min(attempt - 1, 2)];
           this.emit({ roundSyncRetrying: { attempt: attempt + 1, maxAttempts: attempts, delayMs: backoffMs, error: error?.message || String(error) } });
@@ -9546,8 +8806,8 @@ class AccountBackend {
           background: #10151d !important;
         }
         ` : ""}
-        .chat-container .MuiStack-root.css-1ajg1ui,
-        .chat-container .MuiStack-root.css-1ajg1ui button {
+        #customized-message-answer-actions, #customized-message-question-actions,
+        #customized-message-answer-actions button, #customized-message-question-actions button {
           display: none !important;
           visibility: hidden !important;
           pointer-events: none !important;
@@ -9582,12 +8842,12 @@ class AccountBackend {
     const found = await this.gameSurface.webContents.executeJavaScript(`(async () => {
       const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
       const messageRow = (node,chat) => {
-        const exact = node?.closest?.('.relative.flex.items-start.justify-between.gap-3.py-3.px-3');
+        const exact = node?.closest?.('#customized-answer,#customized-question');
         if (exact && chat.contains(exact)) return exact;
         let current = node;
         while (current?.parentElement && current.parentElement !== chat) {
           const parent = current.parentElement;
-          const peerMessages = parent.querySelectorAll(':scope > * #customized-question-content,:scope > * #ai-chat-answer').length;
+          const peerMessages = parent.querySelectorAll(':scope > * #customized-question-content,:scope > * :is(#customized-answer,#ai-chat-answer)').length;
           if (peerMessages > 1) return current;
           current = parent;
         }
@@ -9599,7 +8859,7 @@ class AccountBackend {
         return current;
       };
       const findMessageStage = chat => {
-        const anchors = [...chat.querySelectorAll('#customized-question-content,#ai-chat-answer')];
+        const anchors = [...chat.querySelectorAll('#customized-question-content,:is(#customized-answer,#ai-chat-answer)')];
         const rows = [...new Set(anchors.map(node => messageRow(node,chat)).filter(Boolean))];
         const toolCards = [...chat.querySelectorAll('[data-fymp-prototype-tool],[data-fymp-tool-phase],[data-fymp-tool-state]')];
         const targets = [...new Set([...rows,...toolCards])];
@@ -9659,7 +8919,7 @@ class AccountBackend {
         }
         const located = findMessageStage(chat);
         const questionCount = located.anchors.filter(node => node.id === 'customized-question-content').length;
-        const answerCount = located.anchors.filter(node => node.id === 'ai-chat-answer').length;
+        const answerCount = located.anchors.filter(node => ['customized-answer', 'ai-chat-answer'].includes(node.id)).length;
         if (!located.stage) {
           document.documentElement.dataset.fySurface = 'game';
           document.documentElement.dataset.fympMessageStageState = 'empty';
@@ -9774,10 +9034,10 @@ class AccountBackend {
       window.__fympToolCards?.clear?.();
       document.querySelectorAll('[data-fymp-prototype-tool]').forEach(node => node.remove());
       const questions = [...chat.querySelectorAll('#customized-question-content')];
-      const answers = [...chat.querySelectorAll('#ai-chat-answer')];
+      const answers = [...chat.querySelectorAll(':is(#customized-answer,#ai-chat-answer)')];
       const question = questions.at(-1);
       if (!question) return {inserted:false,reason:'missing-question'};
-      const messageRow = node => node?.closest('.relative.flex.items-start.justify-between.gap-3.py-3.px-3') || node?.parentElement || node;
+      const messageRow = node => node?.closest('#customized-answer,#customized-question') || node?.parentElement || node;
       const questionRow = messageRow(question);
       const answerRow = messageRow(answers.at(-1));
       if (!questionRow?.parentElement) return {inserted:false,reason:'missing-anchor'};
@@ -9820,7 +9080,7 @@ class AccountBackend {
         if (!currentChat) return false;
         const currentQuestion = [...currentChat.querySelectorAll('#customized-question-content')].at(-1);
         const currentQuestionRow = messageRow(currentQuestion);
-        const currentAnswerRow = messageRow([...currentChat.querySelectorAll('#ai-chat-answer')].at(-1));
+        const currentAnswerRow = messageRow([...currentChat.querySelectorAll(':is(#customized-answer,#ai-chat-answer)')].at(-1));
         if (!currentQuestionRow?.parentElement) return false;
         if (
           currentAnswerRow?.parentElement === currentQuestionRow.parentElement &&
@@ -9867,12 +9127,12 @@ class AccountBackend {
       const normalize = value => String(value || '').replace(/\\r\\n/g,'\\n').replace(/[\\u200b-\\u200d\\ufeff]/g,'').trim();
       const compact = value => normalize(value).replace(/\\s+/g,'');
       const messageRow = (node,chat) => {
-        const exact = node?.closest?.('.relative.flex.items-start.justify-between.gap-3.py-3.px-3');
+        const exact = node?.closest?.('#customized-answer,#customized-question');
         if (exact && chat?.contains(exact)) return exact;
         let current = node;
         while (current?.parentElement && current.parentElement !== chat) {
           const parent = current.parentElement;
-          const peerMessages = parent.querySelectorAll(':scope > * #customized-question-content,:scope > * #ai-chat-answer').length;
+          const peerMessages = parent.querySelectorAll(':scope > * #customized-question-content,:scope > * :is(#customized-answer,#ai-chat-answer)').length;
           if (peerMessages > 1) return current;
           current = parent;
         }
@@ -9968,7 +9228,7 @@ class AccountBackend {
         } else {
           article.append(text('p','generic','该输入处理插件已完成，本轮将使用处理后的玩家输入。'));
         }
-        if (run.pluginId === ${JSON.stringify(PERSPECTIVE_PLUGIN_ID)} && run.attemptCount) article.append(text('p','generic','本次尝试 ' + run.attemptCount + '/' + run.maxAttempts + ' 次。'));
+        if (run.pluginId === ${JSON.stringify(PERSPECTIVE_PLUGIN_ID)} && run.attemptCount) article.append(text('p','generic','本次尝试 ' + run.attemptCount + (run.maxAttempts ? '/' + run.maxAttempts : '') + ' 次。'));
         article.append(text('footer','',(run.pointsIncomplete ? '已读取 ' : '消耗 ') + (run.points?.total ?? 0) + ' 积分' + (run.pointsIncomplete ? '，部分尝试的消耗未能读取' : '')));
         shadow.append(style,article);
         return {key,host,round,input:expectedInput,phase:run.phase,order:Number(run.order || 0),pluginId:String(run.pluginId || '')};
@@ -9998,10 +9258,10 @@ class AccountBackend {
           let anchorRow = questionRow;
           if (entries[0].phase === 'output') {
             let sibling = questionRow.nextElementSibling;
-            anchorRow = questionRow.querySelector('#ai-chat-answer') ? questionRow : null;
+            anchorRow = questionRow.querySelector(':is(#customized-answer,#ai-chat-answer)') ? questionRow : null;
             while (!anchorRow && sibling) {
               if (sibling.querySelector('#customized-question-content')) break;
-              if (sibling.matches('#ai-chat-answer') || sibling.querySelector('#ai-chat-answer')) anchorRow = sibling;
+              if (sibling.matches(':is(#customized-answer,#ai-chat-answer)') || sibling.querySelector(':is(#customized-answer,#ai-chat-answer)')) anchorRow = sibling;
               sibling = sibling.nextElementSibling;
             }
             if (!anchorRow) continue;

@@ -809,6 +809,57 @@ describe("online world platform service", () => {
     expect(coreConfigDifference(exported, expected)).toEqual([]);
   });
 
+  it("normalizes prompt-sort defaults and aliases while preserving nonzero mismatch detection", () => {
+    const defaultExpected = { pre_prompt_sort: 0 };
+    expect(coreConfigDifference({}, defaultExpected, { metadata: true })).toEqual([]);
+    expect(coreConfigDifference({ pre_prompt_sort: null }, defaultExpected, { metadata: true })).toEqual([]);
+    expect(coreConfigDifference({ pre_prompt_sort: "" }, defaultExpected, { metadata: true })).toEqual([]);
+    expect(coreConfigDifference({ prompt_sort: "0" }, defaultExpected, { metadata: true })).toEqual([]);
+    expect(coreConfigDifference({ prompt_sort: "2" }, { pre_prompt_sort: 2 }, { metadata: true })).toEqual([]);
+    expect(coreConfigDifference({}, { pre_prompt_sort: 2 }, { metadata: true })).toContain("promptSort");
+
+    const payload = modelConfigSavePayload(
+      { prompt_sort: 2, app: { name: "测试", description: "program" } },
+      "new-work-id",
+      "测试",
+      "program",
+      { provider: "fixture", name: "fixture-model" },
+      { preserveExtras: true }
+    );
+    expect(payload.pre_prompt_sort).toBe(2);
+  });
+
+  it("accepts a new work readback that omits the default prompt sort", async () => {
+    const card = createBundledGridCard();
+    const endpoints: string[] = [];
+    let saved: any = null;
+    const instance = service({
+      getAccount: () => ({ accountId: card.companion.authorAccountId }),
+      requestConsole: async (endpoint: string, options: any = {}) => {
+        endpoints.push(`${options.method || "GET"} ${endpoint}`);
+        if (endpoint === "/apps" && options.method === "POST") return { id: "new-work-123" };
+        if (endpoint === "/apps/new-work-123/model-config" && options.method === "POST") {
+          saved = options.body;
+          return { ok: true };
+        }
+        if (endpoint === "/apps/new-work-123/model-config/export") {
+          const { pre_prompt_sort: _omittedDefault, ...exported } = saved;
+          return { data: exported };
+        }
+        throw new Error(`unexpected ${endpoint}`);
+      }
+    });
+
+    const created = await instance.createGameCardCloud(card, { name: "新作品" });
+    expect(saved.pre_prompt_sort).toBe(0);
+    expect(created.companion.workId).toBe("new-work-123");
+    expect(endpoints).toEqual([
+      "POST /apps",
+      "POST /apps/new-work-123/model-config",
+      "GET /apps/new-work-123/model-config/export"
+    ]);
+  });
+
   it("synchronizes legacy configuration aliases so an editor save cannot restore an old program", () => {
     const payload = modelConfigSavePayload({
       desc: "旧程序",

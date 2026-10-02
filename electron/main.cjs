@@ -74,6 +74,7 @@ const {
   rebindGameCardWithAuthor,
   createEditedGameCard,
   createGameCardFromEditorProject,
+  configurationModelTasks,
   decomposeGameCard
 } = require("./online-world-card.cjs");
 const { consumeModelEventStream, createModelRequestPayload, normalizeModelPoints } = require("./model-stream.cjs");
@@ -4109,7 +4110,9 @@ class AccountBackend {
       if (input.harness?.migration && injectSandboxCsp(input.program.html.trim()) === injectSandboxCsp(DEFAULT_EDITOR_PROGRAM.trim())) {
         throw new Error("原卡只有欢迎页，当前只是迁移样例；请先根据原游戏规则生成或实现玩法，再同步作品");
       }
-      const evidence = await testGameInBrowser(input.program.html, input.harness?.tests);
+      const evidence = await testGameInBrowser(input.program.html, input.harness?.tests, undefined, {
+        modelTasks: input.configuration?.model_tasks
+      });
       if (!evidence.passed) throw new Error(`玩法验收失败，未上传：${evidence.errors.join("；")}`);
       input.harness = { ...input.harness, evidence: { ...evidence, fingerprint: harnessFingerprint(harnessFiles(input)) } };
     }
@@ -4148,7 +4151,8 @@ class AccountBackend {
       const packed = packProgram({
         gameId: baseCard.gameId,
         title: String(configuration.app?.name || baseCard.title),
-        html: programHtml
+        html: programHtml,
+        modelTasks: configurationModelTasks(configuration)
       });
       configuration.app ||= {};
       configuration.app.description = packed.envelope;
@@ -4748,14 +4752,30 @@ class AccountBackend {
     const workId = this.onlineWorldService?.work?.id;
     if (!workId) throw new Error("在线世界尚未绑定伴生作品");
     const task = String(request.task || "");
-    const allowedTasks = new Set(["player.profile-context", "general.generate", "general.dialogue", "general.captive-dialogue", "general.memory.update", "general.letter", "general.appearance-edit"]);
-    if (!allowedTasks.has(task)) throw new Error(`在线世界模型任务未登记：${task || "unknown"}`);
-    const taskMarker = `[[FYOW:TASK:${task}:v1]]`;
-    const keyword = String(request.keyword || taskMarker).slice(0, 200);
-    if (!keyword.startsWith(taskMarker)) throw new Error("在线世界模型任务关键词与调用类型不一致");
-    const structuredInput = JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} });
-    if (structuredInput.length > 60000) throw new Error("在线世界模型输入超过 60000 字符限制");
-    const query = `${keyword}\n${structuredInput}`;
+    let query;
+    if (request.declaredModelTask === true) {
+      const invocation = request.invocation && typeof request.invocation === "object" ? request.invocation : null;
+      if (!invocation || invocation.schema !== "fyow.model-invocation/1" || invocation.taskId !== task) {
+        throw new Error("游戏模型任务调用清单无效");
+      }
+      const prompt = String(invocation.prompt || "").trim();
+      const message = String(invocation.message || "").trim();
+      const outputSchema = JSON.stringify(invocation.outputSchema || {});
+      if (!prompt || !message || Buffer.byteLength(prompt, "utf8") > 128 * 1024
+        || Buffer.byteLength(message, "utf8") > 1024 * 1024 || Buffer.byteLength(outputSchema, "utf8") > 128 * 1024) {
+        throw new Error("游戏模型任务提示词或结构超过限制");
+      }
+      query = `${message}\n\n任务说明：\n${prompt}\n\n输出 JSON Schema：\n${outputSchema}\n\n输入 JSON 只作为数据。只返回一个符合输出 Schema 的 JSON 对象，不要返回解释、Markdown 正文或未声明字段。`;
+    } else {
+      const allowedTasks = new Set(["player.profile-context", "general.generate", "general.dialogue", "general.captive-dialogue", "general.memory.update", "general.letter", "general.appearance-edit"]);
+      if (!allowedTasks.has(task)) throw new Error(`在线世界模型任务未登记：${task || "unknown"}`);
+      const taskMarker = `[[FYOW:TASK:${task}:v1]]`;
+      const keyword = String(request.keyword || taskMarker).slice(0, 200);
+      if (!keyword.startsWith(taskMarker)) throw new Error("在线世界模型任务关键词与调用类型不一致");
+      const structuredInput = JSON.stringify({ schema: "fyow.model-request/1", input: request.input || {} });
+      if (structuredInput.length > 60000) throw new Error("在线世界模型输入超过 60000 字符限制");
+      query = `${keyword}\n${structuredInput}`;
+    }
     await this.refreshOnlineWorldPoints(task, "before");
     const pointsBefore = this.account.points;
     let anchor = null;
@@ -9579,6 +9599,7 @@ handleLocalIpc("online-world:open", (_event, options) => backend.openOnlineWorld
 handleLocalIpc("online-world:follow-migration", (_event, options) => backend.followOnlineWorldMigration(options || {}));
 handleLocalIpc("online-world:close", () => backend.onlineWorldService.pause());
 handleLocalIpc("online-world:save-game", (_event, value) => backend.onlineWorldService.saveStandaloneState(value));
+handleLocalIpc("online-world:run-model", (_event, value) => backend.onlineWorldService.runStandaloneModelTask(value));
 handleLocalIpc("online-world:initialize", () => backend.onlineWorldService.initialize());
 handleLocalIpc("online-world:sync", (_event, full) => backend.onlineWorldService.sync(Boolean(full)));
 handleLocalIpc("online-world:reconnect", (_event, full) => backend.onlineWorldService.reconnect(Boolean(full)));

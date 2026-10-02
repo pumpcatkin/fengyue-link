@@ -49,6 +49,33 @@ describe("online world model event stream", () => {
     });
   });
 
+  it("preserves point usage observed before a stream error or premature close", async () => {
+    const errorStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"event":"message","answer":"部分","metadata":{"usage":{"input_points":2,"output_points":3,"total_points":5}}}\n\ndata: {"event":"error","message":"平台中断"}\n\n'));
+      }
+    });
+    let streamError: any;
+    try { await consumeModelEventStream(errorStream); } catch (error) { streamError = error; }
+    expect(streamError).toMatchObject({
+      message: "平台中断",
+      points: { input: 2, output: 3, total: 5, source: "model-response" }
+    });
+
+    const closedStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"event":"message","answer":"半截","usage":{"input_points":4,"output_points":1,"total_points":5}}\n\n'));
+        controller.close();
+      }
+    });
+    let closeError: any;
+    try { await consumeModelEventStream(closedStream); } catch (error) { closeError = error; }
+    expect(closeError).toMatchObject({
+      message: expect.stringMatching(/完成标记前提前结束/),
+      points: { input: 4, output: 1, total: 5, source: "model-response" }
+    });
+  });
+
   it("supports replacement output and workflow completion", async () => {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {

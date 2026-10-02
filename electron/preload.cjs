@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("fengyueBackend", {
   followOnlineWorldMigration: options => ipcRenderer.invoke("online-world:follow-migration", options),
   closeOnlineWorld: () => ipcRenderer.invoke("online-world:close"),
   saveStandaloneGame: value => ipcRenderer.invoke("online-world:save-game", value),
+  runStandaloneModel: value => ipcRenderer.invoke("online-world:run-model", value),
   initializeOnlineWorld: () => ipcRenderer.invoke("online-world:initialize"),
   syncOnlineWorld: full => ipcRenderer.invoke("online-world:sync", full),
   reconnectOnlineWorld: full => ipcRenderer.invoke("online-world:reconnect", full),

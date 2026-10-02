@@ -105,6 +105,13 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {}, allow
   let finished = false;
   let finishEvent = null;
 
+  const includeObservedUsage = error => {
+    if (!error || typeof error !== "object") return error;
+    if (usage != null && error.usage == null) error.usage = usage;
+    if (points != null && error.points == null) error.points = points;
+    return error;
+  };
+
   const acceptBlock = block => {
     const payloadText = String(block || "")
       .split("\n")
@@ -122,19 +129,19 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {}, allow
     let data;
     try { data = JSON.parse(payloadText); } catch { throw modelStreamError("模型数据流包含无效事件"); }
     const event = String(data?.event || data?.type || "");
-    if (event === "error") throw modelStreamError(data?.message || data?.error || "模型流返回错误", true);
     taskId ||= data?.task_id || data?.taskId || null;
     messageId ||= data?.message_id || data?.messageId || (/^(message|agent_message|message_end|message_replace)$/.test(event) ? data?.id : null) || null;
     conversationId ||= data?.conversation_id || data?.conversationId || null;
+    const eventUsage = data?.metadata?.usage || data?.usage || data?.data?.usage || null;
+    usage = eventUsage || usage;
+    points = normalizeModelPoints(eventUsage) || normalizeModelPoints(data?.metadata) || points;
+    if (event === "error") throw includeObservedUsage(modelStreamError(data?.message || data?.error || "模型流返回错误", true));
     onEvent({ event, taskId, messageId, conversationId });
     const text = answerText(data);
     if (text) {
       if (["message_replace", "text_replace"].includes(event)) answer = text;
       else answer += text;
     }
-    const eventUsage = data?.metadata?.usage || data?.usage || data?.data?.usage || null;
-    usage = eventUsage || usage;
-    points = normalizeModelPoints(eventUsage) || normalizeModelPoints(data?.metadata) || points;
     if (["message_end", "workflow_finished"].includes(event)) {
       finished = true;
       finishEvent = event;
@@ -156,6 +163,8 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {}, allow
         break;
       }
     }
+  } catch (error) {
+    throw includeObservedUsage(error);
   } finally {
     void reader.cancel().catch(() => {});
     reader.releaseLock();
@@ -164,8 +173,8 @@ async function consumeModelEventStream(body, { signal, onEvent = () => {}, allow
     finished = true;
     finishEvent = "server_stop";
   }
-  if (!finished) throw modelStreamError("模型响应在完成标记前提前结束");
-  if (!answer.trim() && !allowEmpty) throw modelStreamError("模型完成后没有返回正文");
+  if (!finished) throw includeObservedUsage(modelStreamError("模型响应在完成标记前提前结束"));
+  if (!answer.trim() && !allowEmpty) throw includeObservedUsage(modelStreamError("模型完成后没有返回正文"));
   return { answer: answer.trim(), taskId, messageId, conversationId, usage, points, finishEvent };
 }
 

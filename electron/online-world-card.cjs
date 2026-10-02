@@ -6,6 +6,7 @@ const path = require("node:path");
 const { atomicWriteFileSync, atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { canonicalJson } = require("./online-world-protocol.cjs");
 const { packProgram, parseProgram, injectSandboxCsp, composeSingleFileProgram } = require("./online-world-runtime.cjs");
+const { normalizeModelTasks } = require("./model-task-contract.cjs");
 const { GRID_GAME_ID } = require("./grid-world-game.cjs");
 
 const GAME_CARD_SCHEMA = "fyow.game-card/1";
@@ -157,6 +158,10 @@ function configurationDigest(configuration) {
   return sha256(Buffer.from(canonicalJson(normalizeConfiguration(configuration))));
 }
 
+function configurationModelTasks(configuration) {
+  return normalizeModelTasks(configuration?.model_tasks);
+}
+
 function cardDigest(value) {
   const copy = JSON.parse(JSON.stringify(value || {}));
   delete copy.packageSha256;
@@ -219,6 +224,11 @@ function validateGameCard(value) {
   if (String(companion.configurationSha256 || "") !== configHash) throw new Error("伴生作品配置快照校验失败");
   const parsedProgram = parseProgram(configuration.app.description, String(value.gameId));
   if (!parsedProgram || parsedProgram.digest !== String(value.program?.digest || "")) throw new Error("游戏卡程序与伴生作品详细介绍不一致");
+  const configuredTasks = configurationModelTasks(configuration);
+  const programTasks = normalizeModelTasks(parsedProgram.manifest?.modelTasks);
+  if (configuredTasks.tasks.length && canonicalJson(configuredTasks) !== canonicalJson(programTasks)) {
+    throw new Error("游戏卡配置中的模型任务与程序包声明不一致");
+  }
   if (Number(value.program?.apiVersion) !== 1) throw new Error("游戏卡宿主接口版本不受支持");
   if (String(value.packageSha256 || "") !== cardDigest(value)) throw new Error("游戏卡整包校验失败");
   return {
@@ -294,7 +304,8 @@ function createEditedGameCard(card, patch = {}, exportedAt = new Date().toISOStr
     const packed = packProgram({
       gameId: base.gameId,
       title: String(configuration.app?.name || base.title),
-      html: programHtml
+      html: programHtml,
+      modelTasks: configurationModelTasks(configuration)
     });
     configuration.app.description = packed.envelope;
   }
@@ -353,7 +364,8 @@ function createGameCardFromEditorProject(project = {}, { origin, authorAccountId
   const packed = packProgram({
     gameId,
     title: String(configuration.app?.name || sourceCard.title || "在线游戏世界"),
-    html
+    html,
+    modelTasks: configurationModelTasks(configuration)
   });
   configuration.app.description = packed.envelope;
   return finalizeGameCard({
@@ -382,6 +394,9 @@ function decomposeGameCard(card) {
   const normalized = validateGameCard(card);
   const configuration = JSON.parse(JSON.stringify(normalized.companion.configuration));
   const program = parseProgram(configuration.app.description, normalized.gameId);
+  if (!configurationModelTasks(configuration).tasks.length && program.manifest?.modelTasks?.tasks?.length) {
+    configuration.model_tasks = normalizeModelTasks(program.manifest.modelTasks);
+  }
   const editor = configuration.fengyue_editor && typeof configuration.fengyue_editor === "object"
     ? JSON.parse(JSON.stringify(configuration.fengyue_editor))
     : {};
@@ -684,6 +699,7 @@ module.exports = {
   builtInGridProgram,
   normalizeProgramText,
   normalizeConfiguration,
+  configurationModelTasks,
   configurationDigest,
   cardDigest,
   createBundledGridCard,

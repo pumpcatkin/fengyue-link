@@ -10,7 +10,7 @@
 <div id="status">等待宿主连接</div><p id="progress">进度 0 / 3</p><p id="health">体力 4</p><p id="log">选择行动开始探索。</p>
 <div class="controls"><button id="advance" disabled>稳步探索</button><button id="risk" disabled>冒险前进</button><button id="restart" disabled>重新开始</button><button id="sync">刷新</button><button id="library">游戏库</button></div><p id="storage">读取本地存档…</p>
 </main><script>
-const SOURCE="fyow-grid-conquest",PROTOCOL="fyow-host/1";
+const SOURCE="fyow-game-card",PROTOCOL="fyow-host/1";
 const fresh=()=>({version:1,step:0,hp:4});let game=fresh(),loaded=false,timer=null,pending=null,revision=0,savedRevision=0,pendingRevision=0,lastSentAt=0,leaving=false,closeRequestId=null;
 const $=id=>document.getElementById(id);
 function send(type,data={}){parent.postMessage({source:SOURCE,protocol:PROTOCOL,type,...data},"*")}

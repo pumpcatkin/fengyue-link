@@ -9,6 +9,7 @@ const {
   MAX_GAME_CARD_FILE_BYTES,
   decomposeGameCard,
   normalizeConfiguration,
+  configurationModelTasks,
   validateGameCard
 } = require("./online-world-card.cjs");
 const { PROGRAM_PREFIX, injectSandboxCsp, parseProgram } = require("./online-world-runtime.cjs");
@@ -145,6 +146,7 @@ function normalizeEditorProject(value, fallbackWorkId = "") {
     configuration[key] = String(configuration[key] ?? "");
   }
   configuration.world_book = Array.isArray(configuration.world_book) ? configuration.world_book : [];
+  if (Object.hasOwn(configuration, "model_tasks")) configuration.model_tasks = configurationModelTasks(configuration);
   project.configuration = configuration;
   const programHtml = String(project.program?.html || "").replace(/\r\n?/g, "\n").trim();
   if (programHtml === LEGACY_DEFAULT_EDITOR_PROGRAM.trim()
@@ -228,7 +230,8 @@ function createBlankEditorProject({ origin = "", accountId = "", title = "未命
       pre_text: "",
       pre_prompt: "",
       post_text: "",
-      world_book: []
+      world_book: [],
+      model_tasks: configurationModelTasks({})
     },
     validation: null,
     harness: { tests: clone(STARTER_TESTS), status: "starter" },
@@ -448,6 +451,7 @@ function normalizeAgentSynthesis(value) {
     if (Object.hasOwn(candidate, key) && String(candidate[key] || "").trim()) patch[key] = String(candidate[key]).slice(0, 12000);
   }
   if (Array.isArray(candidate.world_book) && candidate.world_book.length) patch.world_book = clone(candidate.world_book).slice(0, 200);
+  if (Object.hasOwn(candidate, "model_tasks")) patch.model_tasks = configurationModelTasks(candidate);
   const validation = source.validation && typeof source.validation === "object" ? clone(source.validation) : {};
   const approved = validation.approved !== false && source.approved !== false;
   const hasPatch = Boolean(Object.keys(patch).length);
@@ -471,7 +475,7 @@ function applyAgentSynthesis(project, synthesis) {
     ? synthesis.configurationPatch
     : {};
   configuration.app = { ...(configuration.app || {}), ...(patch.app || {}) };
-  for (const key of ["pre_text", "pre_prompt", "post_text", "world_book"]) {
+  for (const key of ["pre_text", "pre_prompt", "post_text", "world_book", "model_tasks"]) {
     if (Object.hasOwn(patch, key)) configuration[key] = clone(patch[key]);
   }
   next.configuration = configuration;

@@ -6,6 +6,7 @@ const manifest = [
   ["grid-tasks", "electron/online-world-card.cjs", "implemented"],
   ["grid-rules", "electron/grid-world-game.cjs", "implemented"],
   ["grid-protocol", "electron/online-world-protocol.cjs", "implemented"],
+  ["generic-model-runtime", "docs/通用游戏模型任务接口-2026-10-02.md", "implemented"],
   ["game-card-manual", "docs/游戏卡制作经验与接口手册.md", "reference"],
   ["pagination-lessons", "docs/cloud-pagination-diagnosis-0.15.22.md", "historical"],
   ["publication-lessons", "docs/pending-publication-diagnosis-0.15.23.md", "historical"],

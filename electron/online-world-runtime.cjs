@@ -3,12 +3,14 @@
 const crypto = require("node:crypto");
 const zlib = require("node:zlib");
 const { canonicalJson } = require("./online-world-protocol.cjs");
+const { normalizeModelTasks } = require("./model-task-contract.cjs");
 
 const PROGRAM_FORMAT = "fyow.program/1";
 const PROGRAM_PREFIX = "[[FYOW-PROGRAM/1:";
 const PROGRAM_SUFFIX = "]]";
 const MAX_COMPRESSED_BYTES = 256 * 1024;
 const MAX_HTML_BYTES = 1024 * 1024;
+const MAX_MANIFEST_BYTES = MAX_HTML_BYTES + 1024 * 1024 + 128 * 1024;
 const PROGRAM_NONCE = "fyow-game-v1";
 const SANDBOX_CSP = `default-src 'none'; img-src data: blob:; media-src data: blob:; style-src 'nonce-${PROGRAM_NONCE}'; script-src 'nonce-${PROGRAM_NONCE}'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`;
 
@@ -16,11 +18,17 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function packProgram({ gameId, title, html, apiVersion = 1 }) {
+function packProgram({ gameId, title, html, apiVersion = 1, modelTasks = null }) {
   const source = String(html || "");
   if (!source.trim()) throw new Error("游戏程序缺少 HTML 入口");
   if (Buffer.byteLength(source, "utf8") > MAX_HTML_BYTES) throw new Error("游戏程序解压后超过 1 MiB");
   const manifest = { format: PROGRAM_FORMAT, gameId: String(gameId), title: String(title || gameId).slice(0, 80), apiVersion: Number(apiVersion), html: source };
+  const tasks = normalizeModelTasks(modelTasks);
+  if (tasks.tasks.length) {
+    manifest.capabilities = ["model-run/1"];
+    manifest.modelTasks = tasks;
+  }
+  if (Buffer.byteLength(canonicalJson(manifest), "utf8") > MAX_MANIFEST_BYTES) throw new Error("游戏程序清单超过大小限制");
   const compressed = zlib.gzipSync(Buffer.from(canonicalJson(manifest), "utf8"), { level: 9, mtime: 0 });
   if (compressed.length > MAX_COMPRESSED_BYTES) throw new Error("游戏程序压缩后超过 256 KiB");
   const digest = sha256(compressed);
@@ -58,14 +66,26 @@ function parseProgram(description, expectedGameId = null) {
   if (digest !== match[1].toLowerCase()) throw new Error("作品详细介绍中的程序包摘要不一致");
   let manifest;
   try {
-    manifest = JSON.parse(zlib.gunzipSync(compressed, { maxOutputLength: MAX_HTML_BYTES + 64 * 1024 }).toString("utf8"));
+    manifest = JSON.parse(zlib.gunzipSync(compressed, { maxOutputLength: MAX_MANIFEST_BYTES }).toString("utf8"));
   } catch (error) {
     throw new Error(`作品详细介绍中的程序包损坏：${error?.message || error}`);
   }
   if (manifest?.format !== PROGRAM_FORMAT || Number(manifest?.apiVersion) !== 1) throw new Error("游戏程序包格式或宿主 API 版本不受支持");
   if (!manifest.gameId || (expectedGameId && manifest.gameId !== expectedGameId)) throw new Error("游戏程序包与当前游戏类型不匹配");
   if (typeof manifest.html !== "string" || !manifest.html.trim() || Buffer.byteLength(manifest.html, "utf8") > MAX_HTML_BYTES) throw new Error("游戏程序包入口无效");
+  const capabilities = Array.isArray(manifest.capabilities) ? [...new Set(manifest.capabilities.map(String))] : [];
+  const modelTasks = normalizeModelTasks(manifest.modelTasks);
+  if (modelTasks.tasks.length && !capabilities.includes("model-run/1")) throw new Error("游戏程序模型任务缺少 model-run/1 能力声明");
+  if (capabilities.includes("model-run/1") && !modelTasks.tasks.length) throw new Error("游戏程序声明了 model-run/1，但没有登记模型任务");
+  if (capabilities.some(item => item !== "model-run/1")) throw new Error("游戏程序包含不受支持的能力声明");
+  if (modelTasks.tasks.length) {
+    manifest.capabilities = capabilities;
+    manifest.modelTasks = modelTasks;
+  } else {
+    delete manifest.capabilities;
+    delete manifest.modelTasks;
+  }
   return { manifest: { ...manifest, html: undefined }, digest, html: injectSandboxCsp(manifest.html), compressedBytes: compressed.length, source: "work-description" };
 }
 
-module.exports = { PROGRAM_FORMAT, PROGRAM_PREFIX, PROGRAM_SUFFIX, PROGRAM_NONCE, MAX_COMPRESSED_BYTES, MAX_HTML_BYTES, SANDBOX_CSP, packProgram, parseProgram, injectSandboxCsp, composeSingleFileProgram };
+module.exports = { PROGRAM_FORMAT, PROGRAM_PREFIX, PROGRAM_SUFFIX, PROGRAM_NONCE, MAX_COMPRESSED_BYTES, MAX_HTML_BYTES, MAX_MANIFEST_BYTES, SANDBOX_CSP, packProgram, parseProgram, injectSandboxCsp, composeSingleFileProgram };

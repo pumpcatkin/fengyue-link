@@ -240,6 +240,8 @@ let gameInputQueue = Promise.resolve();
 let activeModelFamily = "all";
 const ONLINE_WORLD_COVER_MARKS = ["征","舟","田","夜","机","棋","驿","月","岛","云"];
 const ONLINE_WORLD_HOST_PROTOCOL = "fyow-host/1";
+const GENERIC_GAME_SOURCE = "fyow-game-card";
+const GENERIC_MODEL_PROTOCOL = "fyow-host/2";
 const ONLINE_WORLD_HOST_MESSAGE_LIMIT = 128 * 1024;
 const ONLINE_WORLD_SOUND_VOLUME_KEY = "fyow:grid-sound-volume";
 let pendingModelChangeKey = null;
@@ -2100,7 +2102,36 @@ document.querySelector("#online-world-open-form").addEventListener("submit",asyn
   finally{onlineWorldOpening=false;button.textContent="开始游戏";renderOnlineWorldProfileChoices()}
 });
 window.addEventListener("message",async event=>{
-  if(event.source!==onlineWorldFrame.contentWindow||event.data?.source!=="fyow-grid-conquest"||event.data?.protocol!==ONLINE_WORLD_HOST_PROTOCOL)return;
+  if(event.source===onlineWorldFrame.contentWindow&&event.data?.source===GENERIC_GAME_SOURCE&&event.data?.protocol===GENERIC_MODEL_PROTOCOL){
+    let messageSize=0;
+    try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
+    const requestId=onlineWorldRequestId(event.data);
+    const reply=message=>onlineWorldFrame.contentWindow?.postMessage({source:"fengyue-host",protocol:GENERIC_MODEL_PROTOCOL,requestId,...message},"*");
+    if(messageSize>ONLINE_WORLD_HOST_MESSAGE_LIMIT){if(requestId)reply({kind:"result",ok:false,error:{message:"游戏请求内容过长",errorCode:"MODEL_REQUEST_TOO_LARGE",retryable:false}});return}
+    if(!requestId||event.data.kind!=="request"||event.data.method!=="model.run"){if(requestId)reply({kind:"result",ok:false,error:{message:"未知游戏模型请求",errorCode:"MODEL_REQUEST_INVALID",retryable:false}});return}
+    if(onlineWorldInLibrary||onlineWorldState?.runtime!=="standalone/1"){
+      reply({kind:"result",ok:false,error:{message:"当前游戏未开放通用模型任务",errorCode:"MODEL_RUNTIME_UNAVAILABLE",retryable:false}});return
+    }
+    const params=event.data.params&&typeof event.data.params==="object"&&!Array.isArray(event.data.params)?event.data.params:{};
+    const taskId=String(params.taskId||"");
+    const declaredTask=(onlineWorldState?.modelTasks||[]).find(task=>task.taskId===taskId);
+    if(!declaredTask){reply({kind:"result",ok:false,error:{message:"模型任务未在当前游戏卡中登记",errorCode:"MODEL_TASK_UNKNOWN",retryable:false}});return}
+    try{
+      if(!await confirmAction(`运行模型任务“${taskId||"未命名任务"}”会调用平台模型并消耗积分。完成后将向游戏返回本次输入、输出、总积分和剩余积分。`,{title:"确认模型生成",acceptText:"调用模型"})){
+        reply({kind:"result",ok:false,error:{message:"已取消模型调用",errorCode:"MODEL_CANCELLED",retryable:false}});return
+      }
+      const result=await api.runStandaloneModel({
+        workId:onlineWorldState?.work?.id,
+        gameId:onlineWorldState?.card?.gameId,
+        taskId,
+        input:params.input,
+        idempotencyKey:params.idempotencyKey||requestId
+      });
+      reply({kind:"result",ok:true,result});
+    }catch(error){reply({kind:"result",ok:false,error:{message:error?.userMessage||friendlyError(error),errorCode:error?.errorCode||"MODEL_TASK_FAILED",retryable:Boolean(error?.retryable),operationId:error?.operationId||null,usage:error?.usage||null}})}
+    return;
+  }
+  if(event.source!==onlineWorldFrame.contentWindow||!["fyow-grid-conquest",GENERIC_GAME_SOURCE].includes(event.data?.source)||event.data?.protocol!==ONLINE_WORLD_HOST_PROTOCOL)return;
   let messageSize=0;
   try{messageSize=new TextEncoder().encode(JSON.stringify(event.data)).byteLength}catch{return}
   const requestId=onlineWorldRequestId(event.data);

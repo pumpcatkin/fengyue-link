@@ -1,10 +1,12 @@
 import { createRequire } from "node:module";
+import crypto from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 const require = createRequire(import.meta.url);
-const { runGameHarness, parseDecision, publicHarnessActionArgs, publicHarnessEvent, validateFile, validateTests, fingerprint, projectFiles } = require("../electron/game-harness.cjs");
+const { runGameHarness, parseDecision, publicHarnessActionArgs, publicHarnessEvent, validateFile, validateModelFixtureUsage, validateTests, fingerprint, projectFiles } = require("../electron/game-harness.cjs");
+const { assertModelUsageEvidence } = require("../electron/game-harness-browser.cjs");
 const { createBlankEditorProject } = require("../electron/online-game-editor.cjs");
 const { createGameCardFromEditorProject } = require("../electron/online-world-card.cjs");
 const { injectSandboxCsp } = require("../electron/online-world-runtime.cjs");
@@ -242,6 +244,47 @@ describe("autonomous game harness", () => {
     expect(() => validateTests(tests)).toThrow();
     expect(() => parseDecision('{"tool":"shell","args":{}}')).toThrow();
   });
+  it.each(["input", "output", "total", "source", "remainingPoints"])("requires explicit model fixture usage field %s", field => {
+    const tests = structuredClone(createBlankEditorProject().harness.tests);
+    const usage: Record<string, unknown> = { input: 2, output: 3, total: 5, source: "harness-fixture", remainingPoints: 995 };
+    delete usage[field];
+    tests.modelFixtures = { "story.generate": { output: { text: "测试剧情" }, usage } };
+    expect(() => validateTests(tests)).toThrow(`缺少 ${field}`);
+  });
+  it("rejects invalid model fixture usage and preserves a valid source", () => {
+    const usage = { input: 2, output: 3, total: 5, source: "harness-fixture", remainingPoints: 995 };
+    expect(validateModelFixtureUsage(usage, "story.generate")).toEqual(usage);
+    for (const [field, value] of [["input", "2"], ["output", Number.NaN], ["total", -1], ["remainingPoints", Infinity]] as const) {
+      expect(() => validateModelFixtureUsage({ ...usage, [field]: value }, "story.generate")).toThrow(`usage.${field}`);
+    }
+    expect(() => validateModelFixtureUsage({ ...usage, source: "" }, "story.generate")).toThrow("usage.source");
+  });
+  it("requires each browser model call to expose total usage and remaining points in captured visible text", () => {
+    const modelFixtures = {
+      "story.generate": { usage: { input: 2, output: 3, total: 5, source: "harness-fixture", remainingPoints: 995 } },
+      "npc.reply": { usage: { input: 3, output: 4, total: 7, source: "harness-fixture", remainingPoints: 988 } }
+    };
+    expect(assertModelUsageEvidence({
+      scenarioName: "模型循环",
+      modelFixtures,
+      modelCalls: [{ taskId: "story.generate" }, { taskId: "npc.reply" }],
+      steps: [
+        { modelCallCount: 0, text: "预置数字 5 / 995 不算调用后证据" },
+        { modelCallCount: 1, text: "本次消耗 5 积分，剩余积分 995" },
+        { modelCallCount: 2, text: "回复完成；本次消耗 7，剩余 988" }
+      ]
+    })).toEqual([
+      { taskId: "story.generate", call: 1, step: 2, total: 5, remainingPoints: 995 },
+      { taskId: "npc.reply", call: 2, step: 3, total: 7, remainingPoints: 988 }
+    ]);
+
+    expect(() => assertModelUsageEvidence({
+      scenarioName: "缺少展示",
+      modelFixtures,
+      modelCalls: [{ taskId: "story.generate" }],
+      steps: [{ modelCallCount: 1, text: "仅显示剩余积分 995" }]
+    })).toThrow("模型任务 story.generate 第 1 次调用缺少可见积分证据");
+  });
 });
 
 describe("standalone lobby runtime", () => {
@@ -285,6 +328,50 @@ describe("standalone lobby runtime", () => {
       expect(readSave(file)).toEqual({ step: 1 });
       expect(() => validateSave([])).toThrow();
       expect(() => validateSave({ text: "x".repeat(60001) })).toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it("runs a declared standalone model task once and returns exact point usage", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fyow-model-runtime-"));
+    try {
+      const author = "c6ca1964-4444-4444-8444-22b487001450";
+      const guest = "c6ca1964-3333-4333-8333-22b487001450";
+      const workId = "c6ca1964-1111-4111-8111-22b487001450";
+      const project = createBlankEditorProject({ origin: "https://acepro.store", accountId: author });
+      project.configuration.model_tasks = {
+        schema: "fyow.model-tasks/1",
+        tasks: [{
+          taskId: "story.generate", version: 1, prompt: "根据选择生成下一段剧情，只返回 JSON。",
+          inputSchema: { type: "object", properties: { choice: { type: "string", minLength: 1 } }, required: ["choice"], additionalProperties: false },
+          outputSchema: { type: "object", properties: { text: { type: "string", minLength: 1 } }, required: ["text"], additionalProperties: false }
+        }]
+      };
+      const card = createGameCardFromEditorProject(project, { origin: "https://acepro.store", authorAccountId: author, workId });
+      const detail = { id: workId, name: "模型剧情", author: { id: author }, description: card.companion.configuration.app.description };
+      const requestModel = vi.fn(async () => ({
+        conversationId: crypto.randomUUID(), answer: '{"text":"你踏入了发光的森林。"}',
+        points: { input: 2, output: 3, total: 5, source: "model-response" }, remainingPoints: 995
+      }));
+      const service = new OnlineWorldService({
+        cacheFile: join(dir, "cache.json"), getAccount: () => ({ accountId: guest }), getOrigin: () => "https://acepro.store",
+        requestConsole: async () => detail, requestGo: async () => detail, requestModel
+      });
+      service.calibrateClock = async () => {};
+      await service.open({ card });
+      const idempotencyKey = crypto.randomUUID();
+      const request = { workId, gameId: card.gameId, taskId: "story.generate", input: { choice: "进入森林" }, idempotencyKey };
+      const first = await service.runStandaloneModelTask(request);
+      const replay = await service.runStandaloneModelTask(request);
+      expect(first).toEqual(replay);
+      expect(first).toMatchObject({
+        taskId: "story.generate", output: { text: "你踏入了发光的森林。" },
+        usage: { input: 2, output: 3, total: 5, remainingPoints: 995 }
+      });
+      expect(requestModel).toHaveBeenCalledOnce();
+      expect(service.state()).toMatchObject({ runtimeCapabilities: ["model-run/1"], modelTasks: [{ taskId: "story.generate", version: 1 }] });
+      await service.pause();
+      await service.open({ card });
+      expect(await service.runStandaloneModelTask(request)).toEqual(first);
+      expect(requestModel).toHaveBeenCalledOnce();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

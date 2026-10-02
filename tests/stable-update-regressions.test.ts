@@ -12,6 +12,7 @@ const knowledge = require('../electron/harness-knowledge.cjs');
 const { OnlineWorldService } = require('../electron/online-world-service.cjs');
 const main = readFileSync(new URL('../electron/main.cjs', import.meta.url), 'utf8');
 const renderer = readFileSync(new URL('../electron/desktop/renderer.js', import.meta.url), 'utf8');
+const preload = readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
 const directories: string[] = [];
 afterEach(() => directories.splice(0).forEach(directory => rmSync(directory, { recursive: true, force: true })));
 function backend(extra: any = {}) {
@@ -168,5 +169,16 @@ describe('harness knowledge and editing contracts', () => {
     const request = vi.fn();
     await expect(harness.runGameHarness({ project: editor.createEditorProject(cards.createBundledGridCard()), goal: 'develop', request })).rejects.toThrow();
     expect(request).not.toHaveBeenCalled();
+  });
+  it('exposes only the narrow generic model bridge and returns usage through the current iframe', () => {
+    expect(renderer).toContain('GENERIC_GAME_SOURCE = "fyow-game-card"');
+    expect(renderer).toContain('GENERIC_MODEL_PROTOCOL = "fyow-host/2"');
+    expect(renderer).toContain('event.data.method!=="model.run"');
+    expect(renderer).toContain('api.runStandaloneModel');
+    expect(preload).toContain('runStandaloneModel: value => ipcRenderer.invoke("online-world:run-model", value)');
+    expect(main).toContain('handleLocalIpc("online-world:run-model"');
+    expect(renderer).not.toContain('params.prompt');
+    expect(renderer).not.toContain('params.workId');
+    expect(renderer).toContain('usage:error?.usage||null');
   });
 });

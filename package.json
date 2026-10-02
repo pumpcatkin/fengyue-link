@@ -14,6 +14,7 @@
     "verify:sandbox": "electron scripts/verify-sandbox.cjs",
     "verify:perspective": "electron scripts/verify-perspective-pipeline.cjs",
     "verify:platform-api": "electron scripts/verify-platform-api.cjs",
+    "verify:generic-model": "electron scripts/verify-generic-model-runtime.cjs",
     "desktop": "npm run build && electron .",
     "pack:win": "npm run build && electron-builder --win dir --x64 --publish never && node scripts/create-channel-runtime-proof.cjs && electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never",
     "pack:dir": "npm run build && electron-builder --win dir --x64 --publish never && node scripts/create-channel-runtime-proof.cjs",

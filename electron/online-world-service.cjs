@@ -24,6 +24,12 @@ const { sealJson, openSealedJson } = require("./online-world-crypto.cjs");
 const { parseProgram } = require("./online-world-runtime.cjs");
 const { isStandalone, savePath, readSave, writeSave } = require("./standalone-game.cjs");
 const {
+  normalizeModelTasks,
+  resolveModelTask,
+  buildModelTaskInvocation,
+  parseModelTaskOutput
+} = require("./model-task-contract.cjs");
+const {
   GRID_GAME_TITLE,
   builtInGridProgram,
   validateGameCard,
@@ -96,6 +102,9 @@ const REPLY_PAGE_LIMIT = 100;
 // vector for a remote reader.
 const MAX_PUBLIC_BATTLE_SOLDIERS = 1_000_000;
 const MAX_PUBLIC_BATTLE_POWER = 1_000_000_000;
+const STANDALONE_MODEL_RATE_WINDOW_MS = 60 * 1000;
+const STANDALONE_MODEL_RATE_LIMIT = 12;
+const STANDALONE_MODEL_RESULT_CACHE_LIMIT = 64;
 const { MATERIAL_BY_ID } = require("./grid-talents.cjs");
 
 function workReference(value, origin) {
@@ -289,6 +298,50 @@ function normalizeWorldChatText(value) {
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function publicModelUsage(result = {}) {
+  const points = result?.points && typeof result.points === "object" ? result.points : {};
+  const numeric = value => {
+    if (value == null || value === "") return null;
+    const number = Number(typeof value === "string" ? value.replace(/,/g, "").trim() : value);
+    return Number.isFinite(number) ? Math.max(0, number) : null;
+  };
+  return {
+    input: numeric(points.input),
+    output: numeric(points.output),
+    total: numeric(points.total),
+    source: String(points.source || "platform-unavailable").slice(0, 40),
+    remainingPoints: numeric(result?.remainingPoints)
+  };
+}
+
+function publicModelErrorUsage(error) {
+  if (error?.usage && typeof error.usage === "object") {
+    return publicModelUsage({ points: error.usage, remainingPoints: error.usage.remainingPoints });
+  }
+  if (!error?.modelUsage || typeof error.modelUsage !== "object") return null;
+  return publicModelUsage({ points: error.modelUsage.points, remainingPoints: error.modelUsage.remainingPoints });
+}
+
+function copyPublicModelErrorUsage(target, source) {
+  const usage = publicModelErrorUsage(source);
+  if (usage) target.usage = usage;
+  if (source?.modelUsage && typeof source.modelUsage === "object") target.modelUsage = cloneJson(source.modelUsage);
+  return target;
+}
+
+function standaloneModelLedgerFile(saveFile) {
+  return `${String(saveFile)}.model-operations.json`;
+}
+
+function readStandaloneModelLedger(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  try {
+    const value = readJsonWithBackupSync(fs, file, item => item?.schema === "fyow.standalone-model-operations/1" && Array.isArray(item.entries)).value;
+    return (value?.entries || []).filter(entry => entry && typeof entry === "object" && typeof entry.key === "string")
+      .slice(-STANDALONE_MODEL_RESULT_CACHE_LIMIT);
+  } catch { return []; }
 }
 
 function actionConnectionError(error) {
@@ -1302,6 +1355,8 @@ class OnlineWorldService {
     this.modelRequestQueue = Promise.resolve();
     this.modelUsageEvents = [];
     this.modelUsageSequence = 0;
+    this.standaloneModelRequests = new Map();
+    this.standaloneModelRequestTimes = [];
     this.joinInFlight = null;
     this.pendingJoinPreview = null;
     this.intentInFlight = null;
@@ -1510,6 +1565,9 @@ class OnlineWorldService {
       isServerOwner: account.accountId === this.work?.authorAccountId,
       card: summarizeGameCard(this.card), account, work: this.work ? { ...this.work, description: undefined } : null,
       programHtml: this.program.html, gameSave: this.standalone.data, loadProgress: this.loadProgress,
+      runtimeCapabilities: this.standaloneModelTasks().tasks.length ? ["model-run/1"] : [],
+      modelTasks: this.standaloneModelTasks().tasks.map(task => ({ taskId: task.taskId, version: task.version })),
+      modelUsageEvents: cloneJson(this.modelUsageEvents.slice(-30)),
       localPreferences: {}, world: null, serverNow: this.now()
     };
     const projection = this.world ? projectWorldState(this.world, account.accountId, this.now()) : null;
@@ -1557,6 +1615,121 @@ class OnlineWorldService {
     this.standalone.data = writeSave(this.standalone.file, data);
     this.standalone.lastWriteAt = now;
     return { saved: true };
+  }
+
+  standaloneModelTasks() {
+    return normalizeModelTasks(this.program?.manifest?.modelTasks);
+  }
+
+  persistStandaloneModelLedger() {
+    const file = this.standalone?.modelLedgerFile;
+    if (!file) return;
+    const entries = [...this.standaloneModelRequests.entries()].slice(-STANDALONE_MODEL_RESULT_CACHE_LIMIT).map(([key, entry]) => ({
+      key,
+      status: String(entry?.status || "unknown"),
+      operationId: String(entry?.operationId || entry?.result?.operationId || ""),
+      result: entry?.status === "completed" ? cloneJson(entry.result) : null,
+      message: entry?.status === "failed" ? String(entry.message || "模型任务失败") : "",
+      errorCode: entry?.status === "failed" ? String(entry.errorCode || "MODEL_TASK_FAILED") : "",
+      retryable: entry?.status === "failed" ? Boolean(entry.retryable) : false,
+      usage: entry?.status === "failed" && entry.usage ? cloneJson(entry.usage) : null,
+      updatedAt: this.now()
+    }));
+    atomicWriteJsonSync(fs, file, { schema: "fyow.standalone-model-operations/1", entries, updatedAt: this.now() }, { pretty: true });
+  }
+
+  consumeStandaloneModelBudget() {
+    const now = this.now();
+    this.standaloneModelRequestTimes = this.standaloneModelRequestTimes
+      .filter(timestamp => now - timestamp < STANDALONE_MODEL_RATE_WINDOW_MS);
+    if (this.standaloneModelRequestTimes.length >= STANDALONE_MODEL_RATE_LIMIT) {
+      const error = new Error("模型调用过于频繁，请稍后再试");
+      error.retryable = true;
+      error.errorCode = "MODEL_RATE_LIMIT";
+      throw error;
+    }
+    this.standaloneModelRequestTimes.push(now);
+  }
+
+  async runStandaloneModelTask({ workId, gameId, taskId, input, idempotencyKey } = {}) {
+    if (!this.standalone || this.status !== "ready" || this.syncPaused) throw new Error("独立游戏尚未打开");
+    if (this.standalone.accountId !== this.account().accountId || this.standalone.origin !== this.getOrigin?.()) {
+      throw new Error("账号或节点已经变化，请重新打开游戏");
+    }
+    if (String(workId || "") !== String(this.work?.id || "") || String(gameId || "") !== String(this.card?.gameId || "")) {
+      throw new Error("模型请求来自已关闭或其他游戏");
+    }
+    const task = resolveModelTask(this.standaloneModelTasks(), taskId);
+    const invocation = buildModelTaskInvocation(this.standaloneModelTasks(), { taskId: task.taskId, input, idempotencyKey });
+    const cacheKey = `${this.standalone.accountId}:${this.work.id}:${this.card.gameId}:${task.taskId}:${invocation.idempotencyKey}`;
+    const cached = this.standaloneModelRequests.get(cacheKey);
+    if (cached?.status === "completed") return cloneJson(cached.result);
+    if (cached?.status === "pending" && cached.promise) return cached.promise;
+    if (cached?.status === "pending") {
+      const error = new Error("上一次模型调用在结果确认前中断；为避免重复扣费，请使用新的操作重新生成");
+      error.errorCode = "MODEL_OUTCOME_UNKNOWN";
+      error.retryable = false;
+      throw error;
+    }
+    if (cached?.status === "failed") {
+      const error = new Error(cached.message || "模型任务此前已经失败，请使用新的幂等键明确重试");
+      error.errorCode = cached.errorCode || "MODEL_TASK_FAILED";
+      error.retryable = Boolean(cached.retryable);
+      error.operationId = cached.operationId || null;
+      if (cached.usage) error.usage = cloneJson(cached.usage);
+      throw error;
+    }
+    this.consumeStandaloneModelBudget();
+    const operationId = crypto.randomUUID();
+    const running = (async () => {
+      try {
+        const generated = await this.requestStructuredModel({
+          task: task.taskId,
+          declaredModelTask: true,
+          invocation
+        }, {
+          attempts: 1,
+          manualRetry: true,
+          includeUsage: true,
+          label: `游戏模型任务 ${task.taskId}`,
+          validate: value => {
+            try { parseModelTaskOutput(task, value); return null; }
+            catch (error) { return error?.message || String(error); }
+          }
+        });
+        const result = {
+          operationId,
+          taskId: task.taskId,
+          taskVersion: task.version,
+          output: parseModelTaskOutput(task, generated.output),
+          usage: generated.usage
+        };
+        this.standaloneModelRequests.set(cacheKey, { status: "completed", operationId, result: cloneJson(result) });
+        while (this.standaloneModelRequests.size > STANDALONE_MODEL_RESULT_CACHE_LIMIT) {
+          this.standaloneModelRequests.delete(this.standaloneModelRequests.keys().next().value);
+        }
+        this.persistStandaloneModelLedger();
+        return result;
+      } catch (error) {
+        const failure = error && typeof error === "object" ? error : new Error(String(error));
+        const usage = publicModelErrorUsage(failure);
+        if (usage) failure.usage = usage;
+        failure.operationId = operationId;
+        this.standaloneModelRequests.set(cacheKey, {
+          status: "failed",
+          operationId,
+          message: failure.userMessage || failure.message || String(failure),
+          errorCode: failure.errorCode || "MODEL_TASK_FAILED",
+          retryable: Boolean(failure.retryable),
+          usage: usage ? cloneJson(usage) : null
+        });
+        this.persistStandaloneModelLedger();
+        throw failure;
+      }
+    })();
+    this.standaloneModelRequests.set(cacheKey, { status: "pending", operationId, promise: running });
+    this.persistStandaloneModelLedger();
+    return running;
   }
 
   pendingPublicationState(transaction = this.pendingIntentTransaction) {
@@ -2769,6 +2942,8 @@ class OnlineWorldService {
   async forgetOpenedCard() {
     await this.pause();
     this.standalone = null;
+    this.standaloneModelRequests.clear();
+    this.standaloneModelRequestTimes = [];
     this.card = null;
     this.work = null;
     this.program = builtInGridProgram();
@@ -2839,6 +3014,8 @@ class OnlineWorldService {
     const previousWorkId = String(this.work?.id || "");
     await this.pause();
     this.standalone = null;
+    this.standaloneModelRequests.clear();
+    this.standaloneModelRequestTimes = [];
     this.syncPaused = false;
     this.pendingMigration = null;
     this.migrationProof = migrationProof && typeof migrationProof === "object" ? cloneJson(migrationProof) : null;
@@ -2930,8 +3107,18 @@ class OnlineWorldService {
     this.loadWorkProgram(normalizedCard, liveDescription);
     if (isStandalone(this.program?.html)) {
       const file = savePath(this.scopedCacheFile(), account.accountId, this.card);
+      const modelLedgerFile = standaloneModelLedgerFile(file);
       this.control = null; this.world = null;
-      this.standalone = { file, data: readSave(file), accountId: account.accountId, origin: this.getOrigin?.() };
+      this.standalone = { file, modelLedgerFile, data: readSave(file), accountId: account.accountId, origin: this.getOrigin?.() };
+      this.standaloneModelRequests = new Map(readStandaloneModelLedger(modelLedgerFile).map(entry => [entry.key, {
+        status: entry.status,
+        operationId: entry.operationId,
+        result: entry.result,
+        message: entry.message,
+        errorCode: entry.errorCode,
+        retryable: Boolean(entry.retryable),
+        usage: entry.usage || null
+      }]));
       this.status = "ready";
       this.error = null;
       this.loadProgress = { active: false, phase: "complete" };
@@ -6744,19 +6931,17 @@ class OnlineWorldService {
     return context;
   }
 
-  async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null, manualRetry = false } = {}) {
+  async requestStructuredModel(request, { attempts = 2, label = "模型请求", validate = null, manualRetry = false, includeUsage = false } = {}) {
     const attemptLimit = manualRetry ? 1 : Math.max(1, Number(attempts) || 1);
     const taskKey = String(request?.task || "model").replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "").toUpperCase() || "MODEL";
     const errorCode = `MODEL_${taskKey}_001`;
     const oneAttempt = async ({ attempt = 1, signal } = {}) => {
-      let usageRecorded = false;
+      const freshRequest = { ...request };
+      delete freshRequest.conversationId;
+      delete freshRequest.conversation_id;
+      let answer = null;
       try {
-        const freshRequest = { ...request };
-        delete freshRequest.conversationId;
-        delete freshRequest.conversation_id;
-        const answer = await this.requestModel(freshRequest, { signal });
-        this.recordModelUsage({ request: freshRequest, label, attempt, result: answer, status: "completed" });
-        usageRecorded = true;
+        answer = await this.requestModel(freshRequest, { signal });
         const conversationId = String(answer?.conversationId || answer?.conversation_id || "").trim();
         if (!conversationId) throw new Error("平台没有返回新会话编号");
         if (this.modelConversationIds.has(conversationId)) throw new Error("平台复用了已经使用过的模型会话");
@@ -6764,11 +6949,16 @@ class OnlineWorldService {
         const parsed = parseJsonAnswer(answer?.answer ?? answer);
         const issue = typeof validate === "function" ? validate(parsed) : null;
         if (issue) throw new Error(String(issue));
-        return parsed;
+        this.recordModelUsage({ request: freshRequest, label, attempt, result: answer, status: "completed" });
+        return includeUsage ? { output: parsed, usage: publicModelUsage(answer) } : parsed;
       } catch (error) {
-        if (!usageRecorded && error?.modelUsage) this.recordModelUsage({ request, label, attempt, error, status: "failed" });
-        this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, error: error?.message || String(error) });
-        throw error;
+        const failure = error && typeof error === "object" ? error : new Error(String(error));
+        if (answer && !failure.modelUsage) {
+          failure.modelUsage = { points: answer?.points || null, remainingPoints: answer?.remainingPoints ?? null };
+        }
+        if (failure.modelUsage) this.recordModelUsage({ request: freshRequest, label, attempt, error: failure, status: "failed" });
+        this.diagnostic({ event: "model-structured-attempt-failed", task: String(request?.task || "unknown"), label, attempt, error: failure.message || String(failure) });
+        throw failure;
       }
     };
     let structuredAttempts = 0;
@@ -6782,7 +6972,7 @@ class OnlineWorldService {
         terminal.retryable = Boolean(manualRetry);
         terminal.errorCode = errorCode;
         terminal.userMessage = `${label}生成失败`;
-        throw terminal;
+        throw copyPublicModelErrorUsage(terminal, error);
       }
     }, manualRetry ? { maxAttempts: 1 } : {});
     const run = async () => {
@@ -6799,7 +6989,7 @@ class OnlineWorldService {
       terminal.retryable = Boolean(manualRetry);
       terminal.errorCode = errorCode;
       terminal.userMessage = `${label}生成失败`;
-      throw terminal;
+      throw copyPublicModelErrorUsage(terminal, lastError);
     };
     const queued = this.modelRequestQueue.then(run, run);
     this.modelRequestQueue = queued.then(() => undefined, () => undefined);

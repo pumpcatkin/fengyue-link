@@ -15,6 +15,22 @@ describe("online world program runtime", () => {
     expect(parsed.html).toContain('script nonce="fyow-game-v1"');
   });
 
+  it("binds declared model tasks into the signed program manifest", () => {
+    const modelTasks = {
+      schema: "fyow.model-tasks/1",
+      tasks: [{
+        taskId: "story.generate", version: 1, prompt: "生成下一段剧情，只返回 JSON。",
+        inputSchema: { type: "object", properties: { choice: { type: "string", minLength: 1 } }, required: ["choice"], additionalProperties: false },
+        outputSchema: { type: "object", properties: { text: { type: "string", minLength: 1 } }, required: ["text"], additionalProperties: false }
+      }]
+    };
+    const packed = packProgram({ gameId: "game.model", title: "Model Game", html: "<html><body>model</body></html>", modelTasks });
+    const parsed = parseProgram(packed.envelope, "game.model");
+    expect(parsed.manifest.capabilities).toEqual(["model-run/1"]);
+    expect(parsed.manifest.modelTasks.tasks[0]).toMatchObject({ taskId: "story.generate", version: 1 });
+    expect(packProgram({ gameId: "game.model", title: "Model Game", html: "<html><body>model</body></html>" }).digest).not.toBe(packed.digest);
+  });
+
   it("rejects a changed digest and a mismatched game id", () => {
     const packed = packProgram({ gameId: "game.a", title: "A", html: "<p>A</p>" });
     const changedDigest = `${packed.digest[0] === "0" ? "1" : "0"}${packed.digest.slice(1)}`;

@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 const require = createRequire(import.meta.url);
-const { createBlankEditorProject } = require("../electron/online-game-editor.cjs");
+const { createBlankEditorProject, createEditorProject, activeEditorSession, selectEditorSession, updateEditorSession, markEditorProjectPendingUpload } = require("../electron/online-game-editor.cjs");
+const { createBundledGridCard } = require("../electron/online-world-card.cjs");
 const { runAutoModel } = require("../electron/auto-model-router.cjs");
 const models = [{ model: "gpt-5.6", label: "GPT", provider: "a" }, { model: "claude-opus-4-6", label: "Claude", provider: "b" }, { model: "glm-5.3", label: "GLM", provider: "c" }];
 
@@ -14,7 +15,7 @@ function setup(request: any) {
   vm.runInNewContext(source, { module, console, AbortController, Date, require: (id: string) => {
     if (id === "node:fs") return { existsSync: () => true };
     if (id === "./runtime-utils.cjs") return { atomicWriteJsonSync: vi.fn(), readJsonWithBackupSync: () => ({ value: { "https://example.org|owner": { ready: true, version: 2, workId: "work" } } }) };
-    if (id === "./online-game-editor.cjs") return { saveEditorProjects: save };
+    if (id === "./online-game-editor.cjs") return { saveEditorProjects: save, activeEditorSession, selectEditorSession, updateEditorSession, markEditorProjectPendingUpload };
     if (id === "./game-harness-browser.cjs") return { testGameInBrowser: async () => ({ passed: true }) };
     return require(id.startsWith("./") ? `../electron/${id.slice(2)}` : id);
   } });
@@ -29,6 +30,22 @@ function setup(request: any) {
 }
 
 describe("harness billing integration", () => {
+  it("rejects a parity creation request on a published project before mutating or saving it", async () => {
+    const { backend, run, save } = setup(vi.fn());
+    const published = createEditorProject(createBundledGridCard());
+    const libraryId = `${published.card.cardId}::${published.card.companion.workId}`;
+    backend.onlineWorldEditorProjects.projects = { [libraryId]: published };
+    backend.onlineWorldEditorProject = () => published;
+    const before = JSON.stringify(published);
+
+    await expect(run(backend, { libraryId, goal: "新建一个功能与猎艳疆土完全一致的新游戏" }))
+      .rejects.toMatchObject({ code: "EDITOR_GRID_PARITY_REQUIRES_BLANK_DRAFT" });
+
+    expect(JSON.stringify(published)).toBe(before);
+    expect(save).not.toHaveBeenCalled();
+    expect(backend.onlineWorldEditorJob).toBeUndefined();
+  });
+
   it("preserves development goals longer than the 24K event budget through model dispatch and checkpoints", async () => {
     const marker = "LONG-GOAL-TAIL-MARKER";
     const goal = `${"长".repeat(26000)}${marker}`;
@@ -41,6 +58,7 @@ describe("harness billing integration", () => {
     expect(dispatchedQuery).toBeTypeOf("string");
     expect(dispatchedQuery).toContain(marker);
     expect(backend.onlineWorldEditorProjects.projects.draft.harnessCandidate.goal).toBe(goal);
+    expect(activeEditorSession(backend.onlineWorldEditorProjects.projects.draft)).toMatchObject({ goal, status: "paused" });
   });
   it("does not impose an HTML maxlength on the development goal", () => {
     const html = readFileSync(new URL("../electron/desktop/index.html", import.meta.url), "utf8");
@@ -101,6 +119,7 @@ describe("editor harness public timeline events", () => {
     expect(events[0]).toMatchObject({ turn: 1, kind: "status", tool: "model" });
     expect(events.some((event: any) => event.turn === 13 && event.kind === "tool-result" && event.tool === "read_file")).toBe(true);
     expect(backend.onlineWorldEditorProjects.projects.draft.harnessCandidate.events.length).toBe(events.length);
+    expect(activeEditorSession(backend.onlineWorldEditorProjects.projects.draft).events).toHaveLength(events.length);
   });
 
   it("keeps read/search evidence visible and marks bounded truncation explicitly", () => {
@@ -192,5 +211,6 @@ describe("editor harness public timeline events", () => {
     expect(backend.onlineWorldEditorJob.result).not.toHaveProperty("events");
     expect(backend.onlineWorldEditorJob.result).not.toHaveProperty("goal");
     expect(backend.onlineWorldEditorJob.result).not.toHaveProperty("coordinator");
+    expect(activeEditorSession(backend.onlineWorldEditorProjects.projects.draft)).toMatchObject({ goal: "complete", status: "completed" });
   });
 });

@@ -16,6 +16,7 @@ const { PROGRAM_PREFIX, injectSandboxCsp, parseProgram } = require("./online-wor
 
 const EDITOR_SCHEMA = "fyow.game-card-editor/1";
 const EDITOR_PROJECTS_SCHEMA = "fyow.game-card-editor-projects/1";
+const EDITOR_SESSIONS_SCHEMA = "fyow.game-card-editor-sessions/1";
 const CARD_LIBRARY_SCHEMA = "fyow.game-card-library/1";
 
 const DEFAULT_AGENT_COMPONENTS = Object.freeze([
@@ -133,6 +134,159 @@ function normalizeAgentComponents(value, fallbackWorkId = "") {
   });
 }
 
+function editorSessionId(value = null, index = 0) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const stable = crypto.createHash("sha256").update(JSON.stringify({
+      index,
+      title: String(value.title || ""),
+      goal: String(value.goal || ""),
+      status: String(value.status || ""),
+      startedAt: Number(value.startedAt || 0),
+      finishedAt: Number(value.finishedAt || 0),
+      createdAt: Number(value.createdAt || 0),
+      events: Array.isArray(value.events) ? value.events : []
+    })).digest("hex").slice(0, 16);
+    return `session-${stable}`;
+  }
+  return `session-${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
+}
+
+function sessionHasHistory(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && (
+    String(value.goal || "").trim()
+    || Array.isArray(value.events) && value.events.length
+    || value.budget || value.error || value.startedAt || value.finishedAt
+  ));
+}
+
+function normalizeEditorSession(value, index = 0) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? clone(value) : {};
+  const id = String(source.id || "").trim() || editorSessionId(source, index);
+  const goal = String(source.goal || "");
+  const fallbackTitle = goal.trim().replace(/\s+/g, " ").slice(0, 48) || `修改会话 ${index + 1}`;
+  const storedStatus = String(source.status || (sessionHasHistory(source) ? "paused" : "idle"));
+  const interrupted = storedStatus === "running";
+  return {
+    ...source,
+    id,
+    title: String(source.title || fallbackTitle).trim().slice(0, 80) || fallbackTitle,
+    goal,
+    status: interrupted ? "paused" : storedStatus,
+    error: interrupted && !source.error ? "上次开发在应用关闭前中断，可重新发送同一目标继续" : source.error,
+    events: Array.isArray(source.events) ? source.events : [],
+    createdAt: Number(source.createdAt || source.startedAt || source.finishedAt || Date.now()),
+    updatedAt: Number(source.updatedAt || source.finishedAt || source.startedAt || Date.now())
+  };
+}
+
+function normalizeEditorSessions(value, { harness = null, candidate = null } = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  let items = Array.isArray(source.items)
+    ? source.items.map((item, index) => normalizeEditorSession(item, index))
+    : [];
+  if (!items.length) {
+    if (sessionHasHistory(harness)) items.push(normalizeEditorSession({ ...clone(harness), title: "历史开发记录" }, items.length));
+    if (sessionHasHistory(candidate)) items.push(normalizeEditorSession({ ...clone(candidate), title: "未完成修改" }, items.length));
+  }
+  if (!items.length) items.push(normalizeEditorSession({ title: "首次修改", status: "idle" }, 0));
+  const requestedActiveId = String(source.activeId || "");
+  const activeId = items.some(item => item.id === requestedActiveId) ? requestedActiveId : items.at(-1).id;
+  return { schema: EDITOR_SESSIONS_SCHEMA, activeId, items };
+}
+
+function activeEditorSession(project) {
+  const sessions = normalizeEditorSessions(project?.editorSessions, {
+    harness: project?.harness,
+    candidate: project?.harnessCandidate
+  });
+  return sessions.items.find(item => item.id === sessions.activeId) || sessions.items.at(-1) || null;
+}
+
+function addEditorSession(project, { title = "新修改", goal = "" } = {}) {
+  project.editorSessions = normalizeEditorSessions(project.editorSessions, {
+    harness: project.harness,
+    candidate: project.harnessCandidate
+  });
+  const session = normalizeEditorSession({ title, goal, status: "idle", events: [] }, project.editorSessions.items.length);
+  project.editorSessions.items.push(session);
+  project.editorSessions.activeId = session.id;
+  delete project.harnessCandidate;
+  project.developmentGoal = goal;
+  project.updatedAt = Date.now();
+  return session;
+}
+
+function selectEditorSession(project, sessionId) {
+  project.editorSessions = normalizeEditorSessions(project.editorSessions, {
+    harness: project.harness,
+    candidate: project.harnessCandidate
+  });
+  const session = project.editorSessions.items.find(item => item.id === String(sessionId || ""));
+  if (!session) throw new Error("编辑会话不存在");
+  project.editorSessions.activeId = session.id;
+  if (session.files) project.harnessCandidate = clone(session);
+  else delete project.harnessCandidate;
+  project.developmentGoal = session.goal;
+  project.updatedAt = Date.now();
+  return session;
+}
+
+function updateEditorSession(project, sessionId, patch = {}) {
+  project.editorSessions = normalizeEditorSessions(project.editorSessions, {
+    harness: project.harness,
+    candidate: project.harnessCandidate
+  });
+  const index = project.editorSessions.items.findIndex(item => item.id === String(sessionId || project.editorSessions.activeId));
+  if (index < 0) throw new Error("编辑会话不存在");
+  const current = project.editorSessions.items[index];
+  const next = normalizeEditorSession({ ...current, ...clone(patch), id: current.id, createdAt: current.createdAt, updatedAt: Date.now() }, index);
+  project.editorSessions.items[index] = next;
+  project.editorSessions.activeId = next.id;
+  project.developmentGoal = next.goal;
+  project.updatedAt = Date.now();
+  return next;
+}
+
+function normalizeEditorPublication(value, { isDraft = false, pendingPublication = null, revision = 0 } = {}) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? clone(value) : {};
+  const explicitStatus = source.status === "pending" || source.status === "synced";
+  const pending = Boolean(isDraft || pendingPublication || source.status === "pending" || (!explicitStatus && Number(revision || 0) > 0));
+  return {
+    status: pending ? "pending" : "synced",
+    syncedRevision: pending ? Number(source.syncedRevision || 0) : Number(source.syncedRevision || revision || 0),
+    syncedAt: Number(source.syncedAt || 0)
+  };
+}
+
+function editorProjectHasPendingUpload(project) {
+  return normalizeEditorPublication(project?.publication, {
+    isDraft: Boolean(project?.isDraft),
+    pendingPublication: project?.pendingPublication,
+    revision: project?.revision
+  }).status === "pending";
+}
+
+function markEditorProjectPendingUpload(project) {
+  if (!project || typeof project !== "object") return project;
+  const publication = normalizeEditorPublication(project.publication, {
+    isDraft: Boolean(project.isDraft),
+    pendingPublication: project.pendingPublication,
+    revision: project.revision
+  });
+  project.publication = { ...publication, status: "pending" };
+  return project;
+}
+
+function markEditorProjectUploaded(project, at = Date.now()) {
+  if (!project || typeof project !== "object") return project;
+  project.publication = {
+    status: "synced",
+    syncedRevision: Number(project.revision || 0),
+    syncedAt: Number(at || Date.now())
+  };
+  return project;
+}
+
 function normalizeEditorProject(value, fallbackWorkId = "") {
   const project = value && typeof value === "object" ? clone(value) : {};
   project.schema = EDITOR_SCHEMA;
@@ -157,6 +311,17 @@ function normalizeEditorProject(value, fallbackWorkId = "") {
     project.harness = { tests: clone(STARTER_TESTS), status: "needs-implementation", migration: "原卡只有欢迎页；当前是开发用玩法样例，需按原游戏规则实现后再发布" };
   }
   project.agents = normalizeAgentComponents(project.agents, fallbackWorkId);
+  project.editorSessions = normalizeEditorSessions(project.editorSessions, {
+    harness: project.harness,
+    candidate: project.harnessCandidate
+  });
+  const activeSession = project.editorSessions.items.find(item => item.id === project.editorSessions.activeId);
+  project.developmentGoal = String(activeSession?.goal ?? project.developmentGoal ?? "");
+  project.publication = normalizeEditorPublication(project.publication, {
+    isDraft: Boolean(project.isDraft),
+    pendingPublication: project.pendingPublication,
+    revision: project.revision
+  });
   project.updatedAt = Number(project.updatedAt || Date.now());
   return project;
 }
@@ -165,7 +330,17 @@ function loadEditorProjects(file) {
   if (!file || !fs.existsSync(file)) return { schema: EDITOR_PROJECTS_SCHEMA, projects: {} };
   try {
     const root = readJsonWithBackupSync(fs, file, value => value?.schema === EDITOR_PROJECTS_SCHEMA && value.projects && typeof value.projects === "object").value;
-    return root?.schema === EDITOR_PROJECTS_SCHEMA ? root : { schema: EDITOR_PROJECTS_SCHEMA, projects: {} };
+    if (root?.schema !== EDITOR_PROJECTS_SCHEMA) return { schema: EDITOR_PROJECTS_SCHEMA, projects: {} };
+    const projects = {};
+    for (const [key, value] of Object.entries(root.projects || {})) {
+      if (!key) continue;
+      projects[key] = normalizeEditorProject(value);
+    }
+    const normalized = { schema: EDITOR_PROJECTS_SCHEMA, projects };
+    if (JSON.stringify(root) !== JSON.stringify(normalized)) {
+      try { atomicWriteJsonSync(fs, file, normalized, { pretty: true }); } catch {}
+    }
+    return normalized;
   } catch {
     return { schema: EDITOR_PROJECTS_SCHEMA, projects: {} };
   }
@@ -186,6 +361,7 @@ function createEditorProject(card) {
   project.agents = normalizeAgentComponents(project.agents, card?.companion?.workId || "");
   project.agentDraft = null;
   project.updatedAt = Date.now();
+  markEditorProjectUploaded(project, project.updatedAt);
   return project;
 }
 
@@ -489,10 +665,20 @@ function agentJobId() {
 module.exports = {
   EDITOR_SCHEMA,
   EDITOR_PROJECTS_SCHEMA,
+  EDITOR_SESSIONS_SCHEMA,
   DEFAULT_AGENT_COMPONENTS,
   ONLINE_WORLD_EDITOR_PLAYBOOK,
   editorProjectPath,
   normalizeAgentComponents,
+  normalizeEditorSessions,
+  activeEditorSession,
+  addEditorSession,
+  selectEditorSession,
+  updateEditorSession,
+  normalizeEditorPublication,
+  editorProjectHasPendingUpload,
+  markEditorProjectPendingUpload,
+  markEditorProjectUploaded,
   normalizeEditorProject,
   loadEditorProjects,
   saveEditorProjects,

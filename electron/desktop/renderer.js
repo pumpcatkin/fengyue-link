@@ -205,6 +205,7 @@ let selectedOnlineWorldEditorId = null;
 let onlineWorldEditorProject = null;
 let onlineWorldEditorDirty = false;
 let onlineWorldEditorSaving = false;
+let onlineWorldEditorExitPromise = null;
 let onlineWorldEditorLoadSequence = 0;
 let onlineWorldFlushCapable = false;
 let onlineWorldCloseHandshake = null;
@@ -1045,13 +1046,42 @@ function renderOnlineWorldEditorProjects(){
     const title=document.createElement("b");
     title.textContent=project.title||"未命名游戏";
     const meta=document.createElement("small");
-    meta.textContent=project.isDraft?"本地草稿 · 尚未创建伴生作品":`服主项目 · ${project.workId||"未绑定作品"}`;
+    const sessionCopy=`${Number(project.sessionCount||1)} 个本地会话`;
+    const uploadCopy=project.uploadPending?"待上传":"已同步";
+    meta.textContent=project.isDraft?`本地草稿 · ${uploadCopy} · ${sessionCopy}`:`服主项目 · ${project.workId||"未绑定作品"} · ${uploadCopy} · ${sessionCopy}`;
     button.append(title,meta);
     button.addEventListener("click",async()=>{
       document.querySelector("#online-editor-project-picker")?.close();
       await loadOnlineWorldEditorProject(project.libraryId||project.cardId);
     });
     list.append(button);
+  }
+}
+
+function onlineEditorSessionStatusLabel(status){
+  return status==="running"?"运行中":status==="completed"?"已完成":status==="failed"?"失败":status==="cancelled"?"已取消":status==="paused"?"已暂停":"新会话";
+}
+
+function renderOnlineWorldEditorSessions(){
+  const mount=document.querySelector("#online-editor-session-tabs");
+  if(!mount)return;
+  mount.replaceChildren();
+  const sessions=onlineEditorSessions();
+  for(const session of sessions.items){
+    const button=document.createElement("button");
+    button.type="button";button.role="tab";button.dataset.editorSessionId=session.id;
+    const active=session.id===sessions.activeId;
+    button.classList.toggle("active",active);button.setAttribute("aria-selected",active?"true":"false");
+    const title=document.createElement("b");title.textContent=session.title||"修改会话";
+    const meta=document.createElement("small");meta.textContent=onlineEditorSessionStatusLabel(session.status);
+    button.append(title,meta);
+    button.addEventListener("click",()=>invoke(async()=>{
+      if(session.id===onlineEditorSessions().activeId)return;
+      if(!await preserveOnlineEditorDraftChanges())return;
+      const result=await api.updateOnlineWorldEditorSession(selectedOnlineWorldEditorId,{action:"select",sessionId:session.id});
+      onlineWorldEditorProject=result.project;renderOnlineWorldEditorProject();
+    }).catch(()=>{}));
+    mount.append(button);
   }
 }
 
@@ -1076,6 +1106,7 @@ function renderOnlineWorldEditorProject(){
   configuration.world_book=Array.isArray(configuration.world_book)?configuration.world_book:[];
   project.configuration=configuration;
   const app=configuration.app||{};
+  const activeSession=onlineEditorActiveSession(project);
   document.querySelector("#online-editor-project-label").textContent=project.card?.title||"未命名游戏";
   document.querySelector("#online-editor-project-menu-title").textContent=project.card?.title||"未命名游戏";
   document.querySelector("#online-editor-project-meta").textContent=`${project.isDraft?"本地草稿":card.companion?.workId||"未绑定作品"} · ${card.gameId||"未知游戏"} · v${card.version||0}`;
@@ -1092,10 +1123,12 @@ function renderOnlineWorldEditorProject(){
   setEditorValue("online-editor-post-text",configuration.post_text);
   setEditorValue("online-editor-world-book",editorJson(configuration.world_book));
   setEditorValue("online-editor-config-json",editorJson(configuration));
-  setEditorValue("online-editor-agent-goal",project.developmentGoal??project.harnessCandidate?.goal??project.harness?.goal??"");
+  setEditorValue("online-editor-agent-goal",activeSession?.goal??project.developmentGoal??project.harnessCandidate?.goal??project.harness?.goal??"");
   setEditorValue("online-editor-tests",editorJson(project.harness?.tests||{scenarios:[]}));
-  document.querySelector("#online-editor-restore-candidate").disabled=!project.harnessCandidate?.files;
-  document.querySelector("#online-editor-save-state").textContent=`本地版本 ${project.revision||0}${project.harnessCandidate?" · 有未采纳候选":""}`;
+  document.querySelector("#online-editor-restore-candidate").disabled=!activeSession?.files;
+  const uploadState=project.publication?.status==="synced"&&!project.isDraft?"已同步上传":"尚未上传";
+  document.querySelector("#online-editor-save-state").textContent=`本地版本 ${project.revision||0} · ${uploadState} · ${onlineEditorSessions(project).items.length} 个会话${activeSession?.files?" · 当前会话有未采纳候选":""}`;
+  renderOnlineWorldEditorSessions();
   renderOnlineWorldEditorAgents();
   renderOnlineWorldEditorProjects();
   onlineWorldEditorDirty=false;
@@ -1111,7 +1144,16 @@ const ONLINE_EDITOR_TIMELINE_PRIVATE_KEYS=new Set(["analysis","chainofthought","
 const ONLINE_EDITOR_TIMELINE_SOURCE_KEYS=new Set(["after","before","code","content","html","newtext","oldtext","raw","source"]);
 const ONLINE_EDITOR_TIMELINE_TEXT_LIMIT=24000;
 const ONLINE_EDITOR_TIMELINE_NODE_LIMIT=512;
-let onlineEditorTimelineRenderCache={libraryId:null,events:null,emptyState:null,signature:null};
+let onlineEditorTimelineRenderCache={libraryId:null,sessionId:null,events:null,emptyState:null,signature:null};
+function onlineEditorSessions(project=onlineWorldEditorProject){
+  const source=project?.editorSessions;
+  const items=Array.isArray(source?.items)?source.items:[];
+  return{items,activeId:String(source?.activeId||items.at(-1)?.id||"")};
+}
+function onlineEditorActiveSession(project=onlineWorldEditorProject){
+  const sessions=onlineEditorSessions(project);
+  return sessions.items.find(item=>item?.id===sessions.activeId)||sessions.items.at(-1)||null;
+}
 const onlineEditorTimelineKey=key=>String(key||"").replace(/[-_\s]/g,"").toLowerCase();
 const isOnlineEditorTimelinePrivateKey=key=>ONLINE_EDITOR_TIMELINE_PRIVATE_KEYS.has(onlineEditorTimelineKey(key));
 
@@ -1174,9 +1216,9 @@ function onlineEditorTimelineText(value,fallback="",limit=ONLINE_EDITOR_TIMELINE
   return`${text.slice(0,Math.max(0,boundedLimit-marker.length))}${marker}`;
 }
 
-function onlineEditorTimelineEvents(job,saved,libraryId){
+function onlineEditorTimelineEvents(job,saved,libraryId,sessionId){
   const savedEvents=Array.isArray(saved?.events)?saved.events:[];
-  const matchingJob=job?.libraryId===libraryId;
+  const matchingJob=job?.libraryId===libraryId&&(!job?.sessionId||job.sessionId===sessionId);
   const liveEvents=matchingJob&&Array.isArray(job.events)?job.events:[];
   const events=matchingJob&&(job.status==="running"||liveEvents.length)?liveEvents:savedEvents;
   const filtered=events.filter(event=>event&&typeof event==="object"&&!Array.isArray(event));
@@ -1184,7 +1226,7 @@ function onlineEditorTimelineEvents(job,saved,libraryId){
 }
 
 function resetOnlineEditorTimelineRenderCache(){
-  onlineEditorTimelineRenderCache={libraryId:null,events:null,emptyState:null,signature:null};
+  onlineEditorTimelineRenderCache={libraryId:null,sessionId:null,events:null,emptyState:null,signature:null};
 }
 
 function onlineEditorTimelineTextStamp(value){
@@ -1204,8 +1246,8 @@ function onlineEditorTimelineProjection(events,source){
   ]);
 }
 
-function onlineEditorTimelineSource(job,saved,libraryId){
-  const live=job?.libraryId===libraryId&&(job.status==="running"||(Array.isArray(job.events)&&job.events.length));
+function onlineEditorTimelineSource(job,saved,libraryId,sessionId){
+  const live=job?.libraryId===libraryId&&(!job?.sessionId||job.sessionId===sessionId)&&(job.status==="running"||(Array.isArray(job.events)&&job.events.length));
   if(live)return`job:${job.id||job.startedAt||"active"}`;
   return`saved:${onlineWorldEditorProject?.revision??""}:${saved?.baseFingerprint||""}:${saved?.startedAt||""}:${saved?.finishedAt||""}`;
 }
@@ -1267,20 +1309,22 @@ function onlineEditorTimelineView(event={}){
 function renderOnlineWorldEditorTimeline(job){
   const mount=document.querySelector("#online-editor-agent-result");
   if(!mount||!onlineEditorTimelineVisible())return;
-  const saved=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
-  const events=onlineEditorTimelineEvents(job,saved,selectedOnlineWorldEditorId);
-  const emptyState=!events.length&&job?.status==="running"&&job.libraryId===selectedOnlineWorldEditorId?"running":"idle";
-  if(onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.events===events&&onlineEditorTimelineRenderCache.emptyState===emptyState)return;
-  const projection=onlineEditorTimelineProjection(events,onlineEditorTimelineSource(job,saved,selectedOnlineWorldEditorId));
+  const saved=onlineEditorActiveSession()||onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
+  const sessionId=String(saved?.id||onlineEditorSessions().activeId||"");
+  const matchingJob=job?.libraryId===selectedOnlineWorldEditorId&&(!job?.sessionId||job.sessionId===sessionId);
+  const events=onlineEditorTimelineEvents(job,saved,selectedOnlineWorldEditorId,sessionId);
+  const emptyState=!events.length&&matchingJob&&job?.status==="running"?"running":"idle";
+  if(onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.sessionId===sessionId&&onlineEditorTimelineRenderCache.events===events&&onlineEditorTimelineRenderCache.emptyState===emptyState)return;
+  const projection=onlineEditorTimelineProjection(events,onlineEditorTimelineSource(job,saved,selectedOnlineWorldEditorId,sessionId));
   const signature=projection==null?null:`${emptyState}:${projection}`;
-  if(signature!=null&&onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.signature===signature){
+  if(signature!=null&&onlineEditorTimelineRenderCache.libraryId===selectedOnlineWorldEditorId&&onlineEditorTimelineRenderCache.sessionId===sessionId&&onlineEditorTimelineRenderCache.signature===signature){
     onlineEditorTimelineRenderCache.events=events;onlineEditorTimelineRenderCache.emptyState=emptyState;return;
   }
-  onlineEditorTimelineRenderCache={libraryId:selectedOnlineWorldEditorId,events,emptyState,signature};
+  onlineEditorTimelineRenderCache={libraryId:selectedOnlineWorldEditorId,sessionId,events,emptyState,signature};
   const follow=mount.scrollHeight-mount.scrollTop-mount.clientHeight<32;
   if(!events.length){
     const empty=document.createElement("span");empty.className="online-editor-timeline-empty";
-    empty.textContent=job?.status==="running"&&job.libraryId===selectedOnlineWorldEditorId?"正在准备开发环境…":"发送编辑目标后，这里会实时显示模型决策、工具执行、测试和评审结果。";
+    empty.textContent=matchingJob&&job?.status==="running"?"正在准备开发环境…":"当前会话还没有开发记录，输入目标后开始新的修改。";
     mount.replaceChildren(empty);return;
   }
   const openKeys=new Set(Array.from(mount.querySelectorAll?.("details[data-online-editor-event-key]")||[])
@@ -1316,8 +1360,10 @@ function renderOnlineWorldEditorProgress(job){
   renderOnlineWorldEditorTimeline(job);
   const mount=document.querySelector("#online-editor-agent-progress");
   const busy=job?.status==="running";
-  if(!busy&&(!job||job.libraryId!==selectedOnlineWorldEditorId)){
-    const saved=onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
+  const activeSession=onlineEditorActiveSession();
+  const matchingJob=job?.libraryId===selectedOnlineWorldEditorId&&(!job?.sessionId||job.sessionId===activeSession?.id);
+  if(!busy||!matchingJob){
+    const saved=activeSession||onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
     job=saved?.budget?{...saved,status:saved.status==="running"?"paused":saved.status,error:saved.status==="running"?"上次开发中断，发送同一目标可继续":saved.error}:null;
   }
   document.querySelector("#online-editor-run-agents").disabled=busy;
@@ -1326,7 +1372,9 @@ function renderOnlineWorldEditorProgress(job){
   document.querySelector("#online-editor-budget-points").disabled=busy||onlineWorldEditorSaving||document.querySelector("#online-editor-budget-unlimited").checked;
   const budget=job?.budget;
   document.querySelector("#online-editor-budget-usage").textContent=budget?`已结算 ${Number(budget.spent).toLocaleString()} / ${budget.limit===null?"无上限":Number(budget.limit).toLocaleString()} 积分 · ${budget.requests} 次请求${budget.unknownCharges?" · 有待确认费用":""}${budget.exceeded?" · 最后一次请求超额":""}`:"已结算 0 积分";
-  for(const id of ["online-editor-save","online-editor-publish","online-editor-open-projects","online-editor-test","online-editor-restore-candidate"])document.querySelector(`#${id}`).disabled=busy||onlineWorldEditorSaving||(id==="online-editor-restore-candidate"&&!onlineWorldEditorProject?.harnessCandidate?.files);
+  for(const id of ["online-editor-save","online-editor-publish","online-editor-open-projects","online-editor-test","online-editor-restore-candidate"])document.querySelector(`#${id}`).disabled=busy||onlineWorldEditorSaving||(id==="online-editor-restore-candidate"&&!activeSession?.files);
+  document.querySelector("#online-editor-new-session").disabled=busy||onlineWorldEditorSaving;
+  document.querySelectorAll("#online-editor-session-tabs button").forEach(button=>{button.disabled=busy||onlineWorldEditorSaving});
   document.querySelectorAll("#online-editor-workspace input,#online-editor-workspace textarea").forEach(el=>{el.disabled=busy||onlineWorldEditorSaving});
   document.querySelector("#online-editor-budget-points").disabled=busy||onlineWorldEditorSaving||document.querySelector("#online-editor-budget-unlimited").checked;
   if(!job){mount.innerHTML="<span>等待开发目标</span>";return}
@@ -1353,7 +1401,7 @@ function renderOnlineWorldEditorProgress(job){
 
 async function loadOnlineWorldEditorProject(libraryId){
   if(onlineWorldEditorSaving)return;
-  if(onlineWorldEditorDirty&&libraryId!==selectedOnlineWorldEditorId&&!await preserveOnlineEditorChanges())return;
+  if(libraryId!==selectedOnlineWorldEditorId&&onlineEditorHasPendingUpload()&&!await preserveOnlineEditorChanges())return;
   const sequence=++onlineWorldEditorLoadSequence;
   try{
     const project=await api.getOnlineWorldCardEditor(libraryId);
@@ -1385,6 +1433,12 @@ function syncOnlineWorldEditorFromForm(){
   const budgetPoints=document.querySelector("#online-editor-budget-unlimited").checked?null:Number(editorValue("online-editor-budget-points"));
   project.developmentSettings={...project.developmentSettings,budgetPoints};
   project.developmentGoal=editorValue("online-editor-agent-goal");
+  const sessions=onlineEditorSessions(project),activeSession=sessions.items.find(item=>item.id===sessions.activeId);
+  if(activeSession){
+    activeSession.goal=project.developmentGoal;
+    if(activeSession.status==="idle"&&["首次修改","新修改"].includes(activeSession.title)&&project.developmentGoal.trim())activeSession.title=project.developmentGoal.trim().replace(/\s+/g," ").slice(0,48);
+    activeSession.updatedAt=Date.now();
+  }
   project.harness={...project.harness,tests:parseEditorJson("online-editor-tests","验收场景")};
   project.updatedAt=Date.now();
   return project;
@@ -1416,11 +1470,71 @@ async function saveOnlineEditor(options={}){
     throw error;
   }finally{onlineWorldEditorSaving=false;renderOnlineWorldEditorProgress(state?.onlineWorldEditor)}
 }
-async function preserveOnlineEditorChanges(){
+function onlineEditorPendingUploadProjects(closeContext={}){
+  const projects=new Map();
+  for(const item of Array.isArray(closeContext?.pendingProjects)?closeContext.pendingProjects:[]){
+    const libraryId=String(item?.libraryId||"");
+    if(libraryId)projects.set(libraryId,{libraryId,title:String(item?.title||"未命名游戏"),isDraft:Boolean(item?.isDraft)});
+  }
+  if(onlineWorldEditorProject&&(onlineWorldEditorDirty||onlineWorldEditorProject.isDraft||onlineWorldEditorProject.publication?.status!=="synced")){
+    const libraryId=String(selectedOnlineWorldEditorId||onlineWorldEditorProject.draftId||"current");
+    projects.set(libraryId,{libraryId,title:String(onlineWorldEditorProject.card?.title||"未命名游戏"),isDraft:Boolean(onlineWorldEditorProject.isDraft)});
+  }
+  return Array.from(projects.values());
+}
+function onlineEditorHasPendingUpload(closeContext={}){
+  return onlineEditorPendingUploadProjects(closeContext).length>0;
+}
+
+async function preserveOnlineEditorDraftChanges(){
   if(onlineWorldEditorSaving)return false;
   if(!onlineWorldEditorDirty)return true;
   if(!await confirmAction("当前修改尚未保存。保存草稿后继续？取消将留在当前项目。",{title:"保存当前项目",acceptText:"保存并继续"}))return false;
   try{await saveOnlineEditor({publish:false});return true}catch(error){toast(friendlyError(error));return false}
+}
+
+async function preserveOnlineEditorChanges(closeContext={}){
+  if(onlineWorldEditorSaving)return false;
+  const pendingProjects=onlineEditorPendingUploadProjects(closeContext);
+  if(!pendingProjects.length)return true;
+  if(onlineWorldEditorExitPromise)return onlineWorldEditorExitPromise;
+  onlineWorldEditorExitPromise=(async()=>{
+    const currentPending=Boolean(onlineWorldEditorProject&&(onlineWorldEditorDirty||onlineWorldEditorProject.isDraft||onlineWorldEditorProject.publication?.status!=="synced"));
+    const currentId=String(selectedOnlineWorldEditorId||onlineWorldEditorProject?.draftId||"current");
+    const foreignPending=pendingProjects.some(item=>item.libraryId!==currentId);
+    const canPublishCurrent=currentPending&&!foreignPending;
+    const action=await api.chooseOnlineWorldEditorCloseAction({
+      dirty:onlineWorldEditorDirty,
+      isDraft:Boolean(onlineWorldEditorProject?.isDraft),
+      title:onlineWorldEditorProject?.card?.title||pendingProjects[0]?.title||"未命名游戏",
+      pendingCount:pendingProjects.length,
+      pendingTitles:pendingProjects.map(item=>item.title),
+      canPublishCurrent
+    });
+    if(action==="cancel")return false;
+    try{
+      if(action==="review"){
+        if(onlineWorldEditorDirty)await saveOnlineEditor({publish:false});
+        const target=pendingProjects.find(item=>item.libraryId!==currentId)||pendingProjects[0];
+        showPage("online-editor");
+        const result=await api.listOnlineWorldEditorProjects();
+        onlineWorldEditorProjects=Array.isArray(result?.projects)?result.projects:[];
+        onlineWorldEditorCards=onlineWorldEditorProjects.filter(item=>!item.isDraft);
+        renderOnlineWorldEditorProjects();
+        if(target?.libraryId){
+          selectedOnlineWorldEditorId=target.libraryId;
+          onlineWorldEditorProject=await api.getOnlineWorldCardEditor(target.libraryId);
+          renderOnlineWorldEditorProject();
+        }
+        toast("已打开待上传项目，请逐项检查并同步后再关闭");
+        return false;
+      }
+      if(action==="publish")await saveOnlineEditor({publish:true});
+      else if(action==="local"&&onlineWorldEditorDirty)await saveOnlineEditor({publish:false});
+      return true;
+    }catch(error){toast(friendlyError(error));return false}
+  })();
+  try{return await onlineWorldEditorExitPromise}finally{onlineWorldEditorExitPromise=null}
 }
 
 async function refreshOnlineWorldEditorCards(){
@@ -1948,6 +2062,13 @@ async function openOnlineWorldEditorProjects(){
   }catch(error){toast(friendlyError(error))}
 }
 document.querySelector("#online-editor-open-projects").addEventListener("click",openOnlineWorldEditorProjects);
+document.querySelector("#online-editor-new-session").addEventListener("click",()=>invoke(async()=>{
+  if(!await preserveOnlineEditorDraftChanges())return;
+  const result=await api.updateOnlineWorldEditorSession(selectedOnlineWorldEditorId,{action:"create",title:"新修改"});
+  onlineWorldEditorProject=result.project;renderOnlineWorldEditorProject();
+  document.querySelector("#online-editor-agent-goal")?.focus();
+  toast("已新建本地修改会话，原会话记录仍保留在当前项目中");
+}).catch(()=>{}));
 document.querySelector("#online-editor-create-blank").addEventListener("click",()=>invoke(async()=>{
   if(!await preserveOnlineEditorChanges())return;
   const result=await api.createOnlineWorldCardEditor();
@@ -1998,10 +2119,10 @@ document.querySelector("#online-editor-run-agents").addEventListener("click",()=
   if(budget!==null&&(!Number.isSafeInteger(budget)||budget<80000))throw new Error("开发预算至少为 80000 积分，或选择无上限");
   const goal=editorValue("online-editor-agent-goal").trim();
   if(!goal)throw new Error("请填写本次编辑目标");
-  await saveOnlineEditor({publish:false});
+  await saveOnlineEditor({publish:false,prepareHarness:true});
   const id=selectedOnlineWorldEditorId;
   try{
-    const result=await api.runOnlineWorldEditorAgents({libraryId:id,goal,budgetPoints:budget});
+    const result=await api.runOnlineWorldEditorAgents({libraryId:id,sessionId:onlineEditorSessions(project).activeId,goal,budgetPoints:budget});
     if(id===selectedOnlineWorldEditorId){onlineWorldEditorProject=result.project;renderOnlineWorldEditorProject()}
   }catch(error){
     if(id===selectedOnlineWorldEditorId){onlineWorldEditorProject=await api.getOnlineWorldCardEditor(id);renderOnlineWorldEditorProject()}
@@ -2012,8 +2133,8 @@ document.querySelector("#online-editor-run-agents").addEventListener("click",()=
 document.querySelector("#online-editor-stop").addEventListener("click",()=>api.cancelModelRequests("online-world-editor"));
 document.querySelector("#online-editor-test").addEventListener("click",()=>invoke(async()=>{await saveOnlineEditor({testOnly:true});toast("当前本地版本验收通过，尚未上传")}).catch(()=>{}));
 document.querySelector("#online-editor-restore-candidate").addEventListener("click",()=>invoke(async()=>{
-  if(!await preserveOnlineEditorChanges())return;
-  const latest=await api.getOnlineWorldCardEditor(selectedOnlineWorldEditorId),files=latest.harnessCandidate?.files;
+  if(!await preserveOnlineEditorDraftChanges())return;
+  const latest=await api.getOnlineWorldCardEditor(selectedOnlineWorldEditorId),activeSession=onlineEditorActiveSession(latest),files=activeSession?.files;
   if(!files)throw new Error("没有可恢复候选");
   if(!await confirmAction("将候选内容载入编辑器供检查？原始草稿保留至再次保存。",{title:"载入候选",acceptText:"载入"}))return;
   onlineWorldEditorProject=latest;renderOnlineWorldEditorProject();
@@ -2026,6 +2147,15 @@ document.querySelector("#online-editor-restore-candidate").addEventListener("cli
 }).catch(()=>{}));
 document.querySelector("#online-editor-budget-unlimited").addEventListener("change",event=>{document.querySelector("#online-editor-budget-points").disabled=event.target.checked;onlineWorldEditorDirty=true});
 document.querySelector("#online-editor-budget-points").addEventListener("input",()=>{onlineWorldEditorDirty=true});
+api.onAppCloseRequested(closeContext=>{
+  void (async()=>{
+    const requestId=String(closeContext?.requestId||"");
+    if(!await api.acknowledgeAppClose(requestId))return;
+    const approved=await preserveOnlineEditorChanges(closeContext);
+    await api.resolveAppClose(requestId,approved);
+  })().catch(async error=>{toast(friendlyError(error));await api.resolveAppClose(String(closeContext?.requestId||""),false).catch(()=>{})});
+});
+void api.notifyAppCloseReady().catch(()=>{});
 function finishOnlineWorldCardImport(result){
   renderOnlineWorldCards(result);
   if(result.canceled)return;

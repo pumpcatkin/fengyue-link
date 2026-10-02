@@ -94,17 +94,23 @@ const {
 const { normalizeCatalog, runAutoModel, rankEditorModels, abortError, assertActive, abortable } = require("./auto-model-router.cjs");
 const { packProgram, injectSandboxCsp } = require("./online-world-runtime.cjs");
 const { runEditorHarness } = require("./editor-harness-backend.cjs");
+const { gridParityPrompt } = require("./editor-grid-parity.cjs");
 const { testGameInBrowser } = require("./game-harness-browser.cjs");
 const { isStandalone } = require("./standalone-game.cjs");
 const { fingerprint: harnessFingerprint, projectFiles: harnessFiles } = require("./game-harness.cjs");
 const {
   editorProjectPath,
   normalizeEditorProject,
+  editorProjectHasPendingUpload,
+  markEditorProjectPendingUpload,
+  markEditorProjectUploaded,
   DEFAULT_EDITOR_PROGRAM,
   loadEditorProjects,
   saveEditorProjects,
   createEditorProject,
   createBlankEditorProject,
+  addEditorSession,
+  selectEditorSession,
   createImportedEditorProject,
   readOnlineWorldEditorImportFile
 } = require("./online-game-editor.cjs");
@@ -3981,7 +3987,9 @@ class AccountBackend {
       workName: String(companion.name || ""),
       authorAccountId: String(companion.authorAccountId || this.account.accountId || ""),
       isCurrentUserAuthor: true,
-      isDraft: Boolean(project?.isDraft || key.startsWith("draft::"))
+      isDraft: Boolean(project?.isDraft || key.startsWith("draft::")),
+      sessionCount: Array.isArray(project?.editorSessions?.items) ? project.editorSessions.items.length : 1,
+      uploadPending: editorProjectHasPendingUpload(project)
     };
   }
 
@@ -3995,7 +4003,9 @@ class AccountBackend {
       projects.push({
         ...summarizeGameCard(card, libraryId),
         isCurrentUserAuthor: true,
-        isDraft: false
+        isDraft: false,
+        sessionCount: Array.isArray(project?.editorSessions?.items) ? project.editorSessions.items.length : 1,
+        uploadPending: editorProjectHasPendingUpload(project)
       });
       if (!this.onlineWorldEditorProjects.projects[libraryId]) {
         this.onlineWorldEditorProjects.projects[libraryId] = project;
@@ -4033,13 +4043,19 @@ class AccountBackend {
       if (String(storedDraft.card?.companion?.authorAccountId || "") !== String(this.account.accountId || "")) {
         throw new Error("只有草稿创建者可以识别本地项目");
       }
-      return normalizeEditorProject(storedDraft);
+      const project = normalizeEditorProject(storedDraft);
+      this.onlineWorldEditorProjects.projects[requested] = project;
+      return project;
     }
     const card = this.onlineWorldCard(libraryId);
     this.assertOnlineWorldEditorOwner(card);
     const key = gameCardLibraryKey(card);
     const stored = this.onlineWorldEditorProjects.projects[key];
-    if (stored) return normalizeEditorProject(stored, card.companion.workId);
+    if (stored) {
+      const project = normalizeEditorProject(stored, card.companion.workId);
+      this.onlineWorldEditorProjects.projects[key] = project;
+      return project;
+    }
     const project = createEditorProject(card);
     this.onlineWorldEditorProjects.projects[key] = project;
     saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
@@ -4048,6 +4064,21 @@ class AccountBackend {
 
   async getOnlineWorldCardEditor(libraryId) {
     return this.onlineWorldEditorProject(libraryId);
+  }
+
+  async updateOnlineWorldEditorSession(libraryId, options = {}) {
+    this.assertToolLoggedIn();
+    const requested = String(libraryId || "");
+    if (this.onlineWorldEditorSessionKey && this.onlineWorldEditorJob?.libraryId === requested) {
+      throw new Error("开发任务运行中，请先停止再切换会话");
+    }
+    const project = this.onlineWorldEditorProject(requested);
+    const session = options.action === "create"
+      ? addEditorSession(project, { title: String(options.title || "新修改") })
+      : selectEditorSession(project, options.sessionId);
+    this.onlineWorldEditorProjects.projects[requested] = project;
+    saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
+    return { project, session };
   }
 
   persistEditedOnlineWorldCard(previousCard, nextCard) {
@@ -4080,6 +4111,11 @@ class AccountBackend {
   async saveOnlineWorldCardEditor(libraryId, project = {}, options = {}) {
     const requested = String(libraryId || "");
     const isDraft = requested.startsWith("draft::");
+    if (options.prepareHarness && gridParityPrompt(project?.developmentGoal) && !isDraft) {
+      throw Object.assign(new Error("猎艳疆土等价新游戏只能从“从零新建游戏卡”的空白草稿开始创建"), {
+        code: "EDITOR_GRID_PARITY_REQUIRES_BLANK_DRAFT"
+      });
+    }
     const current = isDraft ? null : this.onlineWorldCard(libraryId);
     if (current) this.assertOnlineWorldEditorOwner(current);
     if (isDraft && String(project?.card?.companion?.authorAccountId || this.account.accountId || "") !== String(this.account.accountId || "")) {
@@ -4090,6 +4126,7 @@ class AccountBackend {
     const stored = this.onlineWorldEditorProjects.projects[requested];
     if (Number(input.revision || 0) !== Number(stored?.revision || 0)) throw new Error("EDITOR_REVISION_CONFLICT：本地项目已有新版本，请重新载入后合并修改；当前编辑尚未覆盖文件");
     input.revision = Number(stored?.revision || 0) + 1;
+    markEditorProjectPendingUpload(input);
     if (stored?.harnessCandidate) input.harnessCandidate = stored.harnessCandidate;
     else delete input.harnessCandidate;
     input.pendingPublication = stored?.pendingPublication || null;
@@ -4191,7 +4228,7 @@ class AccountBackend {
       if (!this.onlineWorldCards.has(newKey)) throw new Error("新建游戏卡保存后回读失败");
     }
     const key = gameCardLibraryKey(saved);
-    this.onlineWorldEditorProjects.projects[key] = {
+    const publishedProject = {
       ...input,
       pendingPublication: null,
       isDraft: false,
@@ -4221,6 +4258,8 @@ class AccountBackend {
       },
       updatedAt: Date.now()
     };
+    markEditorProjectUploaded(publishedProject, publishedProject.updatedAt);
+    this.onlineWorldEditorProjects.projects[key] = publishedProject;
     if (isDraft) delete this.onlineWorldEditorProjects.projects[requested];
     if (current && key !== gameCardLibraryKey(current)) delete this.onlineWorldEditorProjects.projects[gameCardLibraryKey(current)];
     saveEditorProjects(this.onlineWorldEditorFile, this.onlineWorldEditorProjects.projects);
@@ -9417,7 +9456,106 @@ let releaseSecurity;
 let updateService;
 let profileInstanceLock = null;
 let shuttingDown = false;
+let mainWindowCloseApproved = false;
+let mainWindowCloseRendererReady = false;
+let mainWindowCloseRendererEverReady = false;
+let mainWindowCloseRequest = null;
 const DESKTOP_PAGE_PATH = path.resolve(__dirname, "desktop", "index.html");
+const MAIN_WINDOW_CLOSE_ACK_TIMEOUT_MS = 8000;
+
+function pendingEditorUploadProjects() {
+  return Object.entries(backend?.onlineWorldEditorProjects?.projects || {})
+    .filter(([, project]) => editorProjectHasPendingUpload(project))
+    .map(([libraryId, project]) => ({
+      libraryId,
+      title: String(project?.card?.title || project?.configuration?.app?.name || "未命名游戏"),
+      isDraft: Boolean(project?.isDraft || libraryId.startsWith("draft::"))
+    }));
+}
+
+function clearMainWindowCloseRequest() {
+  if (mainWindowCloseRequest?.timer) clearTimeout(mainWindowCloseRequest.timer);
+  mainWindowCloseRequest = null;
+}
+
+async function fallbackMainWindowClose(requestId, reason = "renderer-unavailable") {
+  const request = mainWindowCloseRequest;
+  if (!request || request.id !== requestId || request.fallbackOpen) return false;
+  request.fallbackOpen = true;
+  if (request.timer) clearTimeout(request.timer);
+  const pending = request.pendingProjects;
+  const messageBoxOptions = {
+    type: "warning",
+    title: "应用关闭确认",
+    message: pending.length ? `仍有 ${pending.length} 个编辑器项目尚未上传` : "应用界面暂时没有响应",
+    detail: pending.length
+      ? `本地记录已经保存：${pending.slice(0, 4).map(item => `《${item.title}》`).join("、")}${pending.length > 4 ? "等" : ""}。现在关闭会保留这些本地记录，稍后仍可继续上传；界面未响应期间尚未保存的表单修改可能不在其中。`
+      : "关闭确认未能由应用界面完成。现在关闭可能放弃尚未保存到本地的表单修改。",
+    buttons: ["取消关闭", "保留本地并关闭"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  };
+  const result = mainWindow && !mainWindow.isDestroyed()
+    ? await dialog.showMessageBox(mainWindow, messageBoxOptions)
+    : await dialog.showMessageBox(messageBoxOptions);
+  if (!mainWindowCloseRequest || mainWindowCloseRequest.id !== requestId) return false;
+  if (result.response !== 1) {
+    clearMainWindowCloseRequest();
+    return false;
+  }
+  clearMainWindowCloseRequest();
+  mainWindowCloseApproved = true;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  else app.quit();
+  return true;
+}
+
+function requestMainWindowClose() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindowCloseRequest) return false;
+  const pendingProjects = pendingEditorUploadProjects();
+  const request = mainWindowCloseRequest = {
+    id: crypto.randomUUID(),
+    pendingProjects,
+    acknowledged: false,
+    fallbackOpen: false,
+    timer: null
+  };
+  if (!mainWindowCloseRendererReady || mainWindow.webContents.isDestroyed()) {
+    if (!mainWindowCloseRendererEverReady && !pendingProjects.length) {
+      clearMainWindowCloseRequest();
+      mainWindowCloseApproved = true;
+      mainWindow.close();
+      return true;
+    }
+    void fallbackMainWindowClose(request.id);
+    return true;
+  }
+  request.timer = setTimeout(() => void fallbackMainWindowClose(request.id, "renderer-ack-timeout"), MAIN_WINDOW_CLOSE_ACK_TIMEOUT_MS);
+  try {
+    mainWindow.webContents.send("app:close-requested", { requestId: request.id, pendingProjects });
+  } catch {
+    void fallbackMainWindowClose(request.id, "renderer-send-failed");
+  }
+  return true;
+}
+
+function acknowledgeMainWindowClose(requestId) {
+  if (!mainWindowCloseRequest || mainWindowCloseRequest.fallbackOpen || mainWindowCloseRequest.id !== String(requestId || "")) return false;
+  mainWindowCloseRequest.acknowledged = true;
+  if (mainWindowCloseRequest.timer) clearTimeout(mainWindowCloseRequest.timer);
+  mainWindowCloseRequest.timer = null;
+  return true;
+}
+
+function resolveMainWindowClose(requestId, approved) {
+  if (!mainWindowCloseRequest || mainWindowCloseRequest.id !== String(requestId || "")) return false;
+  clearMainWindowCloseRequest();
+  if (!approved || !mainWindow || mainWindow.isDestroyed()) return false;
+  mainWindowCloseApproved = true;
+  mainWindow.close();
+  return true;
+}
 
 function closeAllApplicationWindows() {
   updateService?.shutdown();
@@ -9460,6 +9598,10 @@ function handleLocalIpc(channel, listener) {
 
 function createWindow(profileId = safeProfileId(argument("profile", "default"))) {
   Menu.setApplicationMenu(null);
+  mainWindowCloseApproved = false;
+  mainWindowCloseRendererReady = false;
+  mainWindowCloseRendererEverReady = false;
+  clearMainWindowCloseRequest();
   mainWindow = new BrowserWindow({
     width: 1440, height: 900, minWidth: 980, minHeight: 660,
     title: `${APPLICATION_NAME} · ${profileId}`,
@@ -9467,8 +9609,21 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
   mainWindow.on("page-title-updated", event => event.preventDefault());
+  mainWindow.on("close", event => {
+    if (mainWindowCloseApproved) return;
+    event.preventDefault();
+    requestMainWindowClose();
+  });
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
+  });
+  mainWindow.on("unresponsive", () => {
+    if (mainWindowCloseRequest) void fallbackMainWindowClose(mainWindowCloseRequest.id, "renderer-unresponsive");
+  });
+  mainWindow.webContents.on("did-start-loading", () => { mainWindowCloseRendererReady = false; });
+  mainWindow.webContents.on("render-process-gone", () => {
+    mainWindowCloseRendererReady = false;
+    if (mainWindowCloseRequest) void fallbackMainWindowClose(mainWindowCloseRequest.id, "renderer-gone");
   });
   guardDesktopNavigation(mainWindow.webContents);
   mainWindow.loadFile(DESKTOP_PAGE_PATH);
@@ -9502,8 +9657,10 @@ function createWindow(profileId = safeProfileId(argument("profile", "default")))
   backend.appendSessionLog("network", { event: "default-system-proxy", ...defaultProxyState });
   mainWindow.webContents.once("did-finish-load", () => void backend.bootstrap());
   mainWindow.on("closed", () => {
+    clearMainWindowCloseRequest();
     updateService?.shutdown();
     backend?.destroy();
+    mainWindow = null;
   });
 }
 
@@ -9519,6 +9676,36 @@ handleLocalIpc("backend:confirm-action", async (_event, options = {}) => {
   });
   return result.response === 1;
 });
+handleLocalIpc("online-world:choose-editor-close-action", async (_event, options = {}) => {
+  const pendingCount = Math.max(0, Number(options.pendingCount || 0));
+  const pendingTitles = Array.isArray(options.pendingTitles) ? options.pendingTitles.map(value => String(value || "")).filter(Boolean) : [];
+  const canPublishCurrent = options.canPublishCurrent !== false;
+  const buttons = canPublishCurrent
+    ? ["取消关闭", "仅保存，稍后上传", "保存并上传"]
+    : ["取消关闭", "保留本地并关闭", "打开编辑器处理"];
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    title: "项目尚未上传",
+    message: pendingCount > 1 ? `有 ${pendingCount} 个项目尚未上传` : "当前项目尚未上传，是否保存并上传？",
+    detail: canPublishCurrent
+      ? options.dirty
+        ? "当前表单修改将先保存到本机。选择“仅保存，稍后上传”会保留本地项目并继续关闭。"
+        : "当前项目已经保存在本机。选择“仅保存，稍后上传”会保留待上传状态并继续关闭。"
+      : `待上传项目${pendingTitles.length ? `：${pendingTitles.slice(0, 4).map(title => `《${title}》`).join("、")}${pendingTitles.length > 4 ? "等" : ""}` : "不止当前项目"}。可保留全部本地记录并关闭，或返回编辑器逐项检查上传。`,
+    buttons,
+    defaultId: 2,
+    cancelId: 0,
+    noLink: true
+  });
+  return result.response === 2 ? (canPublishCurrent ? "publish" : "review") : result.response === 1 ? "local" : "cancel";
+});
+handleLocalIpc("app:close-ready", () => {
+  mainWindowCloseRendererReady = true;
+  mainWindowCloseRendererEverReady = true;
+  return true;
+});
+handleLocalIpc("app:ack-close", (_event, requestId) => acknowledgeMainWindowClose(requestId));
+handleLocalIpc("app:resolve-close", (_event, requestId, approved) => resolveMainWindowClose(requestId, Boolean(approved)));
 handleLocalIpc("app:get-version", () => app.getVersion());
 handleLocalIpc("app:get-release-channel", () => RELEASE_CHANNEL);
 handleLocalIpc("app:open-official-release-page", () => shell.openExternal(OFFICIAL_RELEASE_PAGE));
@@ -9526,7 +9713,7 @@ handleLocalIpc("app:check-for-updates", () => updateService.checkNow());
 handleLocalIpc("app:request-update", () => updateService.requestUpdate());
 handleLocalIpc("app:get-author-info", () => publicAuthorInfo());
 handleLocalIpc("app:open-author-link", (_event, key) => shell.openExternal(configuredAuthorUrl(key)));
-handleLocalIpc("app:quit", () => app.quit());
+handleLocalIpc("app:quit", () => requestMainWindowClose());
 handleLocalIpc("backend:get-logs", () => backend.getSessionLogs());
 handleLocalIpc("backend:list-domain-candidates", () => currentDomainCandidates(backend.domainSelected ? backend.origin : null));
 handleLocalIpc("backend:list-domains", (_event, force) => discoverDomainStatuses(Boolean(force)));
@@ -9587,6 +9774,7 @@ handleLocalIpc("online-world:list-cards", () => backend.listOnlineWorldCards());
 handleLocalIpc("online-world:list-editor-projects", () => backend.listOnlineWorldEditorProjects());
 handleLocalIpc("online-world:create-editor-project", () => backend.createOnlineWorldCardEditor());
 handleLocalIpc("online-world:get-editor", (_event, libraryId) => backend.getOnlineWorldCardEditor(libraryId));
+handleLocalIpc("online-world:update-editor-session", (_event, libraryId, options) => backend.updateOnlineWorldEditorSession(libraryId, options || {}));
 handleLocalIpc("online-world:save-editor", (_event, libraryId, project, options) => backend.saveOnlineWorldCardEditor(libraryId, project || {}, options || {}));
 handleLocalIpc("online-world:run-editor-agents", (_event, payload) => backend.runOnlineWorldEditorAgents(payload || {}));
 handleLocalIpc("online-world:import-card", () => backend.importOnlineWorldCard());
@@ -9646,7 +9834,12 @@ app.whenReady().then(async () => {
   }
   createWindow(profileId);
 });
-app.on("before-quit", () => {
+app.on("before-quit", event => {
+  if (!mainWindowCloseApproved && mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    requestMainWindowClose();
+    return;
+  }
   if (shuttingDown) return;
   shuttingDown = true;
   closeAllApplicationWindows();

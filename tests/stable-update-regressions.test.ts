@@ -111,6 +111,7 @@ describe('editor durable drafts and conflict handling', () => {
       'online-editor-program': 'html', 'online-editor-agent-goal': 'goal', 'online-editor-budget-points': '10' };
     const context: any = vm.createContext({ onlineWorldEditorProject: { card: {}, configuration: original },
       editorValue: (id: string) => values[id], document: { querySelector: () => ({ checked: false }) },
+      onlineEditorSessions: () => ({ items: [], activeId: '' }),
       parseEditorJson: (id: string) => id === 'online-editor-config-json' ? { ...original, app: { ...original.app }, pre_prompt: 'raw edit' } : id === 'online-editor-world-book' ? [] : { scenarios: [] }
     });
     vm.runInContext(renderer.slice(renderer.indexOf('function syncOnlineWorldEditorFromForm('), renderer.indexOf('async function saveOnlineEditor(')), context);

@@ -21,6 +21,13 @@
 .online-editor-timeline-entry>details>summary{width:max-content;max-width:100%;cursor:pointer;color:#8fbad3;font-size:11px}
 .online-editor-timeline-entry>details>pre{max-height:280px;overflow:auto;margin:7px 0 0;padding:10px;border:1px solid #293847;background:#080d12;color:#b8ccd9;font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 #online-editor-save-state{font-size:12px;color:#aac5bc;overflow-wrap:anywhere}
+.online-editor-session-navigation{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px;border:1px solid #2b3d4b;border-radius:6px;background:#101a22;min-width:0}
+.online-editor-session-tabs{display:flex;gap:6px;min-width:0;overflow-x:auto;scrollbar-width:thin;flex:1}
+.online-editor-session-tabs button{flex:none;max-width:240px;display:grid;gap:2px;text-align:left;padding:7px 10px;border-color:#344b5d;background:#172633;color:#b9cbd7}
+.online-editor-session-tabs button.active{border-color:#69a6c8;background:#23475d;color:#f4fbff}
+.online-editor-session-tabs button b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.online-editor-session-tabs button small{font-size:10px;color:#86a0b1}
+#online-editor-new-session{flex:none;white-space:nowrap}
 #online-editor-workspace details{padding:8px 0;font-size:12px}
 #online-editor-workspace .online-editor-budget{flex-wrap:wrap;min-width:0}
 #online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto auto}
@@ -32,6 +39,8 @@
  #online-world-editor-page .online-editor-tabs button{flex:1 0 28%;min-width:0}
  #online-world-editor-page .online-editor-main{padding:12px 12px 0}
  #online-editor-workspace .online-editor-agent-dock{position:static}
+ .online-editor-session-navigation{align-items:stretch}
+ #online-editor-new-session{align-self:stretch}
  #online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto}
  #online-editor-workspace .online-editor-agent-dock-body textarea{grid-column:1/-1}
 }

@@ -4,11 +4,12 @@ const fs = require("node:fs");
 const { runGameHarness, fingerprint, projectFiles } = require("./game-harness.cjs");
 const { testGameInBrowser } = require("./game-harness-browser.cjs");
 const { rankEditorModels, editorModelTier, assertActive } = require("./auto-model-router.cjs");
-const { saveEditorProjects } = require("./online-game-editor.cjs");
+const { saveEditorProjects, activeEditorSession, selectEditorSession, updateEditorSession, markEditorProjectPendingUpload } = require("./online-game-editor.cjs");
 const { modelConfigSavePayload } = require("./online-world-service.cjs");
 const { atomicWriteJsonSync, readJsonWithBackupSync } = require("./runtime-utils.cjs");
 const { createBudget } = require("./harness-budget.cjs");
 const { isStandalone } = require("./standalone-game.cjs");
+const { gridParityPrompt, assertGridParityDraftSource, instantiateGridParityProject } = require("./editor-grid-parity.cjs");
 
 const HARNESS_UI_OMITTED_FIELDS = new Set([
   "analysis", "chainofthought", "internalreasoning", "privatereasoning", "reasoning", "thought", "thinking"
@@ -140,14 +141,66 @@ async function runEditorHarness(backend, payload = {}) {
   if (backend.onlineWorldEditorSessionKey) throw new Error("已有开发任务运行中，请等待或停止当前任务");
   const key = String(payload.libraryId || payload.cardId || "");
   const original = backend.onlineWorldEditorProject(key);
+  const goal = String(payload.goal || "").trim();
+  if (!goal) throw new Error("请输入游戏开发目标");
+  const parityRequested = gridParityPrompt(goal);
+  const identity = parityRequested ? {
+    libraryId: key,
+    accountId: backend.account.accountId,
+    origin: backend.origin
+  } : null;
+  if (identity) assertGridParityDraftSource(original, identity);
+  const requestedSessionId = String(payload.sessionId || original.editorSessions?.activeId || "");
+  const selectedSession = selectEditorSession(original, requestedSessionId || activeEditorSession(original)?.id);
+  if (identity) {
+    const startedAt = Date.now();
+    const job = backend.onlineWorldEditorJob = {
+      id: crypto.randomUUID(), libraryId: key, sessionId: selectedSession.id, status: "running", goal,
+      budget: { limit: payload.budgetPoints ?? original.developmentSettings?.budgetPoints ?? null, spent: 0, requests: 0, unknownCharges: 0, exceeded: false },
+      currentAgent: "版本化疆土模板", agents: [], events: [], startedAt
+    };
+    updateEditorSession(original, selectedSession.id, { goal, status: "running", startedAt, error: null, events: [] });
+    backend.emit();
+    try {
+      const next = instantiateGridParityProject(original, goal, identity);
+      updateEditorSession(next, selectedSession.id, {
+        ...(next.harness || {}), goal, status: "completed", error: null,
+        files: null, baseFingerprint: null, finishedAt: next.harness?.finishedAt || Date.now()
+      });
+      next.revision = Number(original.revision || 0) + 1;
+      next.updatedAt = Date.now();
+      markEditorProjectPendingUpload(next);
+      backend.onlineWorldEditorProjects.projects[key] = next;
+      saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
+      job.status = "completed";
+      job.currentAgent = null;
+      job.events = (next.harness?.events || []).map(summarizeHarnessEventForUi).filter(Boolean);
+      job.updatedAt = Date.now();
+      job.result = summarizeHarnessValueForUi({
+        status: "completed", mode: next.harness?.mode,
+        evidence: { passed: next.harness?.evidence?.passed === true },
+        review: { approved: next.harness?.review?.approved === true, summary: next.harness?.review?.summary }
+      }, "result");
+      backend.emit();
+      return { project: next, draft: next.harness };
+    } catch (error) {
+      job.status = "failed";
+      job.error = summarizeHarnessValueForUi(String(error?.message || error), "error");
+      job.currentAgent = null;
+      job.updatedAt = Date.now();
+      updateEditorSession(original, selectedSession.id, { goal, status: "failed", error: error.message, finishedAt: Date.now() });
+      backend.onlineWorldEditorProjects.projects[key] = original;
+      saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
+      backend.emit();
+      throw error;
+    }
+  }
   if (!isStandalone(original.program?.html)) throw Object.assign(new Error("当前自动开发仅支持单人运行时；疆土需专项宿主验收，未产生模型费用"), { code: "HARNESS_CAPABILITY", retryable: false });
   const budget = createBudget(payload.budgetPoints === undefined ? original.developmentSettings?.budgetPoints : payload.budgetPoints);
   original.developmentSettings = { ...original.developmentSettings, budgetPoints: budget.snapshot().limit };
   backend.onlineWorldEditorProjects.projects[key] = original;
   saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
   const baseFingerprint = fingerprint(projectFiles(original));
-  const goal = String(payload.goal || "").trim();
-  if (!goal) throw new Error("请输入游戏开发目标");
   const id = crypto.randomUUID(), controller = new AbortController();
   backend.editorHarnessController = controller;
   backend.onlineWorldEditorSessionKey = id;
@@ -159,14 +212,26 @@ async function runEditorHarness(backend, payload = {}) {
   };
   const cancel = () => backend.cancelAutoModels("online-world-editor");
   controller.signal.addEventListener("abort", cancel, { once: true });
-  const job = backend.onlineWorldEditorJob = { id, libraryId: key, status: "running", goal, budget: budget.snapshot(), currentAgent: "准备开发环境", agents: [], events: [], startedAt: Date.now() };
+  const startedAt = Date.now();
+  updateEditorSession(original, selectedSession.id, {
+    goal,
+    title: selectedSession.status === "idle" && !selectedSession.goal ? goal.replace(/\s+/g, " ").slice(0, 48) || selectedSession.title : selectedSession.title,
+    status: "running",
+    error: null,
+    budget: budget.snapshot(),
+    startedAt,
+    events: Array.isArray(selectedSession.events) ? selectedSession.events : []
+  });
+  backend.onlineWorldEditorProjects.projects[key] = original;
+  saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
+  const job = backend.onlineWorldEditorJob = { id, libraryId: key, sessionId: selectedSession.id, status: "running", goal, budget: budget.snapshot(), currentAgent: "准备开发环境", agents: [], events: [], startedAt };
   backend.emit();
   let checkpoint = null;
   try {
     const workId = await ensureHarnessWork(backend);
     check();
     const working = JSON.parse(JSON.stringify(original));
-    const candidate = original.harnessCandidate;
+    const candidate = selectedSession?.files ? selectedSession : original.harnessCandidate;
     if (candidate?.goal === goal && candidate.baseFingerprint === baseFingerprint && candidate.files) {
       working.program.html = candidate.files["program.html"];
       const config = JSON.parse(candidate.files["configuration.json"]);
@@ -182,6 +247,7 @@ async function runEditorHarness(backend, payload = {}) {
         if (fingerprint(projectFiles(current)) !== baseFingerprint) throw new Error("项目已被修改，开发结果保留在运行记录中；请重新发起任务");
         checkpoint = { ...value, goal, baseFingerprint };
         current.harnessCandidate = checkpoint;
+        updateEditorSession(current, selectedSession.id, { ...checkpoint, status: "running", error: null });
         backend.onlineWorldEditorProjects.projects[key] = current;
         saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
         job.events = value.events.map(summarizeHarnessEventForUi).filter(Boolean);
@@ -230,8 +296,18 @@ async function runEditorHarness(backend, payload = {}) {
     check();
     if (fingerprint(projectFiles(backend.onlineWorldEditorProject(key))) !== baseFingerprint) throw new Error("当前项目版本已变化，未覆盖手工修改");
     delete next.harnessCandidate;
+    updateEditorSession(next, selectedSession.id, {
+      ...(next.harness || {}),
+      goal,
+      status: "completed",
+      error: null,
+      files: null,
+      baseFingerprint: null,
+      finishedAt: next.harness?.finishedAt || Date.now()
+    });
     next.revision = Number(original.revision || 0) + 1;
     next.updatedAt = Date.now();
+    markEditorProjectPendingUpload(next);
     backend.onlineWorldEditorProjects.projects[key] = next;
     saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
     job.status = "completed";
@@ -249,13 +325,22 @@ async function runEditorHarness(backend, payload = {}) {
   } catch (error) {
     job.status = /^HARNESS_(BUDGET|BILLING|STALLED|CAPABILITY)/.test(error.code || "") ? "paused" : error.name === "AbortError" ? "cancelled" : "failed";
     job.error = summarizeHarnessValueForUi(String(error?.message || error || "未知开发错误"), "error");
-    if (checkpoint) {
-      checkpoint.status = job.status; checkpoint.error = error.message; checkpoint.budget = budget.snapshot();
-      const current = backend.onlineWorldEditorProjects.projects[key];
-      if (current?.harnessCandidate?.baseFingerprint === baseFingerprint) {
+    const current = backend.onlineWorldEditorProjects.projects[key];
+    if (current) {
+      if (checkpoint && current?.harnessCandidate?.baseFingerprint === baseFingerprint) {
+        checkpoint.status = job.status; checkpoint.error = error.message; checkpoint.budget = budget.snapshot();
         current.harnessCandidate = checkpoint;
-        saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
       }
+      updateEditorSession(current, selectedSession.id, {
+        ...(checkpoint || {}),
+        goal,
+        status: job.status,
+        error: error.message,
+        budget: budget.snapshot(),
+        events: checkpoint?.events || job.events,
+        finishedAt: Date.now()
+      });
+      saveEditorProjects(backend.onlineWorldEditorFile, backend.onlineWorldEditorProjects.projects);
     }
     throw error;
   } finally {

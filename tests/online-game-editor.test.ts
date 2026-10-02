@@ -17,6 +17,11 @@ const {
   ONLINE_WORLD_EDITOR_PLAYBOOK,
   createEditorProject,
   createBlankEditorProject,
+  addEditorSession,
+  selectEditorSession,
+  updateEditorSession,
+  editorProjectHasPendingUpload,
+  markEditorProjectPendingUpload,
   createImportedEditorProject,
   loadEditorProjects,
   normalizeEditorProject,
@@ -82,6 +87,65 @@ describe("online game editor projects", () => {
       expect(() => parseStructuredAgentAnswer(answer)).toThrow();
     }
     expect(() => parseStructuredAgentAnswer('{"summary":"done"}', "中枢", { synthesis: true })).toThrow("审查结论");
+  });
+
+  it("migrates the legacy single development history into persistent project sessions", () => {
+    const legacy = {
+      card: { title: "旧项目" },
+      harness: { status: "completed", goal: "第一次修改", events: [{ tool: "finish", summary: "第一次完成" }], finishedAt: 100 },
+      harnessCandidate: { status: "paused", goal: "第二次修改", events: [{ tool: "read_file", summary: "第二次未完成" }], files: { "program.html": "<main>draft</main>" }, startedAt: 200 }
+    };
+    const project = normalizeEditorProject(legacy);
+    expect(project.editorSessions.schema).toBe("fyow.game-card-editor-sessions/1");
+    expect(project.editorSessions.items).toHaveLength(2);
+    expect(project.editorSessions.items.map((item: any) => item.goal)).toEqual(["第一次修改", "第二次修改"]);
+    expect(project.editorSessions.activeId).toBe(project.editorSessions.items[1].id);
+
+    const reopened = normalizeEditorProject(legacy);
+    expect(reopened.editorSessions.items.map((item: any) => item.id)).toEqual(project.editorSessions.items.map((item: any) => item.id));
+    expect(selectEditorSession(reopened, project.editorSessions.items[0].id).goal).toBe("第一次修改");
+  });
+
+  it("normalizes legacy projects into memory on load and records interrupted sessions as paused", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-editor-legacy-sessions-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "projects.json");
+    writeFileSync(file, JSON.stringify({
+      schema: "fyow.game-card-editor-projects/1",
+      projects: {
+        legacy: {
+          revision: 2,
+          card: { title: "中断项目" },
+          editorSessions: { items: [{ goal: "继续生成地图", status: "running", events: [{ tool: "model" }] }] }
+        }
+      }
+    }));
+
+    const loaded = loadEditorProjects(file).projects.legacy;
+    expect(loaded.publication.status).toBe("pending");
+    expect(loaded.editorSessions.items[0]).toMatchObject({ status: "paused", error: expect.stringContaining("应用关闭前中断") });
+    const persisted = JSON.parse(readFileSync(file, "utf8")).projects.legacy;
+    expect(persisted.editorSessions.items[0].id).toBe(loaded.editorSessions.items[0].id);
+    expect(persisted.editorSessions.items[0].status).toBe("paused");
+  });
+
+  it("keeps independent local histories when creating and switching project sessions", () => {
+    const directory = mkdtempSync(join(tmpdir(), "fyow-editor-sessions-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "projects.json");
+    const project = createBlankEditorProject();
+    const first = project.editorSessions.items[0];
+    updateEditorSession(project, first.id, { goal: "建立地图", status: "completed", events: [{ tool: "finish", summary: "地图完成" }] });
+    const second = addEditorSession(project, { title: "角色修改" });
+    updateEditorSession(project, second.id, { goal: "新增角色", status: "paused", events: [{ tool: "model", summary: "角色处理中" }] });
+    selectEditorSession(project, first.id);
+    saveEditorProjects(file, { draft: project });
+
+    const loaded = loadEditorProjects(file).projects.draft;
+    expect(loaded.editorSessions.items).toHaveLength(2);
+    expect(loaded.editorSessions.activeId).toBe(first.id);
+    expect(loaded.editorSessions.items[0].events[0].summary).toBe("地图完成");
+    expect(loaded.editorSessions.items[1].events[0].summary).toBe("角色处理中");
   });
 
   it("keeps all prompt sections visible in the normalized project snapshot", () => {
@@ -326,7 +390,7 @@ describe("editor harness dispatch", () => {
     }));
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-      readOnlineWorldEditorImportFile, createImportedEditorProject, saveEditorProjects
+      readOnlineWorldEditorImportFile, createImportedEditorProject, saveEditorProjects, editorProjectHasPendingUpload
     });
     const backend = Object.assign(Object.create(Backend.prototype), {
       account: { accountId: "current-account-id" },
@@ -363,7 +427,7 @@ describe("editor harness dispatch", () => {
     const harness = require("../electron/game-harness.cjs");
     const source = readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
     const Backend = vm.runInNewContext(`${source.slice(source.indexOf("class AccountBackend"), source.indexOf("let mainWindow;"))}; AccountBackend`, {
-      normalizeEditorProject, saveEditorProjects, summarizeGameCard: cards.summarizeGameCard,
+      normalizeEditorProject, saveEditorProjects, summarizeGameCard: cards.summarizeGameCard, markEditorProjectPendingUpload,
       harnessFingerprint: harness.fingerprint, harnessFiles: harness.projectFiles
     });
     const card = createBundledGridCard(), project = createEditorProject(card);

@@ -26,9 +26,19 @@ describe('non-DOM generation and stop transport', () => {
   });
   it.each([404, 405])('falls back only after an absent generation route (%s)', async status => {
     const fetch = vi.fn().mockResolvedValueOnce(new Response('', { status })).mockResolvedValueOnce(new Response(complete()));
-    await requestPlatformModel({ ...base, fetch, conversationId: 'c1', messageId: 'm1', isRefresh: true });
+    await requestPlatformModel({ ...base, fetch, conversationId: 'c1', messageId: 'm1', createdAt: 3, isRefresh: true });
     expect(fetch.mock.calls[1]![0]).toBe('https://example.invalid/console/api/installed-apps/app/chat-messages');
-    expect(fetch.mock.calls[0]![1].body).toBe(fetch.mock.calls[1]![1].body);
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).toMatchObject({ message_id: 'm1', message_created_at: 3, is_refresh: true });
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).not.toHaveProperty('created_at');
+    expect(JSON.parse(fetch.mock.calls[1]![1].body)).toMatchObject({ message_id: 'm1', created_at: 3, is_refresh: true });
+    expect(JSON.parse(fetch.mock.calls[1]![1].body)).not.toHaveProperty('message_created_at');
+  });
+  it('uses the native Go refresh timestamp field on the primary send route', async () => {
+    const fetch = vi.fn(async () => new Response(complete()));
+    await requestPlatformModel({ ...base, fetch, conversationId: 'c1', messageId: 'm1', createdAt: 3, isRefresh: true });
+    const sent = JSON.parse((fetch.mock.calls[0] as any)[1].body);
+    expect(sent).toMatchObject({ conversation_id: 'c1', message_id: 'm1', message_created_at: 3, is_refresh: true });
+    expect(sent).not.toHaveProperty('created_at');
   });
   it.each([401, 403, 429, 500, 502])('does not dispatch another generation after HTTP %s', async status => {
     const fetch = vi.fn(async () => Response.json({ message: 'failed' }, { status }));
@@ -41,6 +51,12 @@ describe('non-DOM generation and stop transport', () => {
   it('preserves automatic model switching for explicit JSON business rejections', async () => {
     const fetch = vi.fn(async () => Response.json({ code: 12345, message: 'model unavailable' }));
     await expect(requestPlatformModel({ ...base, fetch })).rejects.toMatchObject({ retryable: true, requestRejected: true });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it('stops automatic retries for deterministic refresh contract rejections', async () => {
+    const fetch = vi.fn(async () => Response.json({ code: 40001, message: '需要消息时间' }));
+    await expect(requestPlatformModel({ ...base, fetch, conversationId: 'c1', messageId: 'm1', isRefresh: true }))
+      .rejects.toMatchObject({ retryable: false, requestRejected: true });
     expect(fetch).toHaveBeenCalledOnce();
   });
   it('accepts a stopped empty stream only after the server acknowledges stopping', async () => {
@@ -70,6 +86,12 @@ describe('non-DOM generation and stop transport', () => {
 
 describe('pinned message mutations', () => {
   const params = { appId: 'app', conversationId: 'c1', id: 'm1', action: 'edit', answer: 'new' };
+  it('reads the platform message timestamp across Go and legacy record shapes', () => {
+    expect(operations.messageCreatedAt({ message_created_at: '7' })).toBe(7);
+    expect(operations.messageCreatedAt({ created_at: 3 })).toBe(3);
+    expect(operations.messageCreatedAt({ createdAt: 4 })).toBe(4);
+    expect(operations.messageCreatedAt({})).toBeNull();
+  });
   it('edits raw long HTML through PATCH and verifies the exact ID', async () => {
     const answer = '<div>中文😀</div>'.repeat(10000);
     const api = vi.fn().mockResolvedValueOnce({ data: [message] }).mockResolvedValueOnce({}).mockResolvedValueOnce({ data: [{ ...message, answer }] });
@@ -204,6 +226,13 @@ describe('backend API integration', () => {
     await expect(b.performLatestPlatformMessageAttempt('refresh', '', { signal: controller.signal })).resolves.toMatchObject({ output: 'refreshed' });
     expect(reads).toBe(3);
     expect(b.requestPlatformModel.mock.calls[0][0]).toMatchObject({ conversationId: 'c1', messageId: 'm1', isRefresh: true, createdAt: 3, signal: controller.signal });
+  });
+  it('stops before dispatch when the selected refresh record has no platform timestamp', async () => {
+    const b = backend();
+    b.readPlatformMessages = async () => [{ ...message, created_at: undefined }];
+    b.requestPlatformModel = vi.fn();
+    await expect(b.performLatestPlatformMessageAttempt('refresh')).rejects.toMatchObject({ retryable: false, requestRejected: true });
+    expect(b.requestPlatformModel).not.toHaveBeenCalled();
   });
   it('never sends a model request to repair a missing guest result record', async () => {
     const b = backend(); b.readPlatformMessages = async () => []; b.requestPlatformModel = vi.fn();

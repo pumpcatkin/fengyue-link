@@ -85,6 +85,55 @@ describe("guest output presentation", () => {
   });
 });
 
+describe("linked message-operation synchronization", () => {
+  it("fans a completed host operation out to every visitor chat", async () => {
+    const instance = backend();
+    instance.room = { id: "r", role: "host", memberChatIds: { guestA: "chat-a", guestB: "chat-b" } };
+    instance.sendLargeRoomPacket = vi.fn(async () => true);
+    const payload = { operationId: "op", action: "refresh", round: 1, output: "new output" };
+
+    await instance.broadcastRoomPacket("message-operation", payload, true);
+
+    expect(instance.sendLargeRoomPacket.mock.calls).toEqual([
+      ["chat-a", "message-operation", "r", payload],
+      ["chat-b", "message-operation", "r", payload]
+    ]);
+  });
+
+  it.each([
+    ["refresh", "edit", "new output"],
+    ["delete", "delete", ""]
+  ])("maps guest %s to a platform %s on the pinned latest record", async (action, platformAction, output) => {
+    const instance = backend();
+    instance.performLatestPlatformMessageOperation = vi.fn(async () => ({ operation: platformAction }));
+
+    await instance.syncGuestMessageOperation({ operationId: "op", action, output }, { maxAttempts: 1 });
+
+    expect(instance.performLatestPlatformMessageOperation).toHaveBeenCalledWith(platformAction, output, { operationKey: "op" });
+  });
+
+  it.each([
+    ["refresh", "new output", false],
+    ["delete", "", true]
+  ])("applies and acknowledges a synchronized guest %s", async (action, output, deleted) => {
+    const instance = backend();
+    instance.room.round.lastResult = { round: 1, output: "old output", deleted: false };
+    instance.syncGuestMessageOperation = vi.fn(async () => ({ operation: action }));
+
+    await instance.handleRoomPacket(packet("message-operation", {
+      operationId: "op",
+      action,
+      round: 1,
+      output,
+      completedAt: 10
+    }), "chat");
+
+    expect(instance.syncGuestMessageOperation).toHaveBeenCalledOnce();
+    expect(instance.room.round.lastResult).toMatchObject({ output, deleted });
+    expect(instance.sendRoomPacket.mock.calls.at(-1)[1].payload).toMatchObject({ operationId: "op", action, status: "ready" });
+  });
+});
+
 describe("host packet authorization", () => {
   it("accepts a member turn only from that member's authenticated private chat", async () => {
     const instance = backend();

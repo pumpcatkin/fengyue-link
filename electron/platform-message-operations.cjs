@@ -8,7 +8,16 @@ function messageId(record) {
   return String(record?.id ?? record?.message_id ?? record?.messageId ?? "").trim();
 }
 
+function messageCreatedAt(record) {
+  const value = record?.message_created_at ?? record?.messageCreatedAt ?? record?.created_at ?? record?.createdAt;
+  if (value == null || String(value).trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function recordTimestamp(record) {
+  const createdAt = messageCreatedAt(record);
+  if (createdAt != null) return createdAt;
   const value = record?.created_at ?? record?.createdAt ?? record?.updated_at ?? record?.updatedAt ?? 0;
   const number = Number(value);
   if (Number.isFinite(number)) return number;
@@ -96,6 +105,7 @@ async function mutatePlatformMessage(api, { appId, conversationId, id, action, a
 module.exports = {
   normalizeMessageText,
   messageId,
+  messageCreatedAt,
   recordTimestamp,
   isMessageRecord,
   latestMessageRecord,

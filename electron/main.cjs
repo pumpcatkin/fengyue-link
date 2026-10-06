@@ -84,6 +84,7 @@ const { preparePlatformTurn } = require("./platform-turn-preparation.cjs");
 const {
   normalizeMessageText,
   messageId,
+  messageCreatedAt,
   latestMessageRecord,
   findPreparedMessage,
   editMessageRequest,
@@ -7226,15 +7227,19 @@ class AccountBackend {
     }
     check();
     const id = messageId(record);
+    const createdAt = messageCreatedAt(record);
+    if (action === 'refresh' && createdAt == null) {
+      throw Object.assign(new Error('刷新记录缺少平台消息时间，已停止重复请求'), { retryable: false, requestRejected: true });
+    }
     this.appendSessionLog('message-operation', { event: 'server-operation-started', action, appId, conversationId, messageId: id });
     let result;
     if (action !== 'refresh') {
       await mutatePlatformMessage((path, options) => { check(); return this.platformChatApi(path, options); },
-        { appId, conversationId, id, action, answer: value }, { signal, readRecord: () => { check(); return this.readPlatformMessage(appId, conversationId, id, record.created_at ?? record.createdAt, { signal }); } });
+        { appId, conversationId, id, action, answer: value }, { signal, readRecord: () => { check(); return this.readPlatformMessage(appId, conversationId, id, createdAt, { signal }); } });
       result = { operation: action, output: action === 'edit' ? String(value) : '', deleted: action === 'delete', messageId: id, conversationId };
     } else {
       const generated = await this.requestPlatformModel({ workId: appId, conversationId, query: String(record.query || ''), messageId: id,
-        createdAt: record.created_at ?? record.createdAt, isRefresh: true, signal,
+        createdAt, isRefresh: true, signal,
         onEvent: detail => this.appendSessionLog('message-operation', { action, appId, ...detail }) });
       let verified = false;
       for (let attempt = 0; attempt < 12 && !verified; attempt++) {

@@ -3,6 +3,16 @@ const { abortable, abortError, assertActive } = require("./auto-model-router.cjs
 const { consumeModelEventStream, createConversationModelRequestPayload } = require("./model-stream.cjs");
 const { platformRequestError, isRateLimitMessage, retryAfterMs, RATE_LIMIT_MESSAGE } = require("./platform-transport.cjs");
 
+function isRequestContractRejection(message) {
+  const value = String(message || "");
+  return [
+    /需要.*(?:消息)?时间/i,
+    /(?:缺少|缺失|必填|不能为空|无效|错误).*(?:参数|字段|消息时间|时间戳|消息编号)/i,
+    /(?:参数|字段|消息时间|时间戳|消息编号).*(?:缺少|缺失|必填|不能为空|无效|错误)/i,
+    /\b(?:missing|required|invalid)\b.*\b(?:parameter|field|timestamp|message[_ -]?time|message[_ -]?id)\b/i
+  ].some(pattern => pattern.test(value));
+}
+
 async function requestPlatformModel({ fetch, origin, workId, query, files = [], headers, signal, onEvent = () => {},
   conversationId, messageId, createdAt, isRefresh = false, isUseRefreshCard, inputs = {}, stopAfterTask = false, allowEmpty = false }) {
   assertActive(signal);
@@ -11,8 +21,14 @@ async function requestPlatformModel({ fetch, origin, workId, query, files = [], 
   let receivedConversationId = null, receivedMessageId = null;
   const emit = detail => { try { onEvent(detail); } catch {} };
   const installed = `/console/api/installed-apps/${encodeURIComponent(workId)}/chat-messages`;
-  const request = { method: "POST", credentials: "include", cache: "no-store", headers,
-    signal: controller.signal, body: JSON.stringify(createConversationModelRequestPayload({ workId, query, files, conversationId, messageId, createdAt, isRefresh, isUseRefreshCard, inputs })) };
+  const legacyPayload = createConversationModelRequestPayload({ workId, query, files, conversationId, messageId, createdAt, isRefresh, isUseRefreshCard, inputs });
+  const goPayload = { ...legacyPayload };
+  if (Object.prototype.hasOwnProperty.call(goPayload, "created_at")) {
+    goPayload.message_created_at = goPayload.created_at;
+    delete goPayload.created_at;
+  }
+  const request = body => ({ method: "POST", credentials: "include", cache: "no-store", headers,
+    signal: controller.signal, body: JSON.stringify(body) });
   const stop = () => {
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
@@ -52,12 +68,12 @@ async function requestPlatformModel({ fetch, origin, workId, query, files = [], 
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     emit({ event: "request-dispatched", newConversation: !conversationId, conversationId: conversationId || null });
-    let response = await abortable(() => fetch(new URL("/go/api/apps/chat-messages", origin).href, request), signal);
+    let response = await abortable(() => fetch(new URL("/go/api/apps/chat-messages", origin).href, request(goPayload)), signal);
     if ([404, 405].includes(response.status)) {
       useGo = false;
       await response.body?.cancel?.().catch(() => {});
       emit({ event: "endpoint-fallback", status: response.status });
-      response = await abortable(() => fetch(new URL(installed, origin).href, request), signal);
+      response = await abortable(() => fetch(new URL(installed, origin).href, request(legacyPayload)), signal);
     }
     emit({ event: "response-received", status: response.status });
     if (!response.ok || /json/i.test(response.headers.get("content-type") || "")) {
@@ -70,7 +86,10 @@ async function requestPlatformModel({ fetch, origin, workId, query, files = [], 
       // A gateway failure may follow acceptance; it is not proof of rejection.
       error.requestRejected = [400, 401, 402, 403, 404, 405, 422, 429].includes(response.status);
       const businessRejected = response.ok && payload.code != null && !["", "0", "100000"].includes(String(payload.code));
-      if (businessRejected) { error.requestRejected = true; error.retryable = error.code !== 'PLATFORM_RATE_LIMIT'; }
+      if (businessRejected) {
+        error.requestRejected = true;
+        error.retryable = error.code !== 'PLATFORM_RATE_LIMIT' && !isRequestContractRejection(message);
+      }
       throw error;
     }
     const result = await consumeModelEventStream(response.body, { signal, allowEmpty,

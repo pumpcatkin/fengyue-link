@@ -1,14 +1,136 @@
-#online-world-editor-page{height:100%;min-width:0;overflow-y:auto;overflow-x:hidden}
-#online-world-editor-page .online-editor-layout{grid-template-columns:180px minmax(0,1fr);width:100%;min-width:0}
-#online-world-editor-page .online-editor-main{min-width:0;padding:20px 24px 0}
-#online-editor-workspace:not(.hidden){display:flex;flex-direction:column;min-width:0;min-height:calc(100vh - 160px)}
-#online-editor-workspace .online-editor-pane.active{flex:1;min-width:0}
+/* Codex-style editor shell: fixed chrome, one central scroll surface, fixed composer. */
+#online-world-editor-page{
+  display:grid;
+  width:100%;
+  height:100%;
+  min-width:0;
+  min-height:0;
+  grid-template-rows:auto minmax(0,1fr);
+  overflow:hidden;
+}
+#online-world-editor-page .online-editor-header{min-width:0;flex:none}
+#online-world-editor-page .online-editor-header>div:first-child{min-width:0}
+body.online-editor-mode #app-version{display:none}
+#online-world-editor-page .online-editor-layout{
+  display:grid;
+  width:100%;
+  min-width:0;
+  min-height:0;
+  grid-template-columns:220px minmax(0,1fr);
+  align-items:stretch;
+  overflow:hidden;
+}
+#online-world-editor-page .online-editor-sidebar{
+  position:relative;
+  top:auto;
+  align-self:stretch;
+  height:auto;
+  min-width:0;
+  min-height:0;
+  overflow:hidden;
+}
+#online-world-editor-page .online-editor-main{
+  display:grid;
+  min-width:0;
+  min-height:0;
+  grid-template-rows:minmax(0,1fr);
+  overflow:hidden;
+  padding:0;
+}
+#online-world-editor-page .online-editor-empty{height:100%;min-height:0;padding:24px}
+#online-editor-workspace:not(.hidden){
+  display:grid;
+  min-width:0;
+  min-height:0;
+  height:100%;
+  grid-template-rows:auto auto minmax(0,1fr) auto;
+  gap:0;
+  overflow:hidden;
+}
+#online-editor-workspace .online-editor-project-head{
+  min-width:0;
+  margin:0;
+  padding:16px 24px 12px;
+  border-bottom:1px solid #21313e;
+  background:#0d141b;
+}
+#online-editor-workspace .online-editor-project-head>div{min-width:0}
+#online-editor-workspace .online-editor-project-head span,
+#online-editor-workspace .online-editor-project-head small{overflow-wrap:anywhere}
+#online-editor-workspace .online-editor-session-navigation{
+  margin:0;
+  padding:8px 24px;
+  border-width:0 0 1px;
+  border-radius:0;
+  background:#101a22;
+}
+#online-editor-workspace .online-editor-scroll-region{
+  min-width:0;
+  min-height:0;
+  overflow-x:hidden;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  scrollbar-gutter:stable;
+  padding:20px 24px 28px;
+  background:#0d141b;
+}
+#online-editor-workspace .online-editor-pane-stack{min-width:0}
+#online-editor-workspace .online-editor-pane{max-width:none;min-width:0}
+#online-editor-workspace .online-editor-pane.active{display:block;min-width:0}
 #online-editor-workspace textarea{width:100%;max-width:100%;resize:vertical;overflow:auto;box-sizing:border-box}
 #online-editor-workspace .code-editor{min-height:340px;font:13px/1.65 Consolas,monospace;tab-size:2}
-#online-editor-workspace .online-editor-agent-dock{position:sticky;bottom:0;margin-top:20px;flex:none;border-radius:0;border-width:1px 0 0;background:var(--panel-bg,#16222c);z-index:2}
+#online-editor-workspace .online-editor-agent-records{
+  min-width:0;
+  margin-top:24px;
+  padding:16px;
+  border:1px solid #33495a;
+  border-radius:6px;
+  background:#111b25;
+  font-size:12px;
+}
+#online-editor-workspace .online-editor-agent-records>summary{cursor:pointer;color:#a9c0cf}
+#online-editor-agent-result{
+  display:grid;
+  min-width:0;
+  min-height:120px;
+  max-height:none;
+  align-content:start;
+  gap:0;
+  overflow:visible;
+  margin-top:10px;
+  padding:0;
+  background:#0b1117;
+  color:#c6d9e5;
+  font:12px/1.55 system-ui,"Microsoft YaHei",sans-serif;
+  white-space:normal;
+  overflow-wrap:anywhere;
+}
+#online-editor-workspace .online-editor-agent-dock{
+  position:relative;
+  bottom:auto;
+  z-index:2;
+  display:grid;
+  gap:10px;
+  min-width:0;
+  margin:0;
+  padding:12px 24px 16px;
+  border-width:1px 0 0;
+  border-radius:0;
+  background:var(--panel-bg,#111b25);
+  box-shadow:0 -12px 28px rgba(4,9,13,.28);
+}
 #online-editor-workspace .online-editor-agent-dock-head{align-items:flex-start}
-#online-editor-agent-progress{max-height:120px;overflow:auto;min-width:0;white-space:normal;overflow-wrap:anywhere}
-#online-editor-agent-result{max-height:min(52vh,560px);min-height:120px;overflow:auto;display:grid;align-content:start;gap:0;padding:0;background:#0b1117;color:#c6d9e5;font:12px/1.55 system-ui,"Microsoft YaHei",sans-serif;white-space:normal;overflow-wrap:anywhere}
+#online-editor-agent-progress{
+  max-height:none;
+  min-width:0;
+  overflow:visible;
+  white-space:normal;
+  overflow-wrap:anywhere;
+}
+#online-editor-workspace .online-editor-budget{flex-wrap:wrap;min-width:0}
+#online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) 72px 64px}
+#online-editor-workspace .online-editor-agent-dock-body textarea{min-height:58px;max-height:160px;resize:vertical}
+#online-editor-workspace .online-editor-agent-dock-body button{min-height:42px}
 .online-editor-timeline-empty{padding:18px;color:#8ea3b2;line-height:1.6}
 .online-editor-timeline-entry{display:grid;gap:7px;padding:11px 13px;border-left:3px solid #526577;border-bottom:1px solid #253440;background:#0d151d}
 .online-editor-timeline-entry:last-child{border-bottom:0}
@@ -19,28 +141,84 @@
 .online-editor-timeline-entry>p{margin:0;color:#b9cad6;line-height:1.65;white-space:pre-wrap}
 .online-editor-timeline-entry>details{padding:2px 0 0!important;color:#8fb0c5}
 .online-editor-timeline-entry>details>summary{width:max-content;max-width:100%;cursor:pointer;color:#8fbad3;font-size:11px}
-.online-editor-timeline-entry>details>pre{max-height:280px;overflow:auto;margin:7px 0 0;padding:10px;border:1px solid #293847;background:#080d12;color:#b8ccd9;font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.online-editor-timeline-entry>details>pre{max-height:280px;overflow:auto;overscroll-behavior:contain;margin:7px 0 0;padding:10px;border:1px solid #293847;background:#080d12;color:#b8ccd9;font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 #online-editor-save-state{font-size:12px;color:#aac5bc;overflow-wrap:anywhere}
-.online-editor-session-navigation{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px;border:1px solid #2b3d4b;border-radius:6px;background:#101a22;min-width:0}
+.online-editor-session-navigation{display:flex;align-items:center;gap:8px;min-width:0}
 .online-editor-session-tabs{display:flex;gap:6px;min-width:0;overflow-x:auto;scrollbar-width:thin;flex:1}
 .online-editor-session-tabs button{flex:none;max-width:240px;display:grid;gap:2px;text-align:left;padding:7px 10px;border-color:#344b5d;background:#172633;color:#b9cbd7}
 .online-editor-session-tabs button.active{border-color:#69a6c8;background:#23475d;color:#f4fbff}
 .online-editor-session-tabs button b{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .online-editor-session-tabs button small{font-size:10px;color:#86a0b1}
 #online-editor-new-session{flex:none;white-space:nowrap}
-#online-editor-workspace details{padding:8px 0;font-size:12px}
-#online-editor-workspace .online-editor-budget{flex-wrap:wrap;min-width:0}
-#online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto auto}
-#online-editor-workspace .online-editor-agent-dock-body textarea{min-height:76px;max-height:220px}
-@media(max-width:720px){
- #online-world-editor-page .online-editor-layout{display:block}
- #online-world-editor-page .online-editor-sidebar{position:static;min-height:0;max-height:none}
- #online-world-editor-page .online-editor-tabs{display:flex;flex-wrap:wrap;gap:6px}
- #online-world-editor-page .online-editor-tabs button{flex:1 0 28%;min-width:0}
- #online-world-editor-page .online-editor-main{padding:12px 12px 0}
- #online-editor-workspace .online-editor-agent-dock{position:static}
- .online-editor-session-navigation{align-items:stretch}
- #online-editor-new-session{align-self:stretch}
- #online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) auto}
- #online-editor-workspace .online-editor-agent-dock-body textarea{grid-column:1/-1}
+
+@media(max-width:900px){
+  #online-world-editor-page .online-editor-header{gap:12px;padding:14px 18px}
+  #online-world-editor-page .online-editor-layout{grid-template-columns:180px minmax(0,1fr)}
+  #online-editor-workspace .online-editor-project-head{padding-inline:18px}
+  #online-editor-workspace .online-editor-session-navigation{padding-inline:18px}
+  #online-editor-workspace .online-editor-scroll-region{padding:16px 18px 22px}
+  #online-editor-workspace .online-editor-agent-dock{padding:10px 18px 14px}
+}
+
+@media(max-width:800px){
+  #online-world-editor-page .online-editor-header{padding:12px 72px 12px 12px}
+  #online-world-editor-page .online-editor-header h1{font-size:22px}
+  #online-world-editor-page .online-editor-header p{font-size:11px}
+  #online-world-editor-page .online-editor-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%}
+  #online-world-editor-page .online-editor-actions button{min-width:0;padding-inline:6px}
+  #online-world-editor-page .online-editor-layout{
+    grid-template-columns:minmax(0,1fr);
+    grid-template-rows:auto minmax(0,1fr);
+  }
+  #online-world-editor-page .online-editor-sidebar{
+    position:static;
+    display:grid;
+    grid-template-columns:minmax(140px,190px) minmax(0,1fr);
+    grid-template-rows:auto;
+    gap:8px;
+    padding:8px;
+    border-right:0;
+    border-bottom:1px solid #293847;
+  }
+  #online-world-editor-page .online-editor-project-menu{align-content:center;padding:8px}
+  #online-world-editor-page .online-editor-project-menu span{display:none}
+  #online-world-editor-page .online-editor-project-menu b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #online-world-editor-page .online-editor-project-menu button{padding:6px 8px}
+  #online-world-editor-page .online-editor-tabs{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:4px;
+    min-width:0;
+  }
+  #online-world-editor-page .online-editor-tabs button{min-width:0;padding:7px 4px;text-align:center;font-size:10px}
+  #online-world-editor-page .online-editor-main{padding:0}
+  #online-editor-workspace .online-editor-project-head{flex-wrap:wrap;gap:8px;padding:10px 12px}
+  #online-editor-workspace .online-editor-project-head>div{flex:1 1 220px}
+  #online-editor-workspace .online-editor-project-head span{font-size:16px}
+  #online-editor-save-state{flex-basis:100%;font-size:10px}
+  #online-editor-workspace .online-editor-session-navigation{padding:7px 12px}
+  .online-editor-session-tabs button{max-width:180px;padding:6px 8px}
+  #online-editor-workspace .online-editor-scroll-region{padding:12px 12px 18px}
+  #online-editor-workspace .online-editor-agent-records{margin-top:18px;padding:12px}
+  #online-editor-workspace .online-editor-agent-dock{gap:8px;padding:10px 12px 12px}
+  #online-editor-workspace .online-editor-agent-dock-head{display:flex;gap:8px}
+  #online-editor-workspace .online-editor-agent-dock-head small{display:none}
+  #online-editor-agent-progress{max-width:52%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #online-editor-workspace .online-editor-agent-dock-body{grid-template-columns:minmax(0,1fr) 64px 56px}
+  #online-editor-workspace .online-editor-agent-dock-body textarea{grid-column:auto;min-height:48px;max-height:92px;resize:none}
+  #online-editor-workspace .online-editor-agent-dock-body button{min-width:0}
+  #online-editor-workspace .online-editor-budget{gap:8px;font-size:11px}
+  #online-editor-workspace .online-editor-budget small{display:none}
+  #online-editor-workspace .online-editor-budget input[type=number]{width:120px}
+  .online-editor-timeline-entry>header{flex-wrap:wrap;gap:4px}
+}
+
+@media(max-width:460px){
+  #online-world-editor-page .online-editor-header p{display:none}
+  #online-world-editor-page .online-editor-sidebar{grid-template-columns:minmax(0,1fr);gap:6px}
+  #online-world-editor-page .online-editor-project-menu{grid-template-columns:minmax(0,1fr) auto;align-items:center}
+  #online-world-editor-page .online-editor-project-menu button{grid-column:2;grid-row:1}
+  #online-editor-workspace .online-editor-project-head{padding-block:8px}
+  #online-editor-workspace .online-editor-session-navigation{display:grid;grid-template-columns:minmax(0,1fr) auto}
+  #online-editor-new-session{padding-inline:8px}
 }

@@ -694,6 +694,7 @@ async function drainGameFrames(){
 }
 function showPage(page){
   activePage=page;
+  document.body.classList.toggle("online-editor-mode",page==="online-editor");
   homePage.classList.toggle("hidden",page!=="home");
   profilesPage.classList.toggle("hidden",page!=="profiles");
   onlineWorldPage.classList.toggle("hidden",page!=="online-world");
@@ -1309,6 +1310,7 @@ function onlineEditorTimelineView(event={}){
 function renderOnlineWorldEditorTimeline(job){
   const mount=document.querySelector("#online-editor-agent-result");
   if(!mount||!onlineEditorTimelineVisible())return;
+  const scrollMount=mount.closest?.(".online-editor-scroll-region")||mount;
   const saved=onlineEditorActiveSession()||onlineWorldEditorProject?.harnessCandidate||onlineWorldEditorProject?.harness;
   const sessionId=String(saved?.id||onlineEditorSessions().activeId||"");
   const matchingJob=job?.libraryId===selectedOnlineWorldEditorId&&(!job?.sessionId||job.sessionId===sessionId);
@@ -1321,7 +1323,7 @@ function renderOnlineWorldEditorTimeline(job){
     onlineEditorTimelineRenderCache.events=events;onlineEditorTimelineRenderCache.emptyState=emptyState;return;
   }
   onlineEditorTimelineRenderCache={libraryId:selectedOnlineWorldEditorId,sessionId,events,emptyState,signature};
-  const follow=mount.scrollHeight-mount.scrollTop-mount.clientHeight<32;
+  const follow=scrollMount.scrollHeight-scrollMount.scrollTop-scrollMount.clientHeight<32;
   if(!events.length){
     const empty=document.createElement("span");empty.className="online-editor-timeline-empty";
     empty.textContent=matchingJob&&job?.status==="running"?"正在准备开发环境…":"当前会话还没有开发记录，输入目标后开始新的修改。";
@@ -1349,7 +1351,7 @@ function renderOnlineWorldEditorTimeline(job){
     fragment.append(row);
   }
   mount.replaceChildren(fragment);
-  if(follow)mount.scrollTop=mount.scrollHeight;
+  if(follow)scrollMount.scrollTop=scrollMount.scrollHeight;
 }
 
 function renderOnlineWorldEditorAgents(){

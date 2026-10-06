@@ -204,7 +204,7 @@ app.whenReady().then(async () => {
       return {rejected,finite,disabled,unbounded,restored:unlimited.checked};
     })()`);
     assert.deepEqual(budgetControls,{rejected:false,finite:120000,disabled:true,unbounded:null,restored:false});
-    for (const [width, height] of [[1280, 900], [420, 820]]) {
+    for (const [width, height] of [[1280, 900], [1024, 768], [720, 820], [420, 820]]) {
       win.setContentSize(width, height);
       await new Promise(resolve => setTimeout(resolve, 200));
       assert.equal(await win.webContents.executeJavaScript(`document.querySelector("#online-world-editor-page").scrollWidth > innerWidth + 1`), false);
@@ -215,9 +215,48 @@ app.whenReady().then(async () => {
           return rect.left<settings.right && rect.right>settings.left && rect.top<settings.bottom && rect.bottom>settings.top;
         });
       })()`), false, "editor command overlaps settings");
+      const editorLayout = await win.webContents.executeJavaScript(`(() => {
+        const selectors=["#online-world-editor-page",".online-editor-layout",".online-editor-main","#online-editor-workspace",".online-editor-scroll-region","#online-editor-agent-result"];
+        const nodes=selectors.map(selector=>document.querySelector(selector));
+        const scroll=document.querySelector(".online-editor-scroll-region");
+        const header=document.querySelector(".online-editor-header");
+        const sidebar=document.querySelector(".online-editor-sidebar");
+        const dock=document.querySelector(".online-editor-agent-dock");
+        const session=document.querySelector(".online-editor-session-navigation");
+        const fixedBefore=[header,sidebar,dock,session].map(node=>node.getBoundingClientRect());
+        scroll.scrollTop=scroll.scrollHeight;
+        const fixedAfter=[header,sidebar,dock,session].map(node=>node.getBoundingClientRect());
+        return {
+          pageHeight:[nodes[0].clientHeight,nodes[0].scrollHeight],
+          layoutHeight:[nodes[1].clientHeight,nodes[1].scrollHeight],
+          mainHeight:[nodes[2].clientHeight,nodes[2].scrollHeight],
+          workspaceHeight:[nodes[3].clientHeight,nodes[3].scrollHeight],
+          scrollHeight:[scroll.clientHeight,scroll.scrollHeight,scroll.scrollTop],
+          overflowY:nodes.map(node=>getComputedStyle(node).overflowY),
+          fixedDelta:fixedBefore.map((rect,index)=>({
+            top:Math.abs(rect.top-fixedAfter[index].top),
+            bottom:Math.abs(rect.bottom-fixedAfter[index].bottom)
+          })),
+          dockBottom:dock.getBoundingClientRect().bottom,
+          mainBottom:nodes[2].getBoundingClientRect().bottom,
+          viewportHeight:innerHeight,
+          appVersionVisible:getComputedStyle(document.querySelector("#app-version")).display!=="none"
+        };
+      })()`);
+      for (const [clientHeight, scrollHeight] of [editorLayout.pageHeight, editorLayout.layoutHeight, editorLayout.mainHeight, editorLayout.workspaceHeight]) {
+        assert.ok(scrollHeight <= clientHeight + 1, `editor shell unexpectedly scrolls at ${width}x${height}: ${clientHeight}/${scrollHeight}`);
+      }
+      assert.equal(editorLayout.overflowY.filter(value=>value==="auto"||value==="scroll").length,1,`editor must have one primary vertical scroller at ${width}x${height}`);
+      assert.equal(editorLayout.overflowY[4],"auto");
+      assert.equal(editorLayout.overflowY[5],"visible");
+      assert.ok(editorLayout.scrollHeight[0] > 80,`editor content viewport collapsed at ${width}x${height}`);
+      assert.ok(editorLayout.fixedDelta.every(delta=>delta.top < 1 && delta.bottom < 1),`fixed editor chrome moved with content at ${width}x${height}`);
+      assert.ok(Math.abs(editorLayout.dockBottom-editorLayout.mainBottom) < 1,`editor composer is not pinned to the main panel at ${width}x${height}`);
+      assert.ok(editorLayout.dockBottom <= editorLayout.viewportHeight + 1);
+      assert.equal(editorLayout.appVersionVisible,false);
+      fs.writeFileSync(path.join(output, `editor-bottom-${width}.png`), (await win.webContents.capturePage()).toPNG());
+      await win.webContents.executeJavaScript(`document.querySelector(".online-editor-scroll-region").scrollTop=0`);
       fs.writeFileSync(path.join(output, `editor-${width}.png`), (await win.webContents.capturePage()).toPNG());
-      await win.webContents.executeJavaScript(`document.querySelector(".online-editor-budget").scrollIntoView({block:"center"})`);
-      fs.writeFileSync(path.join(output, `editor-budget-${width}.png`), (await win.webContents.capturePage()).toPNG());
     }
     win.webContents.debugger.detach();
     fs.writeFileSync(path.join(output, "interaction-result.json"), JSON.stringify({
